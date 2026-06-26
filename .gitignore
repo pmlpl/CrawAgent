@@ -1,0 +1,53 @@
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 运行时输出
+output/
+crawl_progress.json
+
+# 敏感配置
+models.json
+.env
+
+# Cookie / 登录凭证
+*_cookies.txt
+cookies.txt
+youku_cookies.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# TRAE / Reasonix
+.reasonix/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 测试覆盖率
+htmlcov/
+.coverage
+.pytest_cache/
+
+# 日志
+*.log
+logs/
+
+# 测试脚本（仅保留 tests/ 目录中的正式测试）
+tests/__pycache__/
+tests/*.pyc
+!tests/__init__.py
+!tests/test_*.py
+

@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 背景圆 -->
+  <circle cx="256" cy="256" r="240" fill="#0a1628"/>
+  
+  <!-- 外圈光环 -->
+  <circle cx="256" cy="256" r="230" fill="none" stroke="#1e3a5f" stroke-width="4"/>
+  <circle cx="256" cy="256" r="220" fill="none" stroke="#0d2137" stroke-width="2"/>
+  
+  <!-- 网格背景装饰 -->
+  <g stroke="#1a3a5c" stroke-width="1" opacity="0.3">
+    <line x1="96" y1="136" x2="416" y2="136"/>
+    <line x1="96" y1="196" x2="416" y2="196"/>
+    <line x1="96" y1="256" x2="416" y2="256"/>
+    <line x1="96" y1="316" x2="416" y2="316"/>
+    <line x1="96" y1="376" x2="416" y2="376"/>
+    <line x1="136" y1="96" x2="136" y2="416"/>
+    <line x1="196" y1="96" x2="196" y2="416"/>
+    <line x1="256" y1="96" x2="256" y2="416"/>
+    <line x1="316" y1="96" x2="316" y2="416"/>
+    <line x1="376" y1="96" x2="376" y2="416"/>
+  </g>
+  
+  <!-- 数据节点装饰 -->
+  <circle cx="136" cy="136" r="4" fill="#00d4aa" opacity="0.6"/>
+  <circle cx="376" cy="136" r="4" fill="#00d4aa" opacity="0.6"/>
+  <circle cx="136" cy="376" r="4" fill="#00d4aa" opacity="0.6"/>
+  <circle cx="376" cy="376" r="4" fill="#00d4aa" opacity="0.6"/>
+  <circle cx="196" cy="196" r="3" fill="#00a8e8" opacity="0.4"/>
+  <circle cx="316" cy="196" r="3" fill="#00a8e8" opacity="0.4"/>
+  <circle cx="196" cy="316" r="3" fill="#00a8e8" opacity="0.4"/>
+  <circle cx="316" cy="316" r="3" fill="#00a8e8" opacity="0.4"/>
+  
+  <!-- 连接线 -->
+  <g stroke="#00d4aa" stroke-width="1.5" opacity="0.3" fill="none">
+    <path d="M136,136 L196,196"/>
+    <path d="M376,136 L316,196"/>
+    <path d="M136,376 L196,316"/>
+    <path d="M376,376 L316,316"/>
+    <path d="M196,196 L316,196"/>
+    <path d="M196,316 L316,316"/>
+    <path d="M196,196 L196,316"/>
+    <path d="M316,196 L316,316"/>
+  </g>
+  
+  <!-- 中心六边形主体 -->
+  <polygon points="256,140 356,198 356,314 256,372 156,314 156,198" 
+           fill="none" stroke="#00d4aa" stroke-width="3" opacity="0.8"/>
+  <polygon points="256,155 341,204 341,308 256,357 171,308 171,204" 
+           fill="#0d2137" stroke="#00a8e8" stroke-width="2" opacity="0.9"/>
+  
+  <!-- 内部连接线 -->
+  <g stroke="#00d4aa" stroke-width="1.5" opacity="0.5">
+    <line x1="256" y1="155" x2="256" y2="357"/>
+    <line x1="171" y1="204" x2="341" y2="308"/>
+    <line x1="341" y1="204" x2="171" y2="308"/>
+  </g>
+  
+  <!-- 中心爬虫/Agent图标 -->
+  <g transform="translate(256, 256)">
+    <!-- 身体 -->
+    <circle cx="0" cy="0" r="45" fill="#00d4aa" opacity="0.15"/>
+    <circle cx="0" cy="0" r="35" fill="none" stroke="#00d4aa" stroke-width="2"/>
+    
+    <!-- 头部 -->
+    <rect x="-18" y="-22" width="36" height="30" rx="6" fill="#00a8e8" opacity="0.9"/>
+    <rect x="-18" y="-22" width="36" height="30" rx="6" fill="none" stroke="#00d4aa" stroke-width="1.5"/>
+    
+    <!-- 眼睛 -->
+    <circle cx="-8" cy="-12" r="5" fill="#0a1628"/>
+    <circle cx="-8" cy="-12" r="2" fill="#00d4aa"/>
+    <circle cx="8" cy="-12" r="5" fill="#0a1628"/>
+    <circle cx="8" cy="-12" r="2" fill="#00d4aa"/>
+    
+    <!-- 天线 -->
+    <line x1="-10" y1="-22" x2="-18" y2="-40" stroke="#00d4aa" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="10" y1="-22" x2="18" y2="-40" stroke="#00d4aa" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="-18" cy="-40" r="3" fill="#00d4aa"/>
+    <circle cx="18" cy="-40" r="3" fill="#00d4aa"/>
+    
+    <!-- 蜘蛛腿/机械臂 -->
+    <g stroke="#00d4aa" stroke-width="2.5" stroke-linecap="round" fill="none">
+      <!-- 左上 -->
+      <path d="M-18,-10 L-38,-25 L-50,-15"/>
+      <!-- 左中 -->
+      <path d="M-18,0 L-42,0 L-52,8"/>
+      <!-- 左下 -->
+      <path d="M-18,8 L-38,18 L-48,28"/>
+      <!-- 右上 -->
+      <path d="M18,-10 L38,-25 L50,-15"/>
+      <!-- 右中 -->
+      <path d="M18,0 L42,0 L52,8"/>
+      <!-- 右下 -->
+      <path d="M18,8 L38,18 L48,28"/>
+    </g>
+    
+    <!-- 腿部节点 -->
+    <circle cx="-50" cy="-15" r="2.5" fill="#00a8e8"/>
+    <circle cx="-52" cy="8" r="2.5" fill="#00a8e8"/>
+    <circle cx="-48" cy="28" r="2.5" fill="#00a8e8"/>
+    <circle cx="50" cy="-15" r="2.5" fill="#00a8e8"/>
+    <circle cx="52" cy="8" r="2.5" fill="#00a8e8"/>
+    <circle cx="48" cy="28" r="2.5" fill="#00a8e8"/>
+    
+    <!-- 身体下半部分 -->
+    <path d="M-14,8 L-10,22 L10,22 L14,8 Z" fill="#00d4aa" opacity="0.8"/>
+    <path d="M-10,22 L-6,32 L6,32 L10,22 Z" fill="#00a8e8" opacity="0.7"/>
+    
+    <!-- 数据流装饰 -->
+    <circle cx="0" cy="45" r="3" fill="#00d4aa" opacity="0.8">
+      <animate attributeName="opacity" values="0.8;0.2;0.8" dur="2s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="-25" cy="38" r="2" fill="#00a8e8" opacity="0.6">
+      <animate attributeName="opacity" values="0.6;0.1;0.6" dur="2s" repeatCount="indefinite" begin="0.5s"/>
+    </circle>
+    <circle cx="25" cy="38" r="2" fill="#00a8e8" opacity="0.6">
+      <animate attributeName="opacity" values="0.6;0.1;0.6" dur="2s" repeatCount="indefinite" begin="1s"/>
+    </circle>
+  </g>
+  
+  <!-- 底部文字 CrawAgent -->
+  <text x="256" y="420" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="bold" fill="#00d4aa" letter-spacing="3">CrawAgent</text>
+  
+  <!-- 底部装饰线 -->
+  <line x1="180" y1="435" x2="332" y2="435" stroke="#00a8e8" stroke-width="2" opacity="0.6"/>
+  <circle cx="180" cy="435" r="3" fill="#00a8e8"/>
+  <circle cx="332" cy="435" r="3" fill="#00a8e8"/>
+</svg>
