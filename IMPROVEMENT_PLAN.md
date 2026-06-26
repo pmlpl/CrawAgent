@@ -20,7 +20,7 @@
 
 **当前问题**：[models.json](models.json) 中硬编码了真实 API Key：
 ```json
-"api_key": "tp-ctep2fiou7xu7jf9rcdpaybpw106y7p5zixpx9esfyhuorg7"
+"api_key": "tp-xxxx"
 ```
 
 **修改步骤**：
