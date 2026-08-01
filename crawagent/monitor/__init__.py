@@ -25,6 +25,7 @@ from crawagent.monitor.baseline import BaselineStore
 from crawagent.monitor.diff_detector import DiffDetector, DiffResult
 from crawagent.monitor.notifier import Notifier
 from crawagent.monitor.scheduler import MonitorScheduler
+from crawagent.monitor.monitor_lane import MonitorLane, get_monitor_lane
 
 __all__ = [
     "MonitorTask",
@@ -38,4 +39,6 @@ __all__ = [
     "DiffResult",
     "Notifier",
     "MonitorScheduler",
+    "MonitorLane",
+    "get_monitor_lane",
 ]

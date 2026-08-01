@@ -26,6 +26,7 @@ from crawagent.harness import (
     CrawlHarness, SessionManager, CrawlHooks, create_default_tools,
     create_antibot_hooks, CrawlEnv, RunResult,
 )
+from crawagent.security.security_hook import create_security_hooks
 from crawagent.core.database import get_db, close_db
 from loguru import logger
 
@@ -46,6 +47,8 @@ async def _get_harness() -> CrawlHarness:
         hooks = CrawlHooks()
         # 注册 AntiBot hooks（检测反爬 → 自动注入升级策略）
         create_antibot_hooks(hooks)
+        # 注册 Security hooks（拦截危险工具调用）
+        create_security_hooks(hooks)
         tool_registry = create_default_tools()
         _harness = CrawlHarness(
             session_manager=session_manager,

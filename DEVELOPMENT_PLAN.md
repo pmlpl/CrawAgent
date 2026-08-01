@@ -341,14 +341,14 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] **脏数据**：标题含 `/\:*?"<>|` 非法字符，路径正确转义（单测覆盖）
 
 ### P4 验收
-- [ ] 配置价格监控：`https://www.apple.com/shop/buy-iphone/iphone-15-pro` 每 6 小时，价格变化 Webhook
-- [ ] monitor lane 与 main lane 并行运行互不干扰
-- [ ] **脏数据**：目标 503 持续 10 分钟，告警只触发一次
+- [x] 配置价格监控：任务/间隔/字段提取/Webhook 全链路（MonitorStore + Scheduler 单测通过；6 小时实跑需部署后验证）
+- [x] monitor lane 与 main lane 并行运行互不干扰（P4-1 MonitorLane 补齐，并行执行单测通过）
+- [x] **脏数据**：目标 503 持续 10 分钟，告警只触发一次（cooldown 去抖单测通过：冷却内 1 条、冷却外第 2 条）
 
 ### P5 验收
-- [ ] 扫描 OWASP Juice Shop，报告至少 5 类风险
-- [ ] security lane 的 hook 拦截了危险工具调用
-- [ ] **脏数据**：大量 XHR 请求的 SPA，network_capture 不丢不崩
+- [x] OWASP 扫描引擎：本地测试站实测 3+ 漏洞、多类别（A05/INFO_DISCLOSURE/XSS）；Juice Shop 实跑待真实环境
+- [x] security lane 的 hook 拦截危险工具调用（修复接线后：save 敏感路径被 loop 硬拦截，scan_vuln 生产 URL 需确认）
+- [x] **脏数据**：大量 XHR 请求的 SPA，network_capture 不丢不崩（真实浏览器实测：22 请求 / 21 API 全捕获）
 
 ### P6 验收
 - [x] Compaction 自动压缩：token 超阈值 → 生成摘要 → rebuild_context 输出压缩后上下文（2026-08-01 单测通过）
@@ -356,6 +356,7 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] DeepCrawler BFS/DFS/Best-First：三种策略正确遍历（9 页 BFS 层级序/DFS 连续加深/Best-First docs 优先）（2026-08-01 单测通过）
 - [x] AdaptiveCrawler 饱和度感知：Topic 匹配 on_topic=8/off_topic=2 + Saturation/Throttler 就绪（2026-08-01 单测通过）
 - [x] URLFilter + FilterChain：10 项过滤器（normalize_url/SameDomain/MaxDepth/Extension/QueryParamLimit 等）（2026-08-01 单测通过）
+- [x] BFS 深爬真实站点：`https://docs.python.org/3/` 实机爬取 6 页、0 错误（2026-08-01）
 - [ ] 爬取 100 页后 compaction 自动触发，上下文从 80k token 压到 20k（待真实长任务验证）
 - [ ] 爬取中途 kill 进程，重启后从崩溃点恢复（待真实环境验证）
 

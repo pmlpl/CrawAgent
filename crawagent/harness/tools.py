@@ -1240,8 +1240,16 @@ def _summarize(result: Dict, keys: List[str]) -> Dict[str, Any]:
 
 # 暴露给 LLM 的工具名
 # 注意：crawl/extract/analyze/save 不直接暴露给 LLM，只通过 Supervisor 编排
-# LLM 只能看到 "supervisor" 这一个入口工具
-LLM_CALLABLE_TOOLS = {"supervisor", "search"}
+# supervisor/search 为基础；monitor/check_change/scan_vuln/fix_issue 为 P4/P5 自主能力
+# （危险调用由 SecurityHook 拦截/确认）
+LLM_CALLABLE_TOOLS = {
+    "supervisor",
+    "search",
+    "monitor",
+    "check_change",
+    "scan_vuln",
+    "fix_issue",
+}
 
 
 _JSON_TYPE_MAP = {

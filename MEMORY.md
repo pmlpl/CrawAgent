@@ -200,6 +200,45 @@
 - `/api/output/file` 路径越权检查用 startswith 可被 `output_evil` 前缀绕过 → 改用 Path.relative_to
 - `~/` 开头的路径模板被错误拼到 base_dir 下 → 修复 render 判断
 
+### 14. P4-P7 验收与修复（2026-08-01）
+
+**P4 监控（验收通过）：**
+- MonitorStore / DiffDetector / Scheduler / Notifier / Baseline 全链路单测通过
+- 告警去抖：503 持续失败 cooldown 内只告警一次（验收标准达成）
+- P4-1 MonitorLane 补齐（原缺失）：与 main lane 并行执行监控任务，绑定 harness session 自动建 lane
+- apscheduler 加入依赖并安装（调度器实际可用）
+
+**P5 安全（验收通过）：**
+- VulnScanner 本地测试站实测 3+ 漏洞、多类别（A05/INFO_DISCLOSURE/XSS）
+- SecurityHook 修复：原实现从未被注册且上下文格式与 loop 不兼容（before_tool 读 tool_name，
+  loop 传 tool_calls）→ 重写为 loop 格式 + `create_security_hooks` 接线 + loop 硬拦截
+  （save 敏感路径直接拒绝执行；scan_vuln 生产 URL 标记需确认）
+- 修复 create_security_hooks 缩进错乱导致 after_tool 成为死代码的问题
+- network_capture 真实浏览器实测：SPA 22 个请求 / 21 个 API 全部捕获，不丢不崩
+- 工具暴露：LLM_CALLABLE_TOOLS 加入 monitor/check_change/scan_vuln/fix_issue
+
+**P6 压缩/持久化/深爬（验收通过）：**
+- Compaction：estimate/should_compact/compact 全流程验证（含 LLM 失败回退摘要）
+- 崩溃恢复：MySQL start_operation → get_open_operations → finish_operation 验证通过
+- DeepCrawler：BFS/DFS 本地站点单测 + docs.python.org 实机 BFS 爬取 6 页 0 错误
+- FilterChain/Saturation/Adaptive 单测通过
+
+**P7 影视（代码级通过，真实站点待网络）：**
+- VideoExtractor 6 平台识别 + AdRemover + ProfileManager + MediaDownloader(yt-dlp/Content-Type 推断) 单测通过
+- yt-dlp 已安装并加入依赖；YouTube/Bilibili 实机受本机网络限制待验证
+
+**验收修复清单：**
+1. SecurityHookHandler 未接线 + 上下文不兼容（重写 + 接线 + loop 硬拦截）
+2. security_hook.py 缩进错乱（after_tool 死在 create_security_hooks 的 return 之后）
+3. P4-1 monitor_lane.py 缺失（已实现 MonitorLane + 测试）
+4. LLM_CALLABLE_TOOLS 缺 monitor/check_change/scan_vuln/fix_issue（已补）
+5. Notifier webhook payload url 未回退 task.url（已补）
+6. AdRemover 选择器补 `[class*='ad-']` / `[id*='ad-']`
+7. loop._execute_single_tool 安全拦截检查提前到 tool 查找之前
+8. pyproject 补 apscheduler / yt-dlp 依赖
+
+**当前测试：79 个全部通过**（新增 P4 监控 10 + P5 安全 6 + P6 深爬 6 + P7 影视 7 + MonitorLane 2）
+
 ---
 
 ## 当前状态

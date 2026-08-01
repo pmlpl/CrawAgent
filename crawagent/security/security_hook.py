@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -58,12 +59,73 @@ class SecurityHookHandler:
         self._anomalies: List[Dict[str, Any]] = []
 
     async def before_tool(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """before_tool：拦截危险工具调用
+        """before_tool：拦截危险工具调用。
 
-        返回修改后的 context：
-        - 增加 require_confirmation 字段，标记需要用户确认
-        - 增加 warning 字段，附加告警信息到工具结果
+        兼容两种上下文：
+        - loop 格式：{"tool_calls": [...], "lane": ...}（真实运行路径）
+        - 直调格式：{"tool_name": ..., "args": ...}（测试/API 直调）
         """
+        if "tool_calls" in context:
+            return await self._before_tool_loop(context)
+        return await self._before_tool_legacy(context)
+
+    async def _before_tool_loop(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """处理 loop 的 tool_calls 批量上下文。
+
+        危险调用注入标记：
+        - save 敏感路径 → args["_security_blocked"]=True（loop 层拒绝执行）
+        - scan_vuln 生产 URL / crawl 过深 → args["_security_needs_confirmation"]=True
+        """
+        tool_calls = context.get("tool_calls", [])
+        if not tool_calls:
+            return None
+        modified = False
+        warnings = list(context.get("security_warnings", []))
+
+        for tc in tool_calls:
+            func = tc.get("function", {}) if isinstance(tc, dict) else {}
+            name = func.get("name", "")
+            args = func.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+
+            pattern = _DANGEROUS_PATTERNS.get(name)
+            if pattern is None or not pattern(args):
+                continue
+
+            if name == "save" and _is_sensitive_path(args.get("path", "")):
+                args["_security_blocked"] = True
+                warnings.append({
+                    "type": "dangerous_save_blocked",
+                    "tool": name,
+                    "path": args.get("path", ""),
+                    "severity": Severity.HIGH.value,
+                    "message": "保存到敏感路径已被安全 Hook 拦截",
+                })
+            else:
+                args["_security_needs_confirmation"] = True
+                warnings.append({
+                    "type": "dangerous_call_needs_confirmation",
+                    "tool": name,
+                    "severity": Severity.MEDIUM.value,
+                    "message": "危险工具调用已标记，需要用户确认",
+                })
+            func["arguments"] = args
+            modified = True
+            logger.warning(f"[Security] 危险工具调用: {name} args={args}")
+
+        if not modified:
+            return None
+        context["tool_calls"] = tool_calls
+        if warnings:
+            context["security_warnings"] = warnings
+        return context
+
+    async def _before_tool_legacy(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """直调格式（单工具）：保留旧行为，测试/API 可用。"""
         tool_name = context.get("tool_name", "")
         args = context.get("args", {})
 
@@ -87,6 +149,7 @@ class SecurityHookHandler:
             f"{'生产环境扫描需确认' if tool_name == 'scan_vuln' else '操作可能影响生产环境'}"
         )
         return context
+
 
     async def after_tool(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """after_tool：工具执行后检测异常行为
@@ -172,3 +235,12 @@ class SecurityHookHandler:
         """清空状态"""
         self._warned_tools.clear()
         self._anomalies.clear()
+
+
+def create_security_hooks(hooks) -> SecurityHookHandler:
+    """创建并注册 Security hooks 到 CrawlHooks 实例。"""
+    from crawagent.harness.types import HookEvent
+    handler = SecurityHookHandler()
+    hooks.on(HookEvent.BEFORE_TOOL, handler.before_tool)
+    hooks.on(HookEvent.AFTER_TOOL, handler.after_tool)
+    return handler

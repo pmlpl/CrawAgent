@@ -86,7 +86,7 @@ class Notifier:
             "level": alert.level.value,
             "title": alert.title,
             "message": alert.message,
-            "url": alert.url,
+            "url": alert.url or task.url,
             "diff_summary": alert.diff_summary,
             "old_value": alert.old_value,
             "new_value": alert.new_value,

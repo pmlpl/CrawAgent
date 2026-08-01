@@ -389,6 +389,15 @@ class CrawlLoop:
         tool_args = tool_call["function"].get("arguments", {})
         tool_call_id = tool_call.get("id", "")
 
+        # Security Hook 硬拦截：危险工具调用直接拒绝执行（优先于一切）
+        if isinstance(tool_args, dict) and tool_args.get("_security_blocked"):
+            return {
+                "tool_call_id": tool_call_id,
+                "content": "安全拦截：该工具调用已被 Security Hook 判定为危险操作（如写入敏感路径）",
+                "error": True,
+                "blocked": True,
+            }
+
         # Phase 1: Prepare
         tool_def = self._tool_map.get(tool_name)
         if not tool_def:

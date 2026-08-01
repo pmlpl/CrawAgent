@@ -37,6 +37,12 @@ dependencies = [
     # 缓存与队列
     "redis>=5.0.0",
 
+    # 监控调度（P4）
+    "apscheduler>=3.10.0",
+
+    # 媒体下载（P3/P7）
+    "yt-dlp>=2024.8.6",
+
     # 并发与重试
     "tenacity>=8.0.0",
 
