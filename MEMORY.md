@@ -283,7 +283,7 @@
 - **Python 文档**：httpx 33KB → MD 16.3KB，正文 84%
 - **Bilibili**：Playwright 144KB → MD 6.5KB（标题/播放量/制作名单/简介完整）
 - **V2EX**：连接超时（IP 封锁）
-- **掘金**：列表页 Playwright 抓到 117KB 但 PruningContentFilter 过度清洗（列表页内容在 React 组件深处被误判为噪声）；文章详情页需真实 URL 测试
+- **掘金**：已修复（commit 8dbff63）。根因不是清洗器，而是 Playwright context 传入了 httpx 的完整 headers（Accept-Encoding/Sec-Fetch-* 等），与浏览器自身头冲突被站点识别为非浏览器，返回骨架页。修复后 40 篇文章全部提取，Markdown 5256 字
 - **知乎**：Playwright 完整浏览器仍 403（IP 级封禁），代码路径已由上述 6 个站点验证
 
 
