@@ -240,7 +240,8 @@ class Fetcher:
 
     def _build_headers(self, url: str, extra_headers: Dict = None, ua: str = None) -> Dict[str, str]:
         headers = {
-            "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate",
@@ -408,9 +409,29 @@ class Fetcher:
 
             browser = await p.chromium.launch(**launch_kwargs)
             try:
+                # Playwright 自身会管理标准请求头（Accept/Accept-Encoding/Sec-Fetch-* 等），
+                # 手动设置这些头会与浏览器自身头冲突，被站点识别为非浏览器。
+                # 这里只保留自定义头（Cookie/Authorization 等），过滤掉标准头。
+                _browser_managed = {
+                    "user-agent", "accept", "accept-language", "accept-encoding",
+                    "connection", "cache-control", "upgrade-insecure-requests",
+                    "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site",
+                    "sec-fetch-user", "sec-ch-ua", "sec-ch-ua-mobile",
+                    "sec-ch-ua-platform",
+                }
+                custom_headers = {
+                    k: v for k, v in headers.items()
+                    if k.lower() not in _browser_managed
+                }
                 context = await browser.new_context(
-                    user_agent=headers.get("User-Agent", "Mozilla/5.0"),
-                    extra_http_headers=headers,
+                    user_agent=headers.get(
+                        "User-Agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    ),
+                    extra_http_headers=custom_headers if custom_headers else None,
+                    viewport={"width": 1280, "height": 900},
+                    locale="zh-CN",
                 )
                 page = await context.new_page()
 
@@ -439,6 +460,25 @@ class Fetcher:
 
                 result.html = await page.content()
                 result.title = await page.title()
+
+                # SPA 内容检测：如果 networkidle 后 body 文本过少，
+                # 可能是异步内容还没加载完（如掘金文章列表），
+                # 额外等待并重试 2 次
+                body_text = await page.evaluate(
+                    "() => document.body ? document.body.innerText.length : 0"
+                )
+                if body_text < 500:
+                    for wait_attempt in range(2):
+                        await asyncio.sleep(3)
+                        new_text = await page.evaluate(
+                            "() => document.body ? document.body.innerText.length : 0"
+                        )
+                        if new_text > body_text:
+                            result.html = await page.content()
+                            result.title = await page.title()
+                            body_text = new_text
+                        if body_text >= 500:
+                            break
                 result.success = True
                 result.strategy = "playwright"
 
