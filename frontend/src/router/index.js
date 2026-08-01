@@ -23,6 +23,12 @@ const routes = [
     component: () => import('../views/Settings.vue'),
     meta: { title: '设置' },
   },
+  {
+    path: '/output',
+    name: 'Output',
+    component: () => import('../views/Output.vue'),
+    meta: { title: '文件整理' },
+  },
 ]
 
 const router = createRouter({

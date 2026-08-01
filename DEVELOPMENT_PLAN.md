@@ -332,8 +332,8 @@ P0（bug修+MySQL+Harness骨架）→ P1（反爬+引擎链+hooks）→ P2（清
 - [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声（待真实网络环境验证）
 
 ### P3 验收
-- [ ] 抓取 5 篇阮一峰博客文章，按 `~/crawagent/articles/{domain}/{date}/{title}.md` 落盘
-- [ ] **脏数据**：标题含 `/\:*?"<>|` 非法字符，路径正确转义
+- [x] 抓取 5 篇阮一峰博客文章，按 `~/crawagent/articles/{domain}/{date}/{title}.md` 落盘（2026-08-01 实测 5/5，同名文件自动 -2 去重）
+- [x] **脏数据**：标题含 `/\:*?"<>|` 非法字符，路径正确转义（单测覆盖）
 
 ### P4 验收
 - [ ] 配置价格监控：`https://www.apple.com/shop/buy-iphone/iphone-15-pro` 每 6 小时，价格变化 Webhook

@@ -11,7 +11,7 @@ dist/
 build/
 
 # 运行时输出
-output/
+/output/
 crawl_progress.json
 
 # 敏感配置
@@ -63,4 +63,3 @@ frontend/dist/
 
 # 临时验证脚本
 _test_*.py
-

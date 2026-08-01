@@ -88,21 +88,37 @@ ANALYZE_TOOL = CrawlToolDef(
 SAVE_TOOL = CrawlToolDef(
     name="save",
     description="将数据保存到指定文件路径。支持 Markdown、JSON、CSV 格式。"
+                "支持路径模板占位符：{domain}/{date}/{year}/{month}/{day}/{title}/{slug}/{ext}。"
                 "Agent 可自主决定保存路径和格式。",
     parameters={
         "type": "object",
         "properties": {
             "content": {"type": "string", "description": "要保存的内容"},
-            "path": {"type": "string", "description": "保存路径（如 ~/crawagent/articles/{domain}/{title}.md）"},
+            "data": {
+                "type": "array",
+                "description": "结构化数据记录（与 content 二选一）",
+                "items": {"type": "object"},
+            },
+            "path": {
+                "type": "string",
+                "description": "保存路径。可含模板占位符：{domain}/{date}/{title} 等（如 ~/crawagent/articles/{domain}/{date}/{title}.md）",
+            },
+            "url": {
+                "type": "string",
+                "description": "源 URL（用于从模板提取 domain；与 path 模板配合使用）",
+            },
+            "title": {
+                "type": "string",
+                "description": "文件标题（用于模板渲染 {title}/{slug}；自动转义非法字符）",
+            },
             "format": {
                 "type": "string",
                 "enum": ["markdown", "json", "csv"],
-                "default": "markdown",
-                "description": "保存格式",
+                "description": "保存格式（留空自动推断：扁平→CSV/嵌套→JSON/富文本→MD）",
             },
             "append": {"type": "boolean", "default": False, "description": "是否追加写入"},
         },
-        "required": ["content", "path"],
+        "required": ["path"],
     },
     exec_mode=ToolExecMode.SEQUENTIAL,
     replay_safe=False,
@@ -597,16 +613,19 @@ async def analyze_executor(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def save_executor(args: Dict[str, Any]) -> Dict[str, Any]:
-    """save 工具执行器：智能存储路由器
+    """save 工具执行器：智能存储路由器（P3 接入 FileOrganizer）
 
-    三个聪明之处：
-    1. 自适应格式：检测数据 Schema——扁平键值对存 CSV，嵌套存 JSON，富文本存 MD
-    2. 增量去重：基于 id/url 字段哈希，跳过已存记录
-    3. 检查点机制：每 10 条记录进度，支持断点续传
+    四个聪明之处：
+    1. 路径模板引擎：path 含 {domain}/{date}/{title} 等占位符时用 FileOrganizer 渲染
+    2. 自适应格式：检测数据 Schema——扁平键值对存 CSV，嵌套存 JSON，富文本存 MD
+    3. 增量去重：基于 id/url 字段哈希，跳过已存记录
+    4. 检查点机制：每 10 条记录进度，支持断点续传
     """
     data = args.get("data") or args.get("items")
     content = args.get("content", "")
     path = args.get("path", "")
+    url = args.get("url", "")
+    title = args.get("title", "")
     fmt = args.get("format", "")  # 留空则自动推断
     append = args.get("append", False)
 
@@ -620,17 +639,46 @@ async def save_executor(args: Dict[str, Any]) -> Dict[str, Any]:
             "status_code": STATUS_FAILED,
         }
 
+    # 路径模板渲染：path 含 { 占位符时用 FileOrganizer 渲染
+    # 支持占位符：{domain}/{date}/{year}/{month}/{day}/{title}/{slug}/{ext}
+    if "{" in path and "}" in path:
+        try:
+            from crawagent.output.organizer import FileOrganizer
+            # 自动推断扩展名（用于模板 {ext}）
+            auto_ext = ""
+            if path.endswith(".md") or (fmt == "markdown"):
+                auto_ext = "md"
+            elif path.endswith(".json") or (fmt == "json"):
+                auto_ext = "json"
+            elif path.endswith(".csv") or (fmt == "csv"):
+                auto_ext = "csv"
+            elif "." in os.path.basename(path):
+                auto_ext = path.rsplit(".", 1)[-1]
+            else:
+                auto_ext = "md"
+            org = FileOrganizer(base_dir="./output")
+            path = org.render(path, url=url, title=title or "untitled", ext=auto_ext)
+        except Exception as e:
+            logger.debug(f"路径模板渲染失败，用原 path: {e}")
+
     # 展开 ~ 和环境变量
     path = os.path.expanduser(os.path.expandvars(path))
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
+    # 同名文件去重（避免重复标题覆盖已有文件）
+    if not append:
+        try:
+            from crawagent.output.organizer import unique_path
+            path = unique_path(path)
+        except Exception:
+            pass
+
     # 1. 自适应格式推断（若未指定）
     if not fmt:
         fmt = _infer_format(data)
-        # 根据格式调整扩展名
-        if not path.endswith(f".{fmt}"):
-            base, _ = os.path.splitext(path)
-            path = f"{base}.{fmt}"
+        # 根据格式调整扩展名（仅当 path 没有扩展名时才加）
+        if not path.endswith(f".{fmt}") and "." not in os.path.basename(path):
+            path = f"{path}.{fmt}"
 
     # 2. 增量去重
     records = _normalize_records(data)
@@ -966,12 +1014,28 @@ class CrawlSupervisor:
         # ========== 5. save ==========
         logger.info(f"[Supervisor] 5/5 save")
         items = extract_result.get("items", [])
-        # 推断输出路径
-        output_path = self._decide_output_path(url, instruction)
-        save_result = await save_executor({
+        # 保存 Markdown 内容（若有）
+        markdown_content = result.get("markdown", "")
+        title = crawl_result.get("title", "") or ""
+        # 推断输出路径：用 FileOrganizer 模板引擎（按 domain/date/title 组织）
+        output_path = self._decide_output_path(url, title=title, ext="md")
+        save_args = {
             "data": items,
             "path": output_path,
-        })
+            "url": url,
+            "title": title,
+            "format": "markdown",
+        }
+        # 若有 Markdown 内容且 items 为空，用 content 模式保存
+        if markdown_content and not items:
+            save_args = {
+                "content": markdown_content,
+                "path": output_path,
+                "url": url,
+                "title": title,
+                "format": "markdown",
+            }
+        save_result = await save_executor(save_args)
         result["stages"]["save"] = _summarize(
             save_result, ["path", "format", "written", "skipped"]
         )
@@ -980,16 +1044,33 @@ class CrawlSupervisor:
         result["output_path"] = save_result.get("path", "")
         return result
 
-    def _decide_output_path(self, url: str, instruction: str = "") -> str:
-        """根据 URL 推断输出文件路径"""
-        # 从 URL 提取域名和路径作为文件名
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        domain = parsed.netloc.replace("www.", "")
-        path_part = parsed.path.strip("/").replace("/", "_") or "index"
-        # 限制长度
-        filename = f"{domain}_{path_part}"[:60]
-        return os.path.join(self.output_dir, filename)
+    def _decide_output_path(self, url: str, title: str = "", ext: str = "md") -> str:
+        """根据 URL 推断输出文件路径（P3：用 FileOrganizer 模板引擎）
+
+        默认模板：articles/{domain}/{date}/{title}.{ext}
+        - 同站点文章归到同一 domain 目录
+        - 按日期分桶
+        - 标题自动转义非法字符
+        """
+        try:
+            from crawagent.output.organizer import FileOrganizer
+            org = FileOrganizer(base_dir=self.output_dir)
+            safe_title = title or "untitled"
+            path = org.render(
+                "articles/{domain}/{date}/{title}.{ext}",
+                url=url,
+                title=safe_title,
+                ext=ext,
+            )
+            return path
+        except Exception as e:
+            logger.debug(f"FileOrganizer 渲染失败，回退原逻辑: {e}")
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            domain = parsed.netloc.replace("www.", "")
+            path_part = parsed.path.strip("/").replace("/", "_") or "index"
+            filename = f"{domain}_{path_part}"[:60]
+            return os.path.join(self.output_dir, filename)
 
 
 def _summarize(result: Dict, keys: List[str]) -> Dict[str, Any]:

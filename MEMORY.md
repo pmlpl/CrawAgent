@@ -179,15 +179,37 @@
 
 **回归测试：40 个全部通过**（新增 3 个：body class 含 "ad" 不被误删、相对链接绝对化、无 html 前缀）
 
+### 13. P3 阶段完成（2026-08-01，含实机验收）
+
+**文件整理到指定路径：**
+- `crawagent/output/organizer.py`：FileOrganizer 路径模板引擎（{domain}/{date}/{year}/{month}/{day}/{title}/{slug}/{ext}）+ Windows 非法字符转义 + 同名去重
+- `crawagent/output/media_downloader.py`：MediaDownloader（yt-dlp 视频 + httpx 流式下载，支持断点续传/Range/416）
+- `harness/tools.py`：save 工具支持路径模板，Supervisor 保存阶段改用 `articles/{domain}/{date}/{title}.{ext}` 模板
+- `frontend/views/Output.vue` + `/output` 路由：模板预览 + 文件列表 + 查看/删除
+- `api/server.py`：`/api/output/files` / `preview-path` / `file`(GET/DELETE)
+
+**验收实测（2026-08-01）：**
+- 阮一峰博客 5/5 篇文章抓取并落盘为 `articles/ruanyifeng.com/2026-08-01/{title}.md`（每篇约 19-20KB）
+- 标题非法字符全部转义；同名文件自动追加 -2 后缀
+- httpx 流式下载实机通过（断点续传逻辑单测覆盖）
+- 测试 52 个全部通过（新增 11 个 P3 测试）
+
+**检查中修复的问题：**
+- `clean_result` 未定义导致 Supervisor 保存阶段每次 NameError 崩溃 → 改为从 result/crawl_result 取值
+- `.gitignore` 的 `output/` 误吞 `crawagent/output/` 包（P3 代码无法提交）→ 改为根锚定 `/output/`
+- `/api/output/file` 路径越权检查用 startswith 可被 `output_evil` 前缀绕过 → 改用 Path.relative_to
+- `~/` 开头的路径模板被错误拼到 base_dir 下 → 修复 render 判断
+
 ---
 
 ## 当前状态
 
-**P0 + P1 完成 ✅，P2 完成并通过苹果官网/HN 验证 ✅（知乎待网络环境）**
+**P0-P3 完成 ✅（知乎实机验收待网络环境）**
 
 - P0：CrawlHarness 骨架可运行（Mock 模式）
 - P1：引擎回退链 + AntiBot hooks + 时间精度修复完成
 - P2：清洗/提取/分块/提示词/用量模块已实现，40 个测试全过，苹果官网实机验证通过
+- P3：文件整理/媒体下载/输出 API/前端 Output 页完成，阮一峰 5 篇实机落盘验收通过
 - 真实 LLM 需要更换 API key（当前 DeepSeek key 已失效）
 - 服务运行在 http://localhost:8000
 
@@ -215,16 +237,16 @@ docker-compose up -d           # 启动数据库容器
 
 ### P2 验收（当前优先级）
 
-1. **知乎验收** - 换有效 API key 后抓取知乎问题页确认 Markdown 干净（本机网络无法连接 zhihu/HN）
-2. **LLM 过滤器验证** - LLMContentFilter 用真实 key 跑通（PROMPT_FILTER_CONTENT）
+1. **P4 监控场景 + Lanes** - monitor_lane / APScheduler / diff_detector / notifier（下一步）
+2. **知乎验收** - 换有效 API key 后抓取知乎问题页确认 Markdown 干净（本机网络无法连接 zhihu/HN）
+3. **LLM 过滤器验证** - LLMContentFilter 用真实 key 跑通（PROMPT_FILTER_CONTENT）
 
 ### 中优先级
 
-3. **P3 文件整理** - output/organizer + media_downloader + save 工具增强（下一步）
 4. **WebSocket 支持** - Agent 执行时实时推送日志到前端
 5. **任务持久化** - 当前任务结果存在内存，需要持久化到 MySQL
 6. **frontier.py SQLite → MySQL 迁移** - 统一数据库
-7. **工具执行器补充** - monitor / scan_vuln 执行器
+7. **yt-dlp 实机验证** - 当前仅 httpx 路径实机验证，yt-dlp 待 P7
 
 ### 中优先级
 

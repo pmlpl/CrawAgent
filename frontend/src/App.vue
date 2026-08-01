@@ -36,6 +36,12 @@
           </svg>
           <span>设置</span>
         </router-link>
+        <router-link to="/output" class="nav-item" active-class="nav-item--active">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span>文件</span>
+        </router-link>
       </nav>
 
       <div class="sidebar-footer">

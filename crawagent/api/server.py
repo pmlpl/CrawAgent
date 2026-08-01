@@ -785,6 +785,81 @@ async def update_settings(req: SettingsUpdateRequest):
     return {"message": "配置已保存，立即生效"}
 
 
+# ==================== Output API 路由（P3） ====================
+
+class OutputListRequest(BaseModel):
+    """输出文件列表请求"""
+    subdir: str = ""
+    pattern: str = "**/*"
+    limit: int = 200
+
+
+class OutputRenderRequest(BaseModel):
+    """路径模板渲染请求（预览用）"""
+    template: str
+    url: str = ""
+    title: str = ""
+    ext: str = "md"
+
+
+@app.get("/api/output/files")
+async def list_output_files(subdir: str = "", pattern: str = "**/*", limit: int = 200):
+    """列出已保存的输出文件"""
+    from crawagent.output import FileOrganizer
+    org = FileOrganizer(base_dir="./output")
+    files = org.list_files(subdir=subdir, pattern=pattern, limit=limit)
+    return {"total": len(files), "files": files}
+
+
+@app.post("/api/output/preview-path")
+async def preview_output_path(req: OutputRenderRequest):
+    """预览路径模板渲染结果（不实际写入）"""
+    from crawagent.output import FileOrganizer
+    org = FileOrganizer(base_dir="./output")
+    path = org.render(req.template, url=req.url, title=req.title, ext=req.ext)
+    return {"template": req.template, "rendered_path": path}
+
+
+@app.get("/api/output/file")
+async def read_output_file(path: str):
+    """读取已保存文件内容"""
+    from pathlib import Path
+    # 安全检查：路径必须在 output_dir 下
+    output_dir = Path("./output").resolve()
+    abs_path = Path(path).resolve()
+    try:
+        abs_path.relative_to(output_dir)
+    except ValueError:
+        raise HTTPException(403, "路径越权：只能读取 output 目录下的文件")
+    if not abs_path.is_file():
+        raise HTTPException(404, f"文件不存在: {path}")
+    try:
+        with open(abs_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {"path": path, "content": content, "size": len(content)}
+    except Exception as e:
+        raise HTTPException(500, f"读取失败: {e}")
+
+
+@app.delete("/api/output/file")
+async def delete_output_file(path: str):
+    """删除已保存文件"""
+    from pathlib import Path
+    output_dir = Path("./output").resolve()
+    abs_path = Path(path).resolve()
+    try:
+        abs_path.relative_to(output_dir)
+    except ValueError:
+        raise HTTPException(403, "路径越权：只能删除 output 目录下的文件")
+    if not abs_path.is_file():
+        raise HTTPException(404, f"文件不存在: {path}")
+    try:
+        abs_path.unlink()
+        return {"deleted": True, "path": path}
+    except Exception as e:
+        raise HTTPException(500, f"删除失败: {e}")
+
+
 # ==================== 启动入口 ====================
 
 if __name__ == "__main__":
