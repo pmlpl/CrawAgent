@@ -324,6 +324,26 @@ class MonitorStore:
             conn.commit()
         return alert
 
+    def update_alert(self, alert: AlertRecord) -> bool:
+        """更新告警的通知状态（notified / notify_error）
+
+        用于 _maybe_alert 在 notify 完成后把通知结果持久化，
+        否则 store 中的告警 notified 字段永远为初始的 False。
+        """
+        with self._get_conn() as conn:
+            cur = conn.execute("""
+                UPDATE monitor_alerts SET
+                    notified = ?,
+                    notify_error = ?
+                WHERE id = ?
+            """, (
+                int(alert.notified),
+                alert.notify_error,
+                alert.id,
+            ))
+            conn.commit()
+            return cur.rowcount > 0
+
     def list_alerts(self, task_id: str = "", limit: int = 50) -> List[AlertRecord]:
         with self._get_conn() as conn:
             if task_id:

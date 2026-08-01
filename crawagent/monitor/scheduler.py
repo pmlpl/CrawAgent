@@ -401,6 +401,8 @@ class MonitorScheduler:
         notify_result = await self.notifier.notify(task, alert)
         alert.notified = notify_result["success"]
         alert.notify_error = notify_result.get("error", "")
+        # 持久化通知结果，否则 store 中告警的 notified 永远为初始 False
+        self.store.update_alert(alert)
 
         # 更新任务 last_alert_at
         task.last_alert_at = now

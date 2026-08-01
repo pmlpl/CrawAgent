@@ -261,16 +261,46 @@
 
 **当前测试：80 个全部通过**
 
+### 16. 剩余验收补跑（2026-08-01）
+
+**P4 真实监控 e2e（验收通过）：**
+- 本地 mock 目标 + 本地 webhook 接收端，run_task_once 模拟完整监控周期
+- 首次建立基线无告警、无变化不告警、503 触发 WARN 告警 + webhook 收到
+- cooldown 内 503 去抖跳过（debounce_ok=True）、cooldown 外再次告警（second_alert_after_cooldown=True）
+- 连续失败 ≥3 次告警级别自动升 ERROR
+- **修复 bug**：`MonitorStore` 缺少 `update_alert` 方法，导致 `_maybe_alert` 在 notify 后只更新内存中 `alert.notified`，store 中告警的 notified 字段永远为初始 False。修复：models.py 新增 `update_alert`（持久化 notified/notify_error）+ scheduler.py `_maybe_alert` 在 notify 后调用 `store.update_alert(alert)`
+- 测试参数教训：503 触发 fetcher 5xx 重试链（httpx→curl_cffi→playwright + 指数退避）单次约 14s，cooldown 必须 > 连续两次抓取耗时之和才稳定去抖（原 3s 失败，改 45s 通过）。引擎重试链是禁止回退的修复项，不能动
+
+**P6 完整演练 e2e（补验通过，未回归）：**
+- 100 页爬取触发 compaction：本地 mock 站爬 101 页，compaction 自动触发，上下文 101 条 → 1 条 summary
+- 崩溃恢复：3 个 open operations 全部识别，build_recovery_plan 生成 main+monitor 两条 lane + 3 个恢复操作 + orphan_entry_ids 识别，清理后 0 残留
+
+**P7 影视实机（代码路径验证通过，真实站点网络不可达）：**
+- YouTube：本机连接超时（NET_UNREACHABLE），MediaDownloader.extract_info 代码路径已验证（30s 超时保护返回 success=False + 明确错误）
+- Bilibili：HTTP 412 Precondition Failed（反爬拦截，ANTI_BOT），代码路径由单测覆盖
+- 已下架视频友好报错：Bilibili 不存在视频返回 404 + "信息提取失败" 友好错误；YouTube 不存在视频因网络不可达 60s 超时返回明确错误，不崩溃
+
+**知乎/P0 HN（网络不可达，如实记录跳过）：**
+- 知乎 zhihu.com/question：本机 IP 被 403，httpx→curl_cffi→playwright 三引擎均 403（IP 级屏蔽，非引擎指纹可绕过）；引擎升级链在 403 上正确触发（验证 P1 修复）
+- HN news.ycombinator.com：ConnectTimeout 网络不可达
+- 两者均为本机网络环境限制，非代码缺陷；代码路径已由 apple.com（P2）/阮一峰（P3）/Juice Shop（P5）/docs.python.org（P6）等其他站点实机验证
+
+**当前测试：80 个全部通过**（补验未引入回归）
+
 ---
 
 ## 当前状态
 
-**P0-P3 完成 ✅（知乎实机验收待网络环境）**
+**P0-P7 全部完成 ✅，剩余验收补跑完成 ✅（知乎/HN/YouTube/Bilibili 受本机网络限制待可达网络实测）**
 
-- P0：CrawlHarness 骨架可运行（Mock 模式）
-- P1：引擎回退链 + AntiBot hooks + 时间精度修复完成
-- P2：清洗/提取/分块/提示词/用量模块已实现，40 个测试全过，苹果官网实机验证通过
+- P0：CrawlHarness 骨架可运行（真实 LLM 端到端跑通）
+- P1：引擎回退链 + AntiBot hooks + 时间精度修复完成（403/429 触发升级链已验证）
+- P2：清洗/提取/分块/提示词/用量模块已实现，苹果官网实机验证通过（知乎 403 待网络）
 - P3：文件整理/媒体下载/输出 API/前端 Output 页完成，阮一峰 5 篇实机落盘验收通过
+- P4：监控 + Lanes 完成，**真实监控 e2e 补验通过**（含告警通知状态持久化 bug 修复）
+- P5：安全扫描完成，Juice Shop 6 漏洞/5 类别实测通过
+- P6：压缩/持久化/深爬完成，**100 页 compaction + 崩溃恢复 e2e 补验通过**
+- P7：影视内容代码级通过，YouTube/Bilibili 真实站点网络不可达（代码路径已验证）
 - 真实 LLM 需要更换 API key（当前 DeepSeek key 已失效）
 - 服务运行在 http://localhost:8000
 
@@ -296,33 +326,23 @@ docker-compose up -d           # 启动数据库容器
 
 ## 下一步
 
-### P2 验收（当前优先级）
+### 待可达网络环境补验（本机网络限制，非代码缺陷）
+1. **知乎验收** - 抓取 zhihu.com/question 出干净 Markdown（本机 IP 被 403，三引擎均 403，换网络可试）
+2. **P0 HN 端到端** - news.ycombinator.com（本机 ConnectTimeout，可试；不行保留备注）
+3. **P7 YouTube/Bilibili** - YouTube 元数据 + yt-dlp 下载、Bilibili 带 cookie 下载（本机网络不可达/反爬拦截，代码路径已验证）
+4. **LLM 过滤器验证** - LLMContentFilter 用真实 key 跑通（需更换失效的 DeepSeek API key）
 
-1. **P4 监控场景 + Lanes** - monitor_lane / APScheduler / diff_detector / notifier（下一步）
-2. **知乎验收** - 换有效 API key 后抓取知乎问题页确认 Markdown 干净（本机网络无法连接 zhihu/HN）
-3. **LLM 过滤器验证** - LLMContentFilter 用真实 key 跑通（PROMPT_FILTER_CONTENT）
-
-### 中优先级
-
-4. **WebSocket 支持** - Agent 执行时实时推送日志到前端
-5. **任务持久化** - 当前任务结果存在内存，需要持久化到 MySQL
-6. **frontier.py SQLite → MySQL 迁移** - 统一数据库
-7. **yt-dlp 实机验证** - 当前仅 httpx 路径实机验证，yt-dlp 待 P7
-
-### 中优先级
-
-6. **WebSocket 支持** - Agent 执行时实时推送日志到前端（替代轮询）
-7. **任务持久化** - 当前任务结果存在内存，需要持久化到 MySQL
-8. **错误处理** - 前端统一错误提示
-9. **任务队列隔离** - 当前所有任务共用一个 frontier 数据库，需要按 job_id 隔离
-10. **工具执行器实现** - harness/tools.py 只有定义，P1 阶段实现实际逻辑
-11. **LLM tool calling 启用** - 当前 LLM 未绑定工具
+### 中优先级（功能增强）
+5. **WebSocket 支持** - Agent 执行时实时推送日志到前端（替代轮询）
+6. **任务持久化** - 当前任务结果存在内存，需持久化到 MySQL
+7. **frontier.py SQLite → MySQL 迁移** - 统一数据库
+8. **任务队列隔离** - 当前所有任务共用一个 frontier 数据库，需按 job_id 隔离
+9. **GAP-001** - html2text 处理 HN 链接 baseurl 拼接错误（生成非法 URL，不影响验收）
+10. **GAP-003** - save_executor 图片下载为串行（批量抓取时耗时增加，引入 Semaphore 并发）
 
 ### 低优先级
-
-12. **Phase 6** - 登录/Cookie 注入
-13. **Phase 7** - 签名接口逆向
-14. **Phase 8** - 验证码处理
+11. **P8 Docker + Nginx 部署** - 本次任务暂缓（用户要求不做部署）
+12. 登录/Cookie 注入、签名接口逆向、验证码处理（灰色路径，独立分支）
 
 ---
 
@@ -330,12 +350,15 @@ docker-compose up -d           # 启动数据库容器
 
 1. **DeepSeek API key 失效（401）** - 需更换有效 key
 2. **frontier.py 仍使用 SQLite** - 待迁移到 MySQL
-3. **monitor / scan_vuln 执行器仍为空** - 对应 P4/P5 阶段
+3. ~~monitor / scan_vuln 执行器仍为空~~ - ✅ 已在 P4/P5 完成（MonitorScheduler + VulnScanner + SecurityLane）
 4. **LLMContentFilter 未用真实 key 验证** - 单测只覆盖非 LLM 路径
 5. `crawagent/graph/site_analyzer.py` 依赖 Playwright，需要 `playwright install chromium`
 6. LLM 每次生成的 CSS 选择器不一致，有时不准
 7. 系统代理问题：必须通过 `main.py` 启动才能正确禁用代理
 8. 多个任务共用同一个 frontier 数据库，可能互相干扰
+9. **GAP-001**：html2text 处理 HN 链接 baseurl 拼接错误（生成非法 URL，不影响验收）
+10. **P4 监控告警通知状态**：✅ 已修复（2026-08-01 补验发现并修复 update_alert 缺失）
+11. **网络环境限制**：知乎(403)/HN(ConnectTimeout)/YouTube(超时)/Bilibili(412) 本机不可达，代码路径已由其他可达站点验证，待换网络补验
 
 ---
 

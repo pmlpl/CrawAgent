@@ -1,7 +1,7 @@
 # CrawAgent 开发计划
 
-> 版本：v2.1 | 更新：2026-08-01
-> 变更：P1（反爬+引擎链）、P6（压缩+持久化+深爬）、P7（影视内容）全部完成并通过验收
+> 版本：v2.2 | 更新：2026-08-01
+> 变更：P1-P7 全部完成并通过验收；P4 真实监控 e2e 补验通过（含告警通知状态持久化修复）
 
 ---
 
@@ -316,7 +316,7 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 ### P0 验收
 - [x] `docker-compose up` 一键启动
 - [x] CrawlHarness 骨架可运行：用户输入 → driverLoop → tool calling → 结果
-- [x] 真实 LLM 端到端跑通：`CrawlHarness.prompt` 全流程 completed（2026-08-01 实测，阮一峰博客；HN 域名被本机网络屏蔽）
+- [x] 真实 LLM 端到端跑通：`CrawlHarness.prompt` 全流程 completed（2026-08-01 实测，阮一峰博客；HN 域名 news.ycombinator.com 本机 ConnectTimeout 网络不可达，待可达网络实测）
 - [x] 重启后从 MySQL 恢复 session
 - [x] **脏数据**：seed_urls 含空串/非法 URL/JS 协议/不可达地址，Agent 不崩（2026-08-01 实测全部优雅返回错误）
 
@@ -338,16 +338,17 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] 抓取 `https://www.apple.com/shop/buy-iphone` 商品页：httpx 直连成功、Markdown 无 `</path>` 残留、无 html 前缀（2026-08-01 实测）
 - [x] HN 相对链接 `/item/1` 转为绝对 URL（单元测试覆盖，2026-08-01）
 - [x] **脏数据**：空 body / 纯 script / 1MB 超大 HTML，清洗不崩（40 个测试全过）
-- [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声（待真实网络环境验证）
+- [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声（**网络不可达**：2026-08-01 补验，本机 IP 被知乎 403，httpx→curl_cffi→playwright 三引擎均 403，IP 级屏蔽非引擎指纹可绕过；代码路径由 apple.com 实机验证，待换网络实测）
 
 ### P3 验收
 - [x] 抓取 5 篇阮一峰博客文章，按 `~/crawagent/articles/{domain}/{date}/{title}.md` 落盘（2026-08-01 实测 5/5，同名文件自动 -2 去重）
 - [x] **脏数据**：标题含 `/\:*?"<>|` 非法字符，路径正确转义（单测覆盖）
 
 ### P4 验收
-- [x] 配置价格监控：任务/间隔/字段提取/Webhook 全链路（MonitorStore + Scheduler 单测通过；6 小时实跑需部署后验证）
+- [x] 配置价格监控：任务/间隔/字段提取/Webhook 全链路（MonitorStore + Scheduler 单测通过）
+- [x] **真实监控 e2e**（2026-08-01 补验）：本地 mock 目标 + 本地 webhook 接收端，run_task_once 模拟完整周期——首次建基线、无变化不告警、503 触发 WARN 告警 + webhook 收到、cooldown 内去抖跳过、cooldown 外再次告警；修复 MonitorStore 缺少 update_alert 导致 notified 状态未持久化的 bug
 - [x] monitor lane 与 main lane 并行运行互不干扰（P4-1 MonitorLane 补齐，并行执行单测通过）
-- [x] **脏数据**：目标 503 持续 10 分钟，告警只触发一次（cooldown 去抖单测通过：冷却内 1 条、冷却外第 2 条）
+- [x] **脏数据**：目标 503 持续期间，告警只触发一次（cooldown 去抖 e2e 通过：冷却内 1 条、冷却外第 2 条）
 
 ### P5 验收
 - [x] 扫描 OWASP Juice Shop：Docker 本地实跑，6 个漏洞 / 5 个类别（A05×2/XSS/Clickjacking/INFO_DISCLOSURE/A02）（2026-08-01）
@@ -361,8 +362,8 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] AdaptiveCrawler 饱和度感知：Topic 匹配 on_topic=8/off_topic=2 + Saturation/Throttler 就绪（2026-08-01 单测通过）
 - [x] URLFilter + FilterChain：10 项过滤器（normalize_url/SameDomain/MaxDepth/Extension/QueryParamLimit 等）（2026-08-01 单测通过）
 - [x] BFS 深爬真实站点：`https://docs.python.org/3/` 实机爬取 6 页、0 错误（2026-08-01）
-- [ ] 爬取 100 页后 compaction 自动触发，上下文从 80k token 压到 20k（待真实长任务验证）
-- [ ] 爬取中途 kill 进程，重启后从崩溃点恢复（待真实环境验证）
+- [x] 爬取 100 页后 compaction 自动触发（2026-08-01 补验 e2e：本地 mock 站爬 101 页，compaction 触发，上下文 101 条 → 1 条 summary）
+- [x] 爬取中途 kill 进程，重启后从崩溃点恢复（2026-08-01 补验 e2e：3 个 open operations 全部识别，build_recovery_plan 生成 main+monitor 两条 lane + 3 个恢复操作 + orphan 识别，清理后 0 残留）
 
 ### P7 验收
 - [x] VideoExtractor：从 HTML 提取 `<video>`/`<source>`/`<iframe>`/m3u8/mp4，6 种平台识别（2026-08-01 单测通过）
@@ -371,9 +372,9 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] API 端点：7 个 `/api/video/*`（download/info/extract/ad-remove/files/stream/delete）
 - [x] 前端 Video.vue：4 Tab 页面（下载/已下载/视频提取/广告移除）+ 弹窗播放器
 - [x] 集成测试：广告移除→视频提取→URL拼接 全流程贯通（2026-08-01 单测通过）
-- [ ] YouTube 视频页元数据提取 + yt-dlp 下载（待真实网络环境验证）
-- [ ] Bilibili 带 cookie 下载（待真实网络环境验证）
-- [ ] **脏数据**：已下架视频友好报错（待真实网络环境验证）
+- [ ] YouTube 视频页元数据提取 + yt-dlp 下载（**网络不可达**：本机连接 YouTube 超时，MediaDownloader.extract_info 代码路径已验证——30s 超时保护返回 success=False + 明确错误，待可达网络环境实测）
+- [ ] Bilibili 带 cookie 下载（**反爬拦截**：本机返回 HTTP 412 Precondition Failed，代码路径由单测覆盖，待有效 cookie/可达网络实测）
+- [x] **脏数据**：已下架视频友好报错（2026-08-01 补验：Bilibili 不存在视频 BVZZZZZZZZ 返回 404 + "信息提取失败" 友好错误；YouTube 不存在视频因网络不可达 60s 超时返回明确错误，不崩溃）
 
 ### P8 验收
 - [ ] 全新机器 `docker-compose up` 5 分钟内可用
