@@ -1,6 +1,7 @@
 # CrawAgent 架构设计文档
 
-> 版本：v2.0 | 更新：2026-07-31
+> 版本：v2.1 | 更新：2026-08-01
+> 变更：新增引擎抽象层（engines/）、视频提取/广告移除（extractors/）、登录态持久化（sessions/）、反爬Hook（antibot_hook/escalation_hook）、深度爬取/饱和度感知/URL过滤器、代理轮换
 
 ---
 
@@ -62,6 +63,20 @@
 │   │ monitor │ │ scan_vuln │   ← 可扩展：注册 CrawlToolDef + executor  │
 │   └─────────┘ └───────────┘                                          │
 │                                                                         │
+│   引擎抽象层（engines/）：                                              │
+│   ┌─────────────────────────────────────────────────────────────────┐  │
+│   │  FallbackChain (waterfall)                                      │  │
+│   │  ┌──────────┐ → ┌──────────────┐ → ┌──────────────┐            │  │
+│   │  │ HttpxEng │   │ CurlCffiEng  │   │ PlaywrightEng│            │  │
+│   │  │ (最快)   │   │ (TLS指纹绕过) │   │ (JS渲染+注入) │            │  │
+│   │  └──────────┘   └──────────────┘   └──────────────┘            │  │
+│   └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│   提取器层（extractors/）：                                             │
+│   ┌──────────────┐ ┌────────────┐                                      │
+│   │VideoExtractor│ │ AdRemover  │                                      │
+│   └──────────────┘ └────────────┘                                      │
+│                                                                         │
 │   旧模块（兼容保留）：                                                   │
 │   Fetcher / Frontier / Extractor / SiteAnalyzer / AntiBot              │
 └────────────────────────────────┬────────────────────────────────────────┘
@@ -70,7 +85,8 @@
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                      存储 / 基础设施层                                   │
 │   MySQL 8.0 (entries/operation_logs)  +  Redis 7 (缓存/限速)           │
-│   文件系统 (爬取结果)  +  Docker (容器化部署)                           │
+│   文件系统 (爬取结果/视频下载)  +  Docker (容器化部署)                   │
+│   代理池 (core/proxy.py)  +  登录态持久化 (sessions/profile_manager.py) │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -416,6 +432,7 @@ services:
 |------|------|------|
 | v1.0 | 2026-07-12 | 初始版本：LangGraph 状态机架构，5 阶段实现 |
 | v2.0 | 2026-07-31 | pi Agent Harness 重构：CrawlHarness/CrawlLoop/CrawlSession/CrawlHooks/Compaction 等新模块，MySQL 持久化，8 种 hook 事件，7 个内置工具 |
+| v2.1 | 2026-08-01 | P1 引擎抽象层（engines/三引擎fallback）、P6 深度爬取+URL过滤器+饱和度感知、P7 视频提取+广告移除+yt-dlp播放列表、代理轮换、登录态持久化、反爬Hook（antibot/escalation） |
 
 ---
 
@@ -428,33 +445,72 @@ crawagent/
 │   └── settings.py             # Pydantic Settings（含 MySQL/Redis 配置）
 ├── core/
 │   ├── database.py             # SQLAlchemy 2.0 async + MySQL
-│   ├── fetcher.py              # httpx + curl_cffi
+│   ├── fetcher.py              # httpx + curl_cffi（旧引擎，兼容保留）
 │   ├── frontier.py             # URL 队列
-│   ├── extractor.py            # 三级回退
+│   ├── extractor.py            # 三级回退（8 种提取器）
 │   ├── retriever.py            # 全文检索
 │   ├── models.py               # Pydantic 模型
-│   └── executor.py             # 执行器
+│   ├── executor.py             # 执行器
+│   ├── proxy.py                # 代理配置 + 轮换代理池（P1-7）
+│   ├── deep_crawl.py           # BFS/DFS/Best-First 深度爬取（P6-3）
+│   ├── adaptive.py             # 饱和度感知爬取（P6-4）
+│   └── filters.py              # URLFilter + FilterChain（P6-5）
+├── engines/                    # 引擎抽象层（P1-4/P1-5）
+│   ├── __init__.py             # 统一导出
+│   ├── base.py                 # BaseEngine 抽象基类 + EngineConfig
+│   ├── httpx_engine.py         # httpx 引擎（最快，无 JS）
+│   ├── curl_cffi_engine.py     # curl_cffi 引擎（TLS 指纹绕过）
+│   ├── playwright_engine.py    # Playwright 引擎（JS 渲染 + JS 注入 + 登录态）
+│   └── fallback.py             # FallbackChain waterfall 执行器
+├── extractors/                 # 提取器模块（P7-2/P7-3）
+│   ├── __init__.py
+│   ├── video_extractor.py     # <video>/<source>/iframe/m3u8/mp4 URL 提取
+│   └── ad_remover.py           # DOM 广告移除（CSS选择器+脚本域名+空容器）
 ├── harness/                    # pi Agent Harness Python 实现
 │   ├── __init__.py             # 统一导出
-│   ├── types.py                # 核心类型定义（CrawlToolDef / RunResult）
-│   ├── session.py              # MySQL 持久化会话
+│   ├── types.py                # 核心类型定义（CrawlToolDef / RunResult / RecoveryPlan）
+│   ├── session.py              # MySQL 持久化会话（含 IdPool + 崩溃恢复）
 │   ├── hooks.py                # 8 种 hook 事件
 │   ├── loop.py                 # driverLoop
 │   ├── harness.py              # CrawlHarness 主类
 │   ├── tools.py                # 工具集定义 + 执行器注册
 │   ├── env.py                  # 执行环境抽象
-│   ├── compaction.py           # 上下文压缩
-│   └── system_prompt.py        # 四段式提示词组装
+│   ├── compaction.py           # 上下文压缩（含 rebuild_context）
+│   ├── system_prompt.py        # 四段式提示词组装
+│   ├── antibot_hook.py        # before_tool 反爬拦截（P1-1）
+│   └── escalation_hook.py     # after_response 自动引擎升级（P1-2）
+├── sessions/                   # 登录态管理（P1-8/P7-1）
+│   ├── __init__.py
+│   └── profile_manager.py     # Playwright persistent_context 登录态持久化
+├── js_snippets/                # JS 注入片段（P1-6）
+│   ├── __init__.py             # 片段加载器
+│   ├── navigator_overrider.js  # navigator 属性覆盖（11 项反检测）
+│   └── remove_overlay.js       # 弹窗/遮罩/广告移除
+├── security/                   # 安全扫描（P5）
+│   ├── models.py               # Vulnerability / ScanTask / SecurityStore
+│   ├── vuln_scanner.py        # OWASP Top 10 扫描引擎
+│   ├── auto_fixer.py          # 漏洞修复补丁生成
+│   ├── network_capture.py     # 浏览器网络请求捕获
+│   └── security_hook.py       # 安全 Hook 处理器
+├── monitor/                    # 监控模块（P4）
+│   ├── scheduler.py            # APScheduler + Redis
+│   ├── diff_detector.py       # 变化检测 + 结构化 diff
+│   ├── notifier.py            # Webhook / 飞书 / 邮件
+│   └── baseline.py             # MySQL 基线快照
+├── output/                     # 文件整理 + 媒体下载（P3/P7）
+│   ├── __init__.py
+│   ├── organizer.py           # FileOrganizer（路径模板引擎）
+│   └── media_downloader.py   # yt-dlp + httpx 流式（含 extract_info/download_playlist）
 ├── graph/                      # 旧 Agent 编排（兼容）
 │   ├── agent_workflow.py
 │   ├── site_analyzer.py
-│   ├── anti_bot.py
+│   ├── anti_bot.py             # 反爬检测（含 is_blocked() 三层检测）
 │   └── prompts/
 ├── llm/
 │   ├── factory.py              # 多 Provider 工厂
 │   └── prompts.py
 ├── api/
-│   └── server.py               # FastAPI（含 /api/harness/* 端点）
+│   └── server.py               # FastAPI（含 /api/harness/* /api/video/* 等端点）
 └── cli/
     └── main.py                 # Click CLI
 ```

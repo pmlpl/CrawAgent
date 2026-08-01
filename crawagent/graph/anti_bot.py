@@ -314,3 +314,194 @@ async def handle_anti_bot_challenge(
     if upgrade:
         return upgrade.model_dump()
     return {"action": "human_intervention", "reason": "无法确定策略"}
+
+
+# ==================== P1-3: is_blocked() 三层检测 ====================
+
+class BlockResult(BaseModel):
+    """反爬检测结果"""
+    blocked: bool = False
+    challenge_type: str = "none"  # none / cloudflare / waf / rate_limit / captcha / forbidden / js_challenge
+    confidence: float = 0.0
+    evidence: str = ""
+    recommended_action: str = ""  # use_curl_cffi / use_browser / wait_and_retry / solve_captcha / switch_proxy
+
+
+# 三层检测的信号特征
+_BLOCK_STATUS_CODES = {401, 403, 429, 503}
+
+_CLOUDFLARE_HEADER_SIGNALS = {"cf-ray", "cf-mitigated", "server: cloudflare"}
+_CLOUDFLARE_BODY_SIGNALS = ["challenge-platform", "cf-browser-verification", "cf_chl_opt", "just a moment"]
+
+_WAF_HEADER_SIGNALS = {"akamai", "incapsula", "sucuri", "imperva", "x-cdn: incapsula"}
+_WAF_BODY_SIGNALS = ["access denied", "request blocked", "security check", "incapsula incident", "sucuri firewall"]
+
+_CAPTCHA_BODY_SIGNALS = ["g-recaptcha", "h-captcha", "captcha-container", "slider", "gt_slider", "geetest"]
+
+_JS_CHALLENGE_SIGNALS = ["enable javascript", "please enable javascript", "noscript", "javascript is disabled"]
+
+
+def is_blocked(
+    status_code: int = 0,
+    headers: Optional[Dict] = None,
+    body: str = "",
+    error: str = "",
+) -> BlockResult:
+    """三层反爬检测：状态码 + 响应头 + 响应体
+
+    Layer 1 — 状态码：401/403/429/503 直接判定
+    Layer 2 — 响应头：Cloudflare/WAF 指纹
+    Layer 3 — 响应体：CAPTCHA / JS 挑战 / WAF 拦截页
+
+    Args:
+        status_code: HTTP 状态码
+        headers: 响应头字典
+        body: 响应体文本（前几 KB 即可）
+        error: 错误信息
+
+    Returns:
+        BlockResult: 是否被封、挑战类型、建议动作
+    """
+    headers = headers or {}
+    headers_lower = {k.lower(): str(v).lower() for k, v in headers.items()}
+    headers_str = str(headers_lower)
+    body_lower = body.lower()[:8192] if body else ""
+    error_lower = (error or "").lower()
+
+    # ---- Layer 1: 状态码 ----
+    if status_code == 429:
+        return BlockResult(
+            blocked=True,
+            challenge_type="rate_limit",
+            confidence=0.95,
+            evidence=f"HTTP {status_code}",
+            recommended_action="wait_and_retry",
+        )
+
+    if status_code in (401, 403):
+        return BlockResult(
+            blocked=True,
+            challenge_type="forbidden",
+            confidence=0.85,
+            evidence=f"HTTP {status_code}",
+            recommended_action="use_curl_cffi",
+        )
+
+    if status_code == 503:
+        # 503 可能是 Cloudflare 或临时维护
+        if any(sig in headers_str for sig in _CLOUDFLARE_HEADER_SIGNALS):
+            return BlockResult(
+                blocked=True,
+                challenge_type="cloudflare",
+                confidence=0.9,
+                evidence=f"HTTP 503 + Cloudflare headers",
+                recommended_action="use_browser",
+            )
+        return BlockResult(
+            blocked=True,
+            challenge_type="service_unavailable",
+            confidence=0.6,
+            evidence=f"HTTP 503",
+            recommended_action="wait_and_retry",
+        )
+
+    # ---- Layer 2: 响应头指纹 ----
+    for sig in _CLOUDFLARE_HEADER_SIGNALS:
+        if sig in headers_str:
+            return BlockResult(
+                blocked=True,
+                challenge_type="cloudflare",
+                confidence=0.8,
+                evidence=f"Header signal: {sig}",
+                recommended_action="use_browser",
+            )
+
+    for sig in _WAF_HEADER_SIGNALS:
+        if sig in headers_str:
+            return BlockResult(
+                blocked=True,
+                challenge_type="waf",
+                confidence=0.75,
+                evidence=f"WAF header: {sig}",
+                recommended_action="use_curl_cffi",
+            )
+
+    # ---- Layer 3: 响应体内容 ----
+    for sig in _CLOUDFLARE_BODY_SIGNALS:
+        if sig in body_lower:
+            return BlockResult(
+                blocked=True,
+                challenge_type="cloudflare",
+                confidence=0.85,
+                evidence=f"Body signal: {sig}",
+                recommended_action="use_browser",
+            )
+
+    for sig in _WAF_BODY_SIGNALS:
+        if sig in body_lower:
+            return BlockResult(
+                blocked=True,
+                challenge_type="waf",
+                confidence=0.7,
+                evidence=f"Body signal: {sig}",
+                recommended_action="use_curl_cffi",
+            )
+
+    for sig in _CAPTCHA_BODY_SIGNALS:
+        if sig in body_lower:
+            return BlockResult(
+                blocked=True,
+                challenge_type="captcha",
+                confidence=0.8,
+                evidence=f"Captcha signal: {sig}",
+                recommended_action="solve_captcha",
+            )
+
+    for sig in _JS_CHALLENGE_SIGNALS:
+        if sig in body_lower:
+            return BlockResult(
+                blocked=True,
+                challenge_type="js_challenge",
+                confidence=0.65,
+                evidence=f"JS challenge: {sig}",
+                recommended_action="use_browser",
+            )
+
+    # ---- 错误信息兜底 ----
+    if "timeout" in error_lower or "connection refused" in error_lower:
+        return BlockResult(
+            blocked=False,
+            challenge_type="network_error",
+            confidence=0.5,
+            evidence=error,
+            recommended_action="wait_and_retry",
+        )
+
+    return BlockResult(blocked=False, challenge_type="none", confidence=0.0)
+
+
+def is_blocked_from_result(result: Any) -> BlockResult:
+    """从 CrawlResult 对象快速检测
+
+    Args:
+        result: CrawlResult 或包含 status_code/headers/html/error 的 dict
+
+    Returns:
+        BlockResult
+    """
+    if hasattr(result, "status_code"):
+        # CrawlResult 对象
+        return is_blocked(
+            status_code=getattr(result, "status_code", 0) or 0,
+            headers=getattr(result, "headers", None),
+            body=getattr(result, "html", "") or "",
+            error=getattr(result, "error", "") or "",
+        )
+    elif isinstance(result, dict):
+        return is_blocked(
+            status_code=result.get("status_code", 0) or result.get("status", 0),
+            headers=result.get("headers"),
+            body=result.get("html", "") or result.get("content", "") or "",
+            error=result.get("error", "") or "",
+        )
+    return BlockResult(blocked=False)

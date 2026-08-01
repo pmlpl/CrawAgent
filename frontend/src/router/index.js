@@ -29,6 +29,24 @@ const routes = [
     component: () => import('../views/Output.vue'),
     meta: { title: '文件整理' },
   },
+  {
+    path: '/monitor',
+    name: 'Monitor',
+    component: () => import('../views/Monitor.vue'),
+    meta: { title: '监控' },
+  },
+  {
+    path: '/security',
+    name: 'Security',
+    component: () => import('../views/Security.vue'),
+    meta: { title: '安全' },
+  },
+  {
+    path: '/video',
+    name: 'Video',
+    component: () => import('../views/Video.vue'),
+    meta: { title: '视频' },
+  },
 ]
 
 const router = createRouter({

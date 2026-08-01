@@ -147,24 +147,48 @@ SEARCH_TOOL = CrawlToolDef(
 
 MONITOR_TOOL = CrawlToolDef(
     name="monitor",
-    description="监控目标 URL 的变化。设置监控频率和告警条件。",
+    description="监控目标 URL 的变化。设置监控频率和告警条件，变化时通过 Webhook 通知。"
+                "支持字段级监控（price/stock）和整体内容变化检测。",
     parameters={
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "监控目标 URL"},
-            "interval_minutes": {"type": "number", "default": 360, "description": "监控间隔（分钟）"},
-            "selector": {"type": "string", "description": "监控的 CSS 选择器"},
-            "condition": {
-                "type": "string",
-                "enum": ["any_change", "text_change", "price_drop", "available"],
-                "default": "any_change",
+            "name": {"type": "string", "description": "监控任务名称（便于识别）"},
+            "interval_minutes": {"type": "number", "default": 360, "description": "监控间隔（分钟），默认 6 小时"},
+            "watch_fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "监控字段列表（如 [\"price\", \"stock\"]），从 JSON-LD/Meta 提取",
             },
-            "webhook": {"type": "string", "description": "变化时的 Webhook URL"},
+            "css_selector": {"type": "string", "description": "监控特定元素的 CSS 选择器（如 .price-tag）"},
+            "webhook": {"type": "string", "description": "变化时的 Webhook 通知 URL"},
+            "alert_cooldown_minutes": {"type": "number", "default": 60, "description": "告警冷却（分钟），同 URL 冷却内不重复告警"},
         },
         "required": ["url"],
     },
     exec_mode=ToolExecMode.SEQUENTIAL,
     replay_safe=False,
+)
+
+CHECK_CHANGE_TOOL = CrawlToolDef(
+    name="check_change",
+    description="立即检查监控目标是否有变化。返回变化详情（字段对比 + diff 摘要）。"
+                "用于手动触发监控检查，不依赖调度器。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "监控任务 ID"},
+            "url": {"type": "string", "description": "直接指定 URL（无需 task_id，临时检查）"},
+            "watch_fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "监控字段列表（临时检查时使用）",
+            },
+            "css_selector": {"type": "string", "description": "CSS 选择器（临时检查时使用）"},
+        },
+    },
+    exec_mode=ToolExecMode.PARALLEL,
+    replay_safe=True,
 )
 
 SCAN_VULN_TOOL = CrawlToolDef(
@@ -182,6 +206,30 @@ SCAN_VULN_TOOL = CrawlToolDef(
             "depth": {"type": "number", "default": 1, "description": "扫描深度"},
         },
         "required": ["url"],
+    },
+    exec_mode=ToolExecMode.SEQUENTIAL,
+    replay_safe=False,
+)
+
+FIX_ISSUE_TOOL = CrawlToolDef(
+    name="fix_issue",
+    description="根据漏洞扫描结果生成修复补丁。输入漏洞 ID 列表或扫描任务 ID，"
+                "输出 unified diff 格式的补丁文件，可保存到指定路径。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "scan_task_id": {"type": "string", "description": "扫描任务 ID（生成该任务所有漏洞的补丁）"},
+            "vulnerability_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "指定漏洞 ID 列表（仅生成这些漏洞的补丁）",
+            },
+            "output_dir": {
+                "type": "string",
+                "default": "./output/security_patches",
+                "description": "补丁文件保存目录",
+            },
+        },
     },
     exec_mode=ToolExecMode.SEQUENTIAL,
     replay_safe=False,
@@ -694,7 +742,11 @@ async def save_executor(args: Dict[str, Any]) -> Dict[str, Any]:
             "skipped": skipped,
         }
 
-    # 3. 写入（带检查点）
+    # 3. 图片下载：检测 records 中的图片字段并下载到同级 images/ 子目录
+    #    把本地相对路径回填到 record 的 local_images 字段
+    image_dl_result = await _maybe_download_images(deduped, path)
+
+    # 4. 写入（带检查点）
     try:
         written = 0
         if fmt == "json":
@@ -737,13 +789,22 @@ async def save_executor(args: Dict[str, Any]) -> Dict[str, Any]:
                         f.flush()
                 written = len(deduped)
 
+        img_info = ""
+        if image_dl_result["downloaded"] > 0 or image_dl_result["failed"] > 0:
+            img_info = f"，下载图片 {image_dl_result['downloaded']} 张"
+            if image_dl_result["failed"] > 0:
+                img_info += f"（失败 {image_dl_result['failed']}）"
+
         return {
-            "content": f"已保存 {written} 条记录到 {path}（跳过 {skipped} 条重复）",
+            "content": f"已保存 {written} 条记录到 {path}（跳过 {skipped} 条重复{img_info}）",
             "status_code": STATUS_OK,
             "path": path,
             "format": fmt,
             "written": written,
             "skipped": skipped,
+            "images_downloaded": image_dl_result["downloaded"],
+            "images_failed": image_dl_result["failed"],
+            "images_dir": image_dl_result["images_dir"],
         }
     except Exception as e:
         return {
@@ -846,6 +907,103 @@ def _record_hash(rec: Dict) -> str:
     # 无唯一字段：用全部内容哈希
     content = _json.dumps(rec, ensure_ascii=False, sort_keys=True, default=str)
     return _hashlib.md5(content.encode()).hexdigest()
+
+
+# ==================== 图片下载集成（P3 收尾） ====================
+
+# 图片字段命名约定（大小写不敏感匹配），兼容主流提取器输出
+_IMAGE_LIST_FIELDS = (
+    "images", "image_urls", "thumbnails", "imgs", "photos", "pictures", "pics",
+)
+_IMAGE_SINGLE_FIELDS = (
+    "image", "image_url", "img", "img_url",
+    "thumbnail", "thumbnail_url", "cover", "logo", "avatar",
+)
+
+
+async def _maybe_download_images(
+    records: List[Dict], main_path: str
+) -> Dict[str, Any]:
+    """检测 records 中的图片字段并下载到主文件同级 images/ 子目录。
+
+    把下载后的本地相对路径回填到 record 的 local_images 字段。
+    下载失败不阻塞主流程，仅 debug 日志记录。
+
+    Returns:
+        {"downloaded": int, "failed": int, "images_dir": str, "paths": List[str]}
+    """
+    empty = {"downloaded": 0, "failed": 0, "images_dir": "", "paths": []}
+
+    # 1. 收集所有图片 URL（大小写不敏感匹配字段名）
+    download_tasks: List[tuple] = []  # [(record, url, title_hint)]
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        title_hint = str(rec.get("title") or rec.get("name") or rec.get("id") or "")
+        # list 字段：images/image_urls/thumbnails/...
+        for field in _IMAGE_LIST_FIELDS:
+            val = _get_case_insensitive(rec, field)
+            if isinstance(val, list):
+                for i, url in enumerate(val):
+                    if isinstance(url, str) and url.startswith(("http://", "https://")):
+                        hint = f"{title_hint}_{i}" if title_hint else str(i)
+                        download_tasks.append((rec, url, hint))
+        # 单值字段：image/image_url/cover/...
+        for field in _IMAGE_SINGLE_FIELDS:
+            val = _get_case_insensitive(rec, field)
+            if isinstance(val, str) and val.startswith(("http://", "https://")):
+                download_tasks.append((rec, val, title_hint or "image"))
+
+    if not download_tasks:
+        return empty
+
+    # 2. 创建 images/ 子目录（与主文件同级）
+    from loguru import logger
+    base_dir = os.path.dirname(os.path.abspath(main_path))
+    images_dir = os.path.join(base_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
+
+    # 3. 串行下载（避免对目标站压力过大）
+    from crawagent.output.media_downloader import MediaDownloader
+    dl = MediaDownloader(base_dir=images_dir)
+
+    downloaded = 0
+    failed = 0
+    paths: List[str] = []
+    for rec, url, hint in download_tasks:
+        try:
+            result = await dl.download(url, title=hint)
+            if result.get("success"):
+                downloaded += 1
+                paths.append(result["path"])
+                # 回填相对路径（便于跨机器使用）
+                rel_path = os.path.relpath(result["path"], base_dir)
+                rec.setdefault("local_images", []).append(rel_path)
+            else:
+                failed += 1
+                logger.debug(f"图片下载失败 {url}: {result.get('error')}")
+        except Exception as e:
+            failed += 1
+            logger.debug(f"图片下载异常 {url}: {e}")
+
+    return {
+        "downloaded": downloaded,
+        "failed": failed,
+        "images_dir": images_dir,
+        "paths": paths,
+    }
+
+
+def _get_case_insensitive(d: Dict, key: str) -> Any:
+    """大小写不敏感获取 dict 字段值。"""
+    if not isinstance(d, dict):
+        return None
+    if key in d:
+        return d[key]
+    for k in d.keys():
+        if isinstance(k, str) and k.lower() == key.lower():
+            return d[k]
+    return None
 
 
 # ==================== CrawlSupervisor 调度器（工具间协作编排） ====================
@@ -1237,8 +1395,260 @@ def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
             "results": matches,
         }
 
+    # monitor 执行器：创建监控任务（P4-6）
+    async def monitor_executor(args: Dict[str, Any]) -> Dict[str, Any]:
+        """monitor 工具执行器：创建监控任务并加入调度
+
+        Agent 可通过此工具自主创建监控任务：
+        - 设置 URL + 监控频率 + 字段
+        - 配置 Webhook 通知
+        - 立即触发首次检查
+        """
+        from crawagent.monitor import MonitorTask, ScheduleType, get_monitor_store
+
+        url = args.get("url", "").strip()
+        name = args.get("name", "") or f"监控-{url[:30]}"
+        interval_minutes = int(args.get("interval_minutes", 360))
+        watch_fields = args.get("watch_fields", [])
+        css_selector = args.get("css_selector", "")
+        webhook = args.get("webhook", "")
+        cooldown_minutes = int(args.get("alert_cooldown_minutes", 60))
+
+        if not url:
+            return {"content": "Error: missing 'url' argument", "error": True, "status_code": STATUS_FAILED}
+
+        task = MonitorTask(
+            name=name,
+            url=url,
+            schedule_type=ScheduleType.INTERVAL,
+            interval_seconds=interval_minutes * 60,
+            watch_fields=watch_fields,
+            css_selector=css_selector,
+            alert_webhook=webhook,
+            alert_cooldown=cooldown_minutes * 60,
+        )
+        store = get_monitor_store()
+        store.create_task(task)
+
+        # 立即触发首次检查（建立基线）
+        try:
+            from crawagent.monitor import MonitorScheduler
+            scheduler = MonitorScheduler(store=store)
+            result = await scheduler.run_task_once(task.id)
+            summary = result.get("summary", "首次检查完成")
+        except Exception as e:
+            summary = f"首次检查失败: {e}"
+
+        return {
+            "content": f"监控任务已创建：{name}\nURL: {url}\n间隔: {interval_minutes} 分钟\n"
+                       f"监控字段: {watch_fields or '整体内容'}\n首次检查: {summary}",
+            "status_code": STATUS_OK,
+            "task_id": task.id,
+            "name": name,
+            "url": url,
+            "interval_minutes": interval_minutes,
+            "first_check": result if 'result' in dir() else None,
+        }
+
+    # check_change 执行器：立即检查变化（P4-6）
+    async def check_change_executor(args: Dict[str, Any]) -> Dict[str, Any]:
+        """check_change 工具执行器：立即检查监控目标是否有变化
+
+        支持两种模式：
+        1. 传入 task_id → 检查已有任务
+        2. 传入 url + watch_fields → 临时检查（自动创建一次性任务）
+        """
+        from crawagent.monitor import MonitorTask, ScheduleType, get_monitor_store, MonitorScheduler
+
+        task_id = args.get("task_id", "")
+        url = args.get("url", "")
+
+        if not task_id and not url:
+            return {"content": "Error: 需提供 task_id 或 url", "error": True, "status_code": STATUS_FAILED}
+
+        store = get_monitor_store()
+        scheduler = MonitorScheduler(store=store)
+
+        if task_id:
+            # 模式 1：检查已有任务
+            result = await scheduler.run_task_once(task_id)
+        else:
+            # 模式 2：临时检查（创建一次性任务）
+            task = MonitorTask(
+                name="临时检查",
+                url=url,
+                schedule_type=ScheduleType.ONCE,
+                interval_seconds=0,
+                watch_fields=args.get("watch_fields", []),
+                css_selector=args.get("css_selector", ""),
+                alert_webhook="",
+            )
+            store.create_task(task)
+            result = await scheduler.run_task_once(task.id)
+
+        return {
+            "content": result.get("summary", "检查完成"),
+            "status_code": STATUS_OK if result.get("success") else STATUS_FAILED,
+            "changed": result.get("changed", False),
+            "summary": result.get("summary", ""),
+            "fields": result.get("fields", {}),
+            "status_code_http": result.get("status_code"),
+        }
+
+    # ==================== P5 安全扫描工具执行器 ====================
+
+    async def scan_vuln_executor(args: Dict[str, Any]) -> Dict[str, Any]:
+        """scan_vuln 工具执行器：运行 OWASP Top 10 漏洞扫描
+
+        流程：创建扫描任务 → 运行 VulnScanner → 持久化漏洞 → 返回结构化报告
+        """
+        from crawagent.security import (
+            SecurityLane, VulnCategory, get_security_store,
+        )
+
+        url = args.get("url", "")
+        if not url:
+            return {"content": "Error: missing 'url' argument", "error": True}
+
+        # 类别映射（字符串 → VulnCategory 枚举）
+        category_names = args.get("categories", [])
+        categories: List[VulnCategory] = []
+        for name in category_names:
+            if isinstance(name, str):
+                # 尝试匹配枚举值
+                for cat in VulnCategory:
+                    if cat.value.lower() == name.lower() or cat.name.lower() == name.lower():
+                        categories.append(cat)
+                        break
+
+        depth = int(args.get("depth", 1))
+
+        try:
+            lane = SecurityLane(store=get_security_store())
+            result = await lane.run_scan(
+                url=url,
+                categories=categories or None,
+                depth=depth,
+            )
+            scan_result = result["scan_result"]
+            task = result["task"]
+            patches = result.get("patches", [])
+
+            # 生成摘要给 LLM
+            vulns = scan_result.vulnerabilities
+            severity_counts = scan_result.severity_counts
+            summary_lines = [
+                f"安全扫描完成：发现 {len(vulns)} 个漏洞",
+                f"严重性分布：{severity_counts or '无'}",
+                f"扫描页面 {scan_result.pages_scanned} 个，发送请求 {scan_result.requests_sent} 次",
+                f"耗时 {scan_result.duration_seconds:.1f}s",
+                "",
+                "漏洞详情：",
+            ]
+            for v in vulns[:20]:  # 最多列 20 个
+                summary_lines.append(f"  - {v.to_summary()}")
+            if len(vulns) > 20:
+                summary_lines.append(f"  ... 还有 {len(vulns) - 20} 个漏洞")
+
+            if patches:
+                summary_lines.append("")
+                summary_lines.append(f"已生成 {len(patches)} 个修复补丁（可用 fix_issue 工具保存）")
+
+            return {
+                "content": "\n".join(summary_lines),
+                "status_code": STATUS_OK,
+                "scan_task_id": task.id,
+                "vuln_count": len(vulns),
+                "severity_counts": severity_counts,
+                "vulnerabilities": [v.model_dump() for v in vulns],
+                "patch_count": len(patches),
+                "pages_scanned": scan_result.pages_scanned,
+                "requests_sent": scan_result.requests_sent,
+                "duration_seconds": scan_result.duration_seconds,
+            }
+        except Exception as e:
+            logger.exception(f"scan_vuln 执行失败: {e}")
+            return {
+                "content": f"安全扫描失败: {e}",
+                "error": True,
+                "status_code": STATUS_FAILED,
+            }
+
+    async def fix_issue_executor(args: Dict[str, Any]) -> Dict[str, Any]:
+        """fix_issue 工具执行器：根据漏洞生成修复补丁文件
+
+        支持两种输入：
+        - scan_task_id：生成该任务所有漏洞的补丁
+        - vulnerability_ids：仅生成指定漏洞的补丁
+        """
+        from crawagent.security import (
+            get_security_store, AutoFixer,
+        )
+
+        scan_task_id = args.get("scan_task_id", "")
+        vuln_ids = args.get("vulnerability_ids", [])
+        output_dir = args.get("output_dir", "./output/security_patches")
+
+        store = get_security_store()
+
+        # 收集漏洞
+        if vuln_ids:
+            # 按指定 ID 取
+            all_vulns = store.list_vulnerabilities(task_id=scan_task_id, limit=1000)
+            vulns = [v for v in all_vulns if v.id in vuln_ids]
+        else:
+            vulns = store.list_vulnerabilities(task_id=scan_task_id, limit=1000)
+
+        if not vulns:
+            return {
+                "content": "未找到匹配的漏洞记录，无法生成补丁",
+                "status_code": STATUS_OK,
+                "patches_generated": 0,
+            }
+
+        # 生成补丁
+        fixer = AutoFixer()
+        patches = await fixer.generate_patches(vulns, scan_task_id=scan_task_id)
+
+        # 保存到文件
+        patch_files = await fixer.save_patches(patches, output_dir=output_dir)
+
+        # 生成摘要
+        summary_lines = [
+            f"已生成 {len(patches)} 个修复补丁",
+            f"覆盖 {len(vulns)} 个漏洞",
+            f"保存目录：{output_dir}",
+            "",
+            "补丁列表：",
+        ]
+        for p in patches:
+            summary_lines.append(f"  - {p.to_summary()}")
+        summary_lines.append("")
+        summary_lines.append("应用补丁：git apply <patch_file>")
+
+        return {
+            "content": "\n".join(summary_lines),
+            "status_code": STATUS_OK,
+            "patches_generated": len(patches),
+            "patch_files": patch_files,
+            "patches": [
+                {
+                    "id": p.id,
+                    "title": p.title,
+                    "target_file": p.target_file,
+                    "severity": p.severity.value,
+                    "vulnerability_ids": p.vulnerability_ids,
+                    "diff": p.diff,
+                    "description": p.description,
+                }
+                for p in patches
+            ],
+        }
+
     registry.register(SEARCH_TOOL, executor=search_executor)
-    registry.register(MONITOR_TOOL)   # monitor 暂无执行器
-    registry.register(SCAN_VULN_TOOL) # scan_vuln 暂无执行器
+    registry.register(MONITOR_TOOL, executor=monitor_executor)
+    registry.register(CHECK_CHANGE_TOOL, executor=check_change_executor)
+    registry.register(SCAN_VULN_TOOL, executor=scan_vuln_executor)
+    registry.register(FIX_ISSUE_TOOL, executor=fix_issue_executor)
 
     return registry

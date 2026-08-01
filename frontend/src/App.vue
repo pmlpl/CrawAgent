@@ -42,6 +42,25 @@
           </svg>
           <span>文件</span>
         </router-link>
+        <router-link to="/monitor" class="nav-item" active-class="nav-item--active">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>
+          </svg>
+          <span>监控</span>
+        </router-link>
+        <router-link to="/security" class="nav-item" active-class="nav-item--active">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          <span>安全</span>
+        </router-link>
+        <router-link to="/video" class="nav-item" active-class="nav-item--active">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+          </svg>
+          <span>视频</span>
+        </router-link>
       </nav>
 
       <div class="sidebar-footer">

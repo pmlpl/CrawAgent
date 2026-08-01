@@ -26,7 +26,7 @@ from sqlalchemy import Boolean, Double, String, Text, UniqueConstraint, select, 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from crawagent.harness.types import CrawlMessage, LaneInfo, OperationType, OperationRecord
+from crawagent.harness.types import CrawlMessage, LaneInfo, OperationType, OperationRecord, RecoveryPlan, RecoveredOperation
 from crawagent.core.database import Base
 
 
@@ -99,6 +99,51 @@ class GlobalFactModel(Base):
     key: Mapped[str] = mapped_column(String(255))
     value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[float] = mapped_column(Double, default=0.0)
+
+
+# ---------------------------------------------------------------------------
+# ID 预分配池（P6-2）
+# ---------------------------------------------------------------------------
+
+class IdPool:
+    """批量预分配 uuid id，降低每次 append_entry/start_operation 都重新生成的散点。
+
+    典型用法：
+        pool = IdPool(pool_size=20)
+        entry = CrawlMessage(id=pool.next_entry_id(), ...)
+        op_id = pool.next_operation_id()
+    """
+
+    def __init__(self, pool_size: int = 20) -> None:
+        self.pool_size = pool_size
+        self._entry_ids: List[str] = []
+        self._op_ids: List[str] = []
+
+    def _refill_entry(self) -> None:
+        if self._entry_ids:
+            return
+        for _ in range(self.pool_size):
+            self._entry_ids.append(uuid.uuid4().hex[:24])
+
+    def _refill_op(self) -> None:
+        if self._op_ids:
+            return
+        for _ in range(max(4, self.pool_size // 4)):
+            self._op_ids.append(uuid.uuid4().hex)
+
+    def next_entry_id(self) -> str:
+        self._refill_entry()
+        return self._entry_ids.pop(0)
+
+    def next_operation_id(self) -> str:
+        self._refill_op()
+        return self._op_ids.pop(0)
+
+    def bulk_entry_ids(self, n: int) -> List[str]:
+        out: List[str] = []
+        for _ in range(n):
+            out.append(self.next_entry_id())
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +497,219 @@ class CrawlSession:
             result = await session.execute(stmt)
             facts = result.scalars().all()
             return {f.key: json.loads(f.value) for f in facts}
+
+    # --- 批量写入（append_entries） ---
+
+    async def append_entries(self, entries: List[CrawlMessage]) -> None:
+        """批量追加条目（减少 commit 次数）。"""
+        if not entries:
+            return
+        models = [_entry_to_model(e, self.session_id) for e in entries]
+        async with AsyncSession(self._engine) as session:
+            session.add_all(models)
+            await session.commit()
+
+    # --- 预分配 ID（可选路径：调用方先拿预分配 ID，再构造 CrawlMessage）---
+
+    def create_id_pool(self, pool_size: int = 20) -> IdPool:
+        """创建预分配 ID 池。"""
+        return IdPool(pool_size=pool_size)
+
+    # --- Operation 增强：operation_id 可预分配，anchor leaf 记录 ---
+
+    async def start_operation(
+        self,
+        lane_name: str,
+        op_type: OperationType,
+        op_id: Optional[str] = None,
+    ) -> str:
+        """开始操作，返回 operation id。
+
+        - op_id=None 时自动生成
+        - op_id 可来自 IdPool.next_operation_id()（预分配，用于崩溃前已知 op_id 场景）
+        - 同时在 global fact 里记录 {f"op_anchor_{op_id}": 当前 lane leaf_id}，用于恢复时找到"operation 起点之前"的上下文锚点
+        """
+        new_op_id = op_id or uuid.uuid4().hex
+        now = time.time()
+        # 记录锚点：当前 leaf
+        leaf = await self.get_leaf_entry(lane_name)
+        anchor_leaf_id = leaf.id if leaf else None
+        model = OperationLogModel(
+            id=new_op_id,
+            session_id=self.session_id,
+            lane_name=lane_name,
+            op_type=op_type.value,
+            started_at=now,
+            finished_at=None,
+            entries_json="[]",
+            error=None,
+        )
+        async with AsyncSession(self._engine) as session:
+            session.add(model)
+            await session.commit()
+        # 同步标记 lane 有 open operation
+        await self.set_lane_open_operation(lane_name, True)
+        # 锚点存 global fact（简洁）
+        await self.set_fact(f"__op_anchor_{new_op_id}", anchor_leaf_id)
+        return new_op_id
+
+    async def heartbeat_operation(self, op_id: str, touch_entry: Optional[str] = None) -> None:
+        """心跳：把 operation started_at 往前挪一点（避免误认为崩溃）。
+        可选择把某个 entry 追加到 operation 的 entries 列表。
+        """
+        now = time.time()
+        async with AsyncSession(self._engine) as session:
+            stmt = (
+                select(OperationLogModel)
+                .where(OperationLogModel.id == op_id)
+            )
+            result = await session.execute(stmt)
+            op = result.scalar_one_or_none()
+            if op is None:
+                return
+            op.started_at = now  # 用 started_at 作为"最后心跳时间"代替（兼容字段）
+            if touch_entry:
+                entries: List[str] = json.loads(op.entries_json)
+                if touch_entry not in entries:
+                    entries.append(touch_entry)
+                op.entries_json = json.dumps(entries, ensure_ascii=False)
+            await session.commit()
+
+    # --- 崩溃恢复（P6-2 核心）---
+
+    async def build_recovery_plan(
+        self,
+        hooks: Any = None,
+        now_threshold_seconds: float = 600.0,  # started_at 距离"现在"超过这个阈值且未完成 → 视为崩溃
+    ) -> RecoveryPlan:
+        """扫描所有 open operation，生成 RecoveryPlan。
+
+        策略：
+        - COMPACTION 未完成：自动标记失败（不会脏写 append-only，安全）
+        - NAVIGATION / RUN：需要上层结合 tool replay_safe 判断
+        - 超长时间未心跳（started_at + now_threshold 内未 finish）：视为崩溃
+        - 对每个 open op，读取 global fact 锚点作为 anchor_leaf_id
+        """
+        from crawagent.harness.types import RecoveryAction
+        open_ops = await self.get_open_operations()
+
+        plan = RecoveryPlan(session_id=self.session_id)
+
+        # lanes that has_open_operation
+        for lane in await self.list_lanes():
+            if lane.has_open_operation:
+                plan.open_lanes.append(lane.name)
+
+        # 孤儿消息：未完成的 assistant tool_calls 消息 / tool 消息 pair 中断
+        all_entries = await self.get_entries(limit=5000, order="asc")
+        pending_tool_call_ids: Set[str] = set()
+        seen_tool_result_ids: Set[str] = set()
+        # Step 1: 收集所有 assistant 发起的 tool_call_id
+        for e in all_entries:
+            if e.role == "assistant" and e.tool_calls:
+                for tc in e.tool_calls:
+                    tc_id = tc.get("id") if isinstance(tc, dict) else None
+                    if tc_id:
+                        pending_tool_call_ids.add(tc_id)
+        for e in all_entries:
+            if e.role in ("tool", "function") and e.tool_call_id:
+                seen_tool_result_ids.add(e.tool_call_id)
+        # 孤儿 = 有 tool_call 发起但没 tool 结果消息 → assistant 消息标记为 orphan（恢复时跳过/回滚）
+        orphan_call_ids = pending_tool_call_ids - seen_tool_result_ids
+        orphan_entries = []
+        for e in all_entries:
+            if e.role == "assistant" and e.tool_calls:
+                call_ids = [tc.get("id") for tc in e.tool_calls if isinstance(tc, dict)]
+                if any(cid in orphan_call_ids for cid in call_ids):
+                    orphan_entries.append(e.id)
+        plan.orphan_entry_ids = orphan_entries
+
+        for op_rec in open_ops:
+            anchor_raw = await self.get_fact(f"__op_anchor_{op_rec.id}", default=None)
+            anchor_leaf_id = anchor_raw if isinstance(anchor_raw, (str, type(None))) else None
+            # 判断动作
+            dur = time.time() - op_rec.started_at
+            action = RecoveryAction.MARK_FAILED
+            reason = f"未完成操作 {op_rec.op_type.value}, duration={dur:.0f}s"
+            if op_rec.op_type == OperationType.COMPACTION:
+                # 压缩失败不会破坏 append-only，可直接放弃
+                action = RecoveryAction.MARK_FAILED
+                reason = "压缩操作未完成（压缩逻辑幂等，标记失败，由下次 checkpoint 自动重试）"
+            elif op_rec.op_type == OperationType.NAVIGATION:
+                # 导航操作：如果是纯读抓取（HTTP GET），属于幂等，默认 replay_safe
+                action = RecoveryAction.REPLAY_SAFE
+                reason = "导航 / 抓取操作未完成（HTTP GET 默认幂等，建议 REPLAY_SAFE 重放）"
+            elif op_rec.op_type == OperationType.RUN:
+                # RUN 是更高级别的 Agent 运行，可能含写操作，默认 RETRY，上层再判断
+                action = RecoveryAction.RETRY
+                reason = "RUN 操作未完成（上层 CrawlLoop 再根据工具是否 replay_safe 决定是否重放）"
+            plan.operations.append(
+                RecoveredOperation(
+                    record=op_rec,
+                    action=action,
+                    reason=reason,
+                    anchor_leaf_id=anchor_leaf_id,
+                    lane_name=op_rec.lane_name,
+                )
+            )
+
+        # fire hooks（如传入）
+        if hooks is not None:
+            try:
+                from crawagent.harness.types import HookEvent
+                ctx = {"plan": plan, "open_ops": [r.model_dump() if hasattr(r, "model_dump") else r for r in open_ops]}
+                if hasattr(hooks, "fire"):
+                    await hooks.fire(HookEvent.BEFORE_CRASH_RECOVERY, ctx)
+            except Exception:
+                pass
+
+        return plan
+
+    async def apply_recovery_plan(self, plan: RecoveryPlan) -> None:
+        """执行恢复计划：把 MARK_FAILED / 执行了 REPLAY_SAFE / RETRY 后的 open ops 统一收尾。
+
+        本方法的语义：
+        - 对 MARK_FAILED：finish_operation(error=...) 标记失败
+        - 对 REPLAY_SAFE / RETRY：**调用方已负责重放或重试成功后**，再调用本方法收尾
+        - 最终会把所有 plan.operations 对应的 op 都设为已结束
+        """
+        for ro in plan.operations:
+            rec = ro.record
+            if rec.finished_at is not None:
+                continue
+            error = ro.reason or f"recovery_action={ro.action.value}"
+            await self.finish_operation(rec.id, error=error)
+        # fire AFTER_CRASH_RECOVERY hook
+        # (hooks 不作为参数传进来，避免破坏签名稳定；上层可自行 fire)
+        return None
+
+    async def lane_chain_from_anchor(
+        self,
+        lane_name: str,
+        anchor_leaf_id: Optional[str] = None,
+    ) -> List[CrawlMessage]:
+        """从锚点 leaf 起重建 lane chain（锚点之后的消息）。
+
+        用于崩溃恢复：anchor_leaf_id = operation 开始前的 leaf；
+        返回 anchor 之后（不含 anchor）到当前 leaf 的所有 entries，按时间升序。
+        """
+        all_entries = await self.get_entries(limit=5000, order="asc")
+        if not all_entries:
+            return []
+        by_id = {e.id: e for e in all_entries}
+
+        leaf = await self.get_leaf_entry(lane_name)
+        if leaf is None:
+            return []
+        chain_desc: List[CrawlMessage] = []
+        cur: Optional[CrawlMessage] = leaf
+        while cur is not None:
+            if cur.id == anchor_leaf_id:
+                break
+            chain_desc.append(cur)
+            cur = by_id.get(cur.parent_id) if cur.parent_id else None
+        chain_desc.reverse()  # 老 → 新
+        return chain_desc
 
 
 # ---------------------------------------------------------------------------

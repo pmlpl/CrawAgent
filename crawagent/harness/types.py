@@ -51,6 +51,9 @@ class HookEvent(str, Enum):
     BEFORE_REQUEST = "before_request"
     AFTER_RESPONSE = "after_response"
     BEFORE_COMPACTION = "before_compaction"
+    AFTER_COMPACTION = "after_compaction"
+    BEFORE_CRASH_RECOVERY = "before_crash_recovery"
+    AFTER_CRASH_RECOVERY = "after_crash_recovery"
     BEFORE_RUN_END = "before_run_end"
 
 
@@ -148,6 +151,62 @@ class OperationRecord:
     finished_at: Optional[float] = None
     entries: List[str] = field(default_factory=list)
     error: Optional[str] = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.finished_at is None
+
+    @property
+    def duration_seconds(self) -> Optional[float]:
+        if self.finished_at is None:
+            return None
+        return max(0.0, self.finished_at - self.started_at)
+
+
+# ---------------------------------------------------------------------------
+# RecoveredOperation / RecoveryPlan - 崩溃恢复
+# ---------------------------------------------------------------------------
+
+class RecoveryAction(str, Enum):
+    """对未完成操作的恢复策略。"""
+    REPLAY_SAFE = "replay_safe"     # 幂等操作 → 直接重放
+    MARK_FAILED = "mark_failed"     # 不重放 → 标记 failed 给上层决定
+    RETRY = "retry"                 # 上层决定重试（由 CrawlLoop 负责）
+
+
+@dataclass
+class RecoveredOperation:
+    """崩溃恢复中单个未完成操作的恢复建议。"""
+    record: OperationRecord
+    action: RecoveryAction = RecoveryAction.MARK_FAILED
+    reason: str = ""
+    # 重放时用到的上下文锚点：该 operation 开始前的 leaf_id
+    # 由 add_operation_entry 时 lane leaf 在"第一个 entry 之前"的 leaf_id
+    anchor_leaf_id: Optional[str] = None
+    lane_name: str = ""
+
+
+@dataclass
+class RecoveryPlan:
+    """崩溃恢复的总体恢复计划。"""
+    session_id: str = ""
+    recovered_at: float = field(default_factory=time.time)
+    operations: List[RecoveredOperation] = field(default_factory=list)
+    open_lanes: List[str] = field(default_factory=list)
+    # 需要在"重建会话上下文"阶段移除的孤儿 tool/tool_call 消息（未完成的 tool call）
+    orphan_entry_ids: List[str] = field(default_factory=list)
+
+    def to_summary(self) -> str:
+        by_action: Dict[str, int] = {}
+        for op in self.operations:
+            by_action[op.action.value] = by_action.get(op.action.value, 0) + 1
+        parts = [
+            f"[RecoveryPlan] session={self.session_id}",
+            f"  open_ops={len(self.operations)} actions={by_action}",
+            f"  open_lanes={self.open_lanes}",
+            f"  orphan_entries={len(self.orphan_entry_ids)}",
+        ]
+        return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

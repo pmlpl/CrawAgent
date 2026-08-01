@@ -1,9 +1,11 @@
-"""媒体下载器（P3-2）：yt-dlp 视频 + httpx 流式文件下载
+"""媒体下载器（P3-2 + P7-1）：yt-dlp 视频 + httpx 流式文件下载
 
 支持：
 - yt-dlp：YouTube / Bilibili / 抖音 等视频平台（cookie 透传）
 - httpx 流式：图片 / PDF / 压缩包 等普通文件（支持断点续传）
 - 下载进度回调
+- 视频信息提取（不下载，仅获取元数据）— P7-1
+- 播放列表/多集下载 — P7-1
 
 设计原则：
 - yt-dlp 可选（缺包时降级为 httpx 直链下载）
@@ -18,6 +20,44 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from crawagent.output.organizer import FileOrganizer, extract_domain, sanitize_filename
+
+# Content-Type → 扩展名映射（修复 GAP-002）
+_CONTENT_TYPE_EXT_MAP = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+    "image/x-icon": "ico",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/x-matroska": "mkv",
+    "video/x-flv": "flv",
+    "video/quicktime": "mov",
+    "video/x-msvideo": "avi",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "audio/webm": "weba",
+    "application/pdf": "pdf",
+    "application/zip": "zip",
+    "application/x-tar": "tar",
+    "application/gzip": "gz",
+    "application/x-gzip": "gz",
+    "application/x-bzip2": "bz2",
+    "application/x-7z-compressed": "7z",
+    "application/json": "json",
+    "application/xml": "xml",
+    "text/html": "html",
+    "text/plain": "txt",
+    "text/css": "css",
+    "text/javascript": "js",
+    "text/csv": "csv",
+}
 
 
 class MediaDownloader:
@@ -170,7 +210,8 @@ class MediaDownloader:
             if "." in os.path.basename(path):
                 ext = path.rsplit(".", 1)[-1].lower()
             else:
-                ext = "bin"
+                # URL 无扩展名，先发 HEAD 请求读 Content-Type
+                ext = await self._infer_ext_from_content_type(url) or "bin"
         # 清理扩展名
         ext = sanitize_filename(ext).split("_")[0] or "bin"
 
@@ -259,6 +300,21 @@ class MediaDownloader:
                 return os.path.join(self.base_dir, name)
         return None
 
+    async def _infer_ext_from_content_type(self, url: str) -> str:
+        """通过 HEAD 请求读取 Content-Type 推断扩展名（修复 GAP-002）"""
+        try:
+            import httpx
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0, connect=5.0),
+                follow_redirects=True,
+                trust_env=False,
+            ) as client:
+                resp = await client.head(url)
+                content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                return _CONTENT_TYPE_EXT_MAP.get(content_type, "")
+        except Exception:
+            return ""
+
     def _error_result(self, url: str, title: str, error: str) -> Dict[str, Any]:
         return {
             "success": False,
@@ -269,6 +325,178 @@ class MediaDownloader:
             "engine": "",
             "ext": "",
             "error": error,
+        }
+
+    # ==================== P7-1: 视频信息提取 + 播放列表下载 ====================
+
+    async def extract_info(
+        self,
+        url: str,
+        cookies_file: str = "",
+    ) -> Dict[str, Any]:
+        """提取视频信息（不下载）
+
+        Args:
+            url: 视频 URL
+            cookies_file: cookie 文件路径
+
+        Returns:
+            {"success", "title", "duration", "thumbnail", "formats", "is_playlist", "entries", "error"}
+        """
+        try:
+            from yt_dlp import YoutubeDL
+        except ImportError:
+            return {"success": False, "error": "yt-dlp 未安装"}
+
+        opts = {
+            "noplaylist": False,
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": False,
+        }
+        if cookies_file and os.path.isfile(cookies_file):
+            opts["cookiefile"] = cookies_file
+
+        try:
+            def _run():
+                with YoutubeDL(opts) as ydl:
+                    return ydl.extract_info(url, download=False)
+
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(None, _run)
+
+            if not info:
+                return {"success": False, "error": "无法提取视频信息"}
+
+            # 播放列表
+            if info.get("_type") == "playlist" and "entries" in info:
+                entries = []
+                for entry in info["entries"]:
+                    if entry:
+                        entries.append({
+                            "title": entry.get("title", ""),
+                            "url": entry.get("url", ""),
+                            "duration": entry.get("duration", 0),
+                            "thumbnail": entry.get("thumbnail", ""),
+                        })
+                return {
+                    "success": True,
+                    "is_playlist": True,
+                    "title": info.get("title", ""),
+                    "playlist_count": len(entries),
+                    "entries": entries,
+                }
+
+            # 单个视频
+            formats = []
+            for f in info.get("formats", []):
+                formats.append({
+                    "format_id": f.get("format_id", ""),
+                    "ext": f.get("ext", ""),
+                    "resolution": f.get("resolution", ""),
+                    "filesize": f.get("filesize", 0),
+                    "vcodec": f.get("vcodec", ""),
+                    "acodec": f.get("acodec", ""),
+                })
+
+            return {
+                "success": True,
+                "is_playlist": False,
+                "title": info.get("title", ""),
+                "duration": info.get("duration", 0),
+                "thumbnail": info.get("thumbnail", ""),
+                "uploader": info.get("uploader", ""),
+                "view_count": info.get("view_count", 0),
+                "formats": formats,
+                "url": url,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"信息提取失败: {e}"}
+
+    async def download_playlist(
+        self,
+        url: str,
+        cookies_file: str = "",
+        max_items: int = 0,
+    ) -> Dict[str, Any]:
+        """下载播放列表（多集视频）
+
+        Args:
+            url: 播放列表 URL
+            cookies_file: cookie 文件路径
+            max_items: 最多下载多少集（0 = 全部）
+
+        Returns:
+            {"success", "downloaded", "failed", "total", "items", "error"}
+        """
+        try:
+            from yt_dlp import YoutubeDL
+        except ImportError:
+            return {"success": False, "error": "yt-dlp 未安装"}
+
+        # 先提取播放列表信息
+        info_result = await self.extract_info(url, cookies_file)
+        if not info_result.get("success"):
+            return {"success": False, "error": info_result.get("error", "提取失败")}
+
+        if not info_result.get("is_playlist"):
+            # 不是播放列表，用普通下载
+            result = await self.download(url, cookies_file=cookies_file)
+            return {
+                "success": result["success"],
+                "total": 1,
+                "downloaded": 1 if result["success"] else 0,
+                "failed": 0 if result["success"] else 1,
+                "items": [result],
+                "error": result.get("error", ""),
+            }
+
+        entries = info_result.get("entries", [])
+        if max_items > 0:
+            entries = entries[:max_items]
+
+        os.makedirs(self.base_dir, exist_ok=True)
+
+        # 逐集下载
+        items = []
+        downloaded = 0
+        failed = 0
+
+        for i, entry in enumerate(entries):
+            entry_url = entry.get("url", "")
+            entry_title = entry.get("title", f"第{i+1}集")
+
+            logger.info(f"[Playlist] 下载第 {i+1}/{len(entries)} 集: {entry_title}")
+
+            result = await self.download(
+                entry_url,
+                title=entry_title,
+                cookies_file=cookies_file,
+            )
+
+            if result.get("success"):
+                downloaded += 1
+            else:
+                failed += 1
+
+            items.append({
+                "index": i + 1,
+                "title": entry_title,
+                "url": entry_url,
+                "success": result.get("success", False),
+                "path": result.get("path", ""),
+                "size": result.get("size", 0),
+                "error": result.get("error", ""),
+            })
+
+        return {
+            "success": downloaded > 0,
+            "total": len(entries),
+            "downloaded": downloaded,
+            "failed": failed,
+            "items": items,
+            "error": "",
         }
 
 

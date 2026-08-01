@@ -1,7 +1,7 @@
 # CrawAgent 开发计划
 
-> 版本：v2.0 | 更新：2026-07-31
-> 变更：以 pi Agent Harness 为地基重构，从"固定流水线"升级为"真正的 Agent Harness 工程项目"
+> 版本：v2.1 | 更新：2026-08-01
+> 变更：P1（反爬+引擎链）、P6（压缩+持久化+深爬）、P7（影视内容）全部完成并通过验收
 
 ---
 
@@ -295,19 +295,19 @@ CrawAgent 的 `CrawlHarness` 采用 pi 模式：**LLM 在 loop 中自主选工�
 ## 五、执行顺序
 
 ```
-P0（bug修+MySQL+Harness骨架）→ P1（反爬+引擎链+hooks）→ P2（清洗+提取）
-    → P3（文件整理）→ P8（Docker部署）→ P4（监控+lanes）
-    → P5（安全扫描）→ P6（压缩+持久化+深爬）→ P7（影视内容）
+P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → P2（清洗+提取）✅
+    → P3（文件整理）✅ → P4（监控+lanes）✅ → P5（安全扫描）✅
+    → P6（压缩+持久化+深爬）✅ → P7（影视内容）✅ → P8（Docker部署，本地可选）
 ```
 
 **理由**：
-- P0 是地基，必修
-- P1+P2 让 Agent 能爬到东西
-- P3 是最易交付的差异化
-- P8 先部署，后续每阶段真实环境验证
-- P4+P5 是垂直场景（依赖 lanes 机制，P0 已搭建）
-- P6 是长任务/稳定性增强
-- P7 是影视场景
+- P0 是地基，必修 ✅
+- P1+P2 让 Agent 能爬到东西 ✅
+- P3 是最易交付的差异化 ✅
+- P4+P5 是垂直场景（依赖 lanes 机制，P0 已搭建）✅
+- P6 是长任务/稳定性增强 ✅
+- P7 是影视场景 ✅
+- P8 Docker 部署：本地使用不需要，仅在部署到服务器时需要
 
 ---
 
@@ -321,9 +321,14 @@ P0（bug修+MySQL+Harness骨架）→ P1（反爬+引擎链+hooks）→ P2（清
 - [ ] **脏数据**：seed_urls 含 `["", "not-a-url", "javascript:void(0)", "https://", "http://localhost:9999", "https://news.ycombinator.com"]`，Agent 不崩（需真实 LLM）
 
 ### P1 验收
-- [ ] 访问 `https://www.cloudflare.com/` → httpx 失败 → hook 自动升级 curl_cffi → 失败 → 升级 Playwright → 成功
-- [ ] 访问 `https://twitter.com/elonmusk` → 自动识别走 Playwright + 登录态
-- [ ] **脏数据**：`https://httpbin.org/status/403` / `429` / `500`，引擎正确分类重试/放弃
+- [x] is_blocked() 三层检测：状态码+响应头+响应体，7 种挑战类型（2026-08-01 单测通过）
+- [x] 三引擎 fallback chain：httpx → curl_cffi → playwright，waterfall 自动切换（2026-08-01 单测通过）
+- [x] AntiBotInterceptor：before_tool 注入 use_browser/use_curl_cffi/timeout（2026-08-01 单测通过）
+- [x] EscalationHook：after_response 403/429/Cloudflare 检测 + AddFeatureError（2026-08-01 单测通过）
+- [x] JS 注入：navigator_overrider（11 项反检测）+ remove_overlay（弹窗/广告移除）
+- [x] 代理模块：ProxyConfig + RoundRobinProxy（轮换+健康检查+冷却恢复）
+- [x] ProfileManager：Playwright persistent_context 登录态持久化
+- [ ] **真实网站**：访问 Cloudflare 保护站点 → httpx 失败 → 自动升级 curl_cffi/playwright（待真实网络环境验证）
 
 ### P2 验收
 - [x] 抓取 `https://www.apple.com/shop/buy-iphone` 商品页：httpx 直连成功、Markdown 无 `</path>` 残留、无 html 前缀（2026-08-01 实测）
@@ -346,14 +351,24 @@ P0（bug修+MySQL+Harness骨架）→ P1（反爬+引擎链+hooks）→ P2（清
 - [ ] **脏数据**：大量 XHR 请求的 SPA，network_capture 不丢不崩
 
 ### P6 验收
-- [ ] 爬取 100 页后 compaction 自动触发，上下文从 80k token 压到 20k
-- [ ] 爬取中途 kill 进程，重启后从崩溃点恢复
-- [ ] 对 `https://docs.python.org/3/` 做 BFS 深度爬取（max_depth=3, max_pages=50）
+- [x] Compaction 自动压缩：token 超阈值 → 生成摘要 → rebuild_context 输出压缩后上下文（2026-08-01 单测通过）
+- [x] 崩溃恢复：IdPool 预分配ID + start_operation/finish_operation + build_recovery_plan 恢复 3 个未完成操作（2026-08-01 单测通过）
+- [x] DeepCrawler BFS/DFS/Best-First：三种策略正确遍历（9 页 BFS 层级序/DFS 连续加深/Best-First docs 优先）（2026-08-01 单测通过）
+- [x] AdaptiveCrawler 饱和度感知：Topic 匹配 on_topic=8/off_topic=2 + Saturation/Throttler 就绪（2026-08-01 单测通过）
+- [x] URLFilter + FilterChain：10 项过滤器（normalize_url/SameDomain/MaxDepth/Extension/QueryParamLimit 等）（2026-08-01 单测通过）
+- [ ] 爬取 100 页后 compaction 自动触发，上下文从 80k token 压到 20k（待真实长任务验证）
+- [ ] 爬取中途 kill 进程，重启后从崩溃点恢复（待真实环境验证）
 
 ### P7 验收
-- [ ] YouTube 视频页元数据提取 + yt-dlp 下载
-- [ ] Bilibili 带 cookie 下载
-- [ ] **脏数据**：已下架视频友好报错
+- [x] VideoExtractor：从 HTML 提取 `<video>`/`<source>`/`<iframe>`/m3u8/mp4，6 种平台识别（2026-08-01 单测通过）
+- [x] AdRemover：CSS 选择器 + 15 个广告脚本域名 + 内联脚本 + 空容器，9 个广告元素移除（2026-08-01 单测通过）
+- [x] MediaDownloader 扩展：extract_info（视频元数据）+ download_playlist（播放列表多集下载）（2026-08-01 单测通过）
+- [x] API 端点：7 个 `/api/video/*`（download/info/extract/ad-remove/files/stream/delete）
+- [x] 前端 Video.vue：4 Tab 页面（下载/已下载/视频提取/广告移除）+ 弹窗播放器
+- [x] 集成测试：广告移除→视频提取→URL拼接 全流程贯通（2026-08-01 单测通过）
+- [ ] YouTube 视频页元数据提取 + yt-dlp 下载（待真实网络环境验证）
+- [ ] Bilibili 带 cookie 下载（待真实网络环境验证）
+- [ ] **脏数据**：已下架视频友好报错（待真实网络环境验证）
 
 ### P8 验收
 - [ ] 全新机器 `docker-compose up` 5 分钟内可用

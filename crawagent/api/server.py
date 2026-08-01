@@ -860,6 +860,524 @@ async def delete_output_file(path: str):
         raise HTTPException(500, f"删除失败: {e}")
 
 
+# ==================== Monitor API 路由（P4） ====================
+
+class MonitorTaskRequest(BaseModel):
+    """创建/更新监控任务请求"""
+    name: str = ""
+    url: str
+    interval_minutes: int = 360
+    watch_fields: List[str] = []
+    css_selector: str = ""
+    alert_webhook: str = ""
+    alert_cooldown_minutes: int = 60
+    enabled: bool = True
+
+
+@app.get("/api/monitor/tasks")
+async def list_monitor_tasks(enabled_only: bool = False):
+    """列出所有监控任务"""
+    from crawagent.monitor import get_monitor_store
+    store = get_monitor_store()
+    tasks = store.list_tasks(enabled_only=enabled_only)
+    return {
+        "total": len(tasks),
+        "tasks": [t.model_dump() for t in tasks],
+    }
+
+
+@app.post("/api/monitor/tasks")
+async def create_monitor_task(req: MonitorTaskRequest):
+    """创建监控任务并立即触发首次检查"""
+    from crawagent.monitor import MonitorTask, ScheduleType, get_monitor_store, MonitorScheduler
+    task = MonitorTask(
+        name=req.name or f"监控-{req.url[:30]}",
+        url=req.url,
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=req.interval_minutes * 60,
+        watch_fields=req.watch_fields,
+        css_selector=req.css_selector,
+        alert_webhook=req.alert_webhook,
+        alert_cooldown=req.alert_cooldown_minutes * 60,
+        enabled=req.enabled,
+    )
+    store = get_monitor_store()
+    store.create_task(task)
+
+    # 立即触发首次检查（建立基线）
+    scheduler = MonitorScheduler(store=store)
+    first_result = await scheduler.run_task_once(task.id)
+    return {
+        "task": task.model_dump(),
+        "first_check": first_result,
+    }
+
+
+@app.get("/api/monitor/tasks/{task_id}")
+async def get_monitor_task(task_id: str):
+    """获取监控任务详情"""
+    from crawagent.monitor import get_monitor_store
+    store = get_monitor_store()
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"监控任务不存在: {task_id}")
+    # 附带基线
+    baseline = store.get_baseline(task_id, task.url)
+    return {
+        "task": task.model_dump(),
+        "baseline": baseline,
+    }
+
+
+@app.put("/api/monitor/tasks/{task_id}")
+async def update_monitor_task(task_id: str, req: MonitorTaskRequest):
+    """更新监控任务"""
+    from crawagent.monitor import get_monitor_store
+    store = get_monitor_store()
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"监控任务不存在: {task_id}")
+    task.name = req.name
+    task.url = req.url
+    task.interval_seconds = req.interval_minutes * 60
+    task.watch_fields = req.watch_fields
+    task.css_selector = req.css_selector
+    task.alert_webhook = req.alert_webhook
+    task.alert_cooldown = req.alert_cooldown_minutes * 60
+    task.enabled = req.enabled
+    store.update_task(task)
+    return {"task": task.model_dump()}
+
+
+@app.delete("/api/monitor/tasks/{task_id}")
+async def delete_monitor_task(task_id: str):
+    """删除监控任务（级联删除基线 + 告警）"""
+    from crawagent.monitor import get_monitor_store
+    store = get_monitor_store()
+    ok = store.delete_task(task_id)
+    if not ok:
+        raise HTTPException(404, f"监控任务不存在: {task_id}")
+    return {"deleted": True, "task_id": task_id}
+
+
+@app.post("/api/monitor/tasks/{task_id}/check")
+async def trigger_monitor_check(task_id: str):
+    """手动触发一次监控检查"""
+    from crawagent.monitor import get_monitor_store, MonitorScheduler
+    store = get_monitor_store()
+    scheduler = MonitorScheduler(store=store)
+    result = await scheduler.run_task_once(task_id)
+    return result
+
+
+@app.get("/api/monitor/alerts")
+async def list_monitor_alerts(task_id: str = "", limit: int = 50):
+    """列出告警记录"""
+    from crawagent.monitor import get_monitor_store
+    store = get_monitor_store()
+    alerts = store.list_alerts(task_id=task_id, limit=limit)
+    return {
+        "total": len(alerts),
+        "alerts": [a.model_dump() for a in alerts],
+    }
+
+
+@app.post("/api/monitor/test-webhook")
+async def test_monitor_webhook(webhook_url: str = ""):
+    """测试 webhook 是否可用"""
+    from crawagent.monitor import Notifier
+    if not webhook_url:
+        raise HTTPException(400, "缺少 webhook_url 参数")
+    notifier = Notifier()
+    result = await notifier.send_test(webhook_url)
+    return result
+
+
+# ==================== 安全扫描（P5） ====================
+
+class ScanTaskRequest(BaseModel):
+    """创建/更新扫描任务请求"""
+    name: str = ""
+    url: str
+    categories: List[str] = []      # VulnCategory 值列表，空则扫全部
+    depth: int = 1
+    timeout: int = 30
+    max_requests: int = 100
+    generate_patches: bool = True
+
+
+@app.get("/api/security/categories")
+async def list_vuln_categories():
+    """列出支持的漏洞扫描类别"""
+    from crawagent.security import VulnCategory
+    items = []
+    for c in VulnCategory:
+        items.append({"value": c.value, "label": c.value.replace("_", " ")})
+    return {"total": len(items), "categories": items}
+
+
+@app.get("/api/security/tasks")
+async def list_scan_tasks():
+    """列出所有扫描任务"""
+    from crawagent.security import get_security_store
+    store = get_security_store()
+    tasks = store.list_tasks()
+    return {
+        "total": len(tasks),
+        "tasks": [t.model_dump() for t in tasks],
+    }
+
+
+@app.post("/api/security/tasks")
+async def create_scan_task(req: ScanTaskRequest):
+    """创建扫描任务并立即执行扫描"""
+    from crawagent.security import SecurityLane, VulnCategory
+    # 解析 categories 字符串为枚举
+    categories = []
+    for c_str in req.categories:
+        try:
+            categories.append(VulnCategory(c_str))
+        except ValueError:
+            # 按名称匹配（忽略大小写）
+            for member in VulnCategory:
+                if member.value.lower() == c_str.lower() or member.name.lower() == c_str.lower():
+                    categories.append(member)
+                    break
+    lane = SecurityLane()
+    result = await lane.run_scan(
+        url=req.url,
+        name=req.name,
+        categories=categories or None,
+        depth=req.depth,
+        timeout=req.timeout,
+        max_requests=req.max_requests,
+        generate_patches=req.generate_patches,
+    )
+    task = result["task"]
+    scan_result = result["scan_result"]
+    patches = result["patches"]
+    return {
+        "task": task.model_dump(),
+        "scan_result": scan_result.model_dump(),
+        "patches": [
+            {
+                "id": p.id,
+                "title": p.title,
+                "target_file": p.target_file,
+                "vulnerability_ids": p.vulnerability_ids,
+                "severity": p.severity.value,
+                "description": p.description,
+                "diff": p.diff,
+            }
+            for p in patches
+        ],
+    }
+
+
+@app.get("/api/security/tasks/{task_id}")
+async def get_scan_task(task_id: str):
+    """获取扫描任务详情（含漏洞列表）"""
+    from crawagent.security import get_security_store
+    store = get_security_store()
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"扫描任务不存在: {task_id}")
+    vulns = store.list_vulnerabilities(task_id=task_id)
+    return {
+        "task": task.model_dump(),
+        "vulnerabilities": [v.model_dump() for v in vulns],
+    }
+
+
+@app.delete("/api/security/tasks/{task_id}")
+async def delete_scan_task(task_id: str):
+    """删除扫描任务（级联删除漏洞记录）"""
+    from crawagent.security import get_security_store
+    store = get_security_store()
+    ok = store.delete_task(task_id)
+    if not ok:
+        raise HTTPException(404, f"扫描任务不存在: {task_id}")
+    return {"deleted": True, "task_id": task_id}
+
+
+@app.post("/api/security/tasks/{task_id}/rescan")
+async def rescan_task(task_id: str):
+    """重新执行扫描任务"""
+    from crawagent.security import SecurityLane, get_security_store
+    store = get_security_store()
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"扫描任务不存在: {task_id}")
+    lane = SecurityLane(store=store)
+    result = await lane.run_scan(
+        url=task.url,
+        name=task.name,
+        categories=task.categories or None,
+        depth=task.depth,
+        headers=task.headers,
+        timeout=task.timeout,
+        generate_patches=True,
+    )
+    scan_result = result["scan_result"]
+    patches = result["patches"]
+    return {
+        "task": result["task"].model_dump(),
+        "scan_result": scan_result.model_dump(),
+        "patches": [
+            {
+                "id": p.id,
+                "title": p.title,
+                "target_file": p.target_file,
+                "vulnerability_ids": p.vulnerability_ids,
+                "severity": p.severity.value,
+                "description": p.description,
+                "diff": p.diff,
+            }
+            for p in patches
+        ],
+    }
+
+
+@app.get("/api/security/tasks/{task_id}/vulnerabilities")
+async def list_task_vulnerabilities(task_id: str, severity: str = ""):
+    """列出某扫描任务的漏洞"""
+    from crawagent.security import get_security_store
+    store = get_security_store()
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"扫描任务不存在: {task_id}")
+    vulns = store.list_vulnerabilities(task_id=task_id, severity=severity)
+    return {
+        "total": len(vulns),
+        "vulnerabilities": [v.model_dump() for v in vulns],
+    }
+
+
+@app.get("/api/security/vulnerabilities")
+async def list_all_vulnerabilities(task_id: str = "", severity: str = "", limit: int = 200):
+    """列出所有漏洞（可按任务/严重性过滤）"""
+    from crawagent.security import get_security_store
+    store = get_security_store()
+    vulns = store.list_vulnerabilities(task_id=task_id, severity=severity, limit=limit)
+    return {
+        "total": len(vulns),
+        "vulnerabilities": [v.model_dump() for v in vulns],
+    }
+
+
+@app.post("/api/security/tasks/{task_id}/patches")
+async def generate_patches(task_id: str, output_dir: str = ""):
+    """为扫描任务生成并保存修复补丁"""
+    from crawagent.security import AutoFixer, get_security_store
+    store = get_security_store()
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"扫描任务不存在: {task_id}")
+    vulns = store.list_vulnerabilities(task_id=task_id)
+    if not vulns:
+        raise HTTPException(400, "该任务无漏洞，无需生成补丁")
+    fixer = AutoFixer()
+    patches = await fixer.generate_patches(vulns, scan_task_id=task_id)
+    if not output_dir:
+        output_dir = f"./output/security_patches/{task_id}"
+    patch_files = await fixer.save_patches(patches, output_dir=output_dir)
+    return {
+        "task_id": task_id,
+        "patches_generated": len(patches),
+        "patch_files": patch_files,
+        "patches": [
+            {
+                "id": p.id,
+                "title": p.title,
+                "target_file": p.target_file,
+                "vulnerability_ids": p.vulnerability_ids,
+                "severity": p.severity.value,
+                "description": p.description,
+                "diff": p.diff,
+            }
+            for p in patches
+        ],
+    }
+
+
+# ==================== Video 路由（P7） ====================
+
+class VideoDownloadRequest(BaseModel):
+    url: str
+    title: str = ""
+    cookies_file: str = ""
+    max_items: int = 0  # 播放列表最大下载数（0=全部）
+
+class VideoInfoRequest(BaseModel):
+    url: str
+    cookies_file: str = ""
+
+class VideoExtractRequest(BaseModel):
+    html: str
+    base_url: str = ""
+
+class AdRemoveRequest(BaseModel):
+    html: str
+    custom_selectors: List[str] = []
+
+
+@app.post("/api/video/download")
+async def download_video(req: VideoDownloadRequest):
+    """下载视频（支持播放列表）"""
+    from crawagent.output.media_downloader import MediaDownloader
+
+    dl = MediaDownloader(base_dir="./output/videos")
+    try:
+        # 判断是否是播放列表
+        info = await dl.extract_info(req.url, req.cookies_file)
+        if info.get("is_playlist"):
+            result = await dl.download_playlist(
+                req.url, cookies_file=req.cookies_file, max_items=req.max_items
+            )
+        else:
+            result = await dl.download(
+                req.url, title=req.title, cookies_file=req.cookies_file
+            )
+            result = {"success": result["success"], "total": 1,
+                       "downloaded": 1 if result["success"] else 0,
+                       "failed": 0 if result["success"] else 1,
+                       "items": [result], "error": result.get("error", "")}
+        return result
+    except Exception as e:
+        return {"success": False, "error": str(e), "downloaded": 0, "failed": 1}
+
+
+@app.post("/api/video/info")
+async def get_video_info(req: VideoInfoRequest):
+    """提取视频信息（不下载）"""
+    from crawagent.output.media_downloader import MediaDownloader
+
+    dl = MediaDownloader(base_dir="./output/videos")
+    result = await dl.extract_info(req.url, req.cookies_file)
+    return result
+
+
+@app.post("/api/video/extract")
+async def extract_video_urls(req: VideoExtractRequest):
+    """从 HTML 中提取视频 URL"""
+    from crawagent.extractors import VideoExtractor
+
+    extractor = VideoExtractor()
+    result = extractor.extract(req.html, base_url=req.base_url)
+
+    return {
+        "success": result.has_videos,
+        "videos": [
+            {"url": v.url, "type": v.video_type, "source": v.source_tag, "poster": v.poster}
+            for v in result.videos
+        ],
+        "iframes": [
+            {"url": v.url, "platform": v.title}
+            for v in result.iframes
+        ],
+        "m3u8_urls": result.m3u8_urls,
+        "mp4_urls": result.raw_mp4_urls,
+        "total_count": result.total_count,
+    }
+
+
+@app.post("/api/video/ad-remove")
+async def remove_ads(req: AdRemoveRequest):
+    """移除 HTML 中的广告"""
+    from crawagent.extractors import AdRemover
+
+    remover = AdRemover(custom_selectors=req.custom_selectors or None)
+    cleaned = remover.remove(req.html)
+    return {"success": True, "cleaned_html": cleaned}
+
+
+@app.get("/api/video/files")
+async def list_video_files():
+    """列出已下载的视频文件"""
+    import os
+    video_dir = os.path.join(os.getcwd(), "output", "videos")
+    if not os.path.isdir(video_dir):
+        return {"files": []}
+
+    files = []
+    for name in os.listdir(video_dir):
+        filepath = os.path.join(video_dir, name)
+        if os.path.isfile(filepath):
+            stat = os.stat(filepath)
+            ext = os.path.splitext(name)[1].lower()
+            if ext in (".mp4", ".webm", ".mkv", ".flv", ".avi", ".m4a", ".mp3", ".m4v"):
+                files.append({
+                    "name": name,
+                    "path": filepath,
+                    "size": stat.st_size,
+                    "ext": ext.lstrip("."),
+                    "modified": stat.st_mtime,
+                })
+
+    files.sort(key=lambda x: x["modified"], reverse=True)
+    return {"files": files}
+
+
+@app.get("/api/video/stream")
+async def stream_video(file_path: str):
+    """视频文件流式播放（支持 Range 请求）"""
+    import os
+    from fastapi.responses import FileResponse
+    from fastapi import HTTPException
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(404, "文件不存在")
+
+    # 安全检查：只允许 output/videos 目录
+    video_dir = os.path.join(os.getcwd(), "output", "videos")
+    try:
+        resolved = os.path.realpath(file_path)
+        if not resolved.startswith(os.path.realpath(video_dir)):
+            raise HTTPException(403, "无权访问此路径")
+    except Exception:
+        raise HTTPException(403, "路径检查失败")
+
+    ext = os.path.splitext(file_path)[1].lower()
+    media_types = {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mkv": "video/x-matroska",
+        ".flv": "video/x-flv",
+        ".avi": "video/x-msvideo",
+        ".m4v": "video/x-m4v",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+    }
+    media_type = media_types.get(ext, "application/octet-stream")
+
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        filename=os.path.basename(file_path),
+    )
+
+
+@app.delete("/api/video/files")
+async def delete_video_file(file_path: str):
+    """删除视频文件"""
+    import os
+    from fastapi import HTTPException
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(404, "文件不存在")
+
+    video_dir = os.path.join(os.getcwd(), "output", "videos")
+    try:
+        resolved = os.path.realpath(file_path)
+        if not resolved.startswith(os.path.realpath(video_dir)):
+            raise HTTPException(403, "无权访问此路径")
+    except Exception:
+        raise HTTPException(403, "路径检查失败")
+
+    os.remove(file_path)
+    return {"success": True, "deleted": os.path.basename(file_path)}
+
+
 # ==================== 启动入口 ====================
 
 if __name__ == "__main__":
