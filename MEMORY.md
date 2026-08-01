@@ -275,15 +275,19 @@
 - 100 页爬取触发 compaction：本地 mock 站爬 101 页，compaction 自动触发，上下文 101 条 → 1 条 summary
 - 崩溃恢复：3 个 open operations 全部识别，build_recovery_plan 生成 main+monitor 两条 lane + 3 个恢复操作 + orphan_entry_ids 识别，清理后 0 残留
 
-**P7 影视实机（代码路径验证通过，真实站点网络不可达）：**
+**P7 影视实机（Bilibili 全面通过，YouTube 网络不可达）：**
+- **Bilibili 全面通过**（2026-08-01 补验）：
+  - P2 Markdown 清洗：Playwright 抓取 144KB HTML → PruningContentFilter 清洗至 17.8KB（压缩 12.4%）→ Markdown 6.5KB，内容完整（标题/播放量/发布时间/制作名单/视频简介/标签），无 HTML 残留
+  - P7 VideoExtractor：提取到 1 个 video + 1 个 iframe（bilibili player）
+  - P7 yt-dlp 元数据：Playwright 登录导出 cookie → extract_info 成功（标题/UP主/时长 313s/播放量 21290/11 种格式含 360p-1080p）
+  - P7 视频下载：download 下载 77.6MB MP4 文件成功（yt-dlp + cookie）
+  - P7 已下架视频：不存在 BVZZZZZZZZ 返回 404 + "信息提取失败" 友好错误，0.5s 未崩溃
 - YouTube：本机连接超时（NET_UNREACHABLE），MediaDownloader.extract_info 代码路径已验证（30s 超时保护返回 success=False + 明确错误）
-- Bilibili：HTTP 412 Precondition Failed（反爬拦截，ANTI_BOT），代码路径由单测覆盖
-- 已下架视频友好报错：Bilibili 不存在视频返回 404 + "信息提取失败" 友好错误；YouTube 不存在视频因网络不可达 60s 超时返回明确错误，不崩溃
 
-**知乎/P0 HN（网络不可达，如实记录跳过）：**
-- 知乎 zhihu.com/question：本机 IP 被 403，httpx→curl_cffi→playwright 三引擎均 403（IP 级屏蔽，非引擎指纹可绕过）；引擎升级链在 403 上正确触发（验证 P1 修复）
-- HN news.ycombinator.com：ConnectTimeout 网络不可达
-- 两者均为本机网络环境限制，非代码缺陷；代码路径已由 apple.com（P2）/阮一峰（P3）/Juice Shop（P5）/docs.python.org（P6）等其他站点实机验证
+**知乎/P0 HN（网络环境限制，如实记录跳过）：**
+- 知乎 zhihu.com/question：Playwright 完整浏览器+真实指纹仍 403（返回"你似乎来到了没有知识存在的荒原"反爬页），确认 IP 级封禁非引擎指纹可绕过；httpx→curl_cffi→playwright 三引擎均 403，引擎升级链在 403 上正确触发（验证 P1 修复）
+- HN news.ycombinator.com：GFW DNS 污染（系统 DNS→122.10.85.4 污染 IP，阿里 DoH→185.45.6.57 真实 IP）+ IP 阻断（直连真实 IP 仍 ConnectError）
+- 两者均为本机网络环境限制，非代码缺陷；代码路径已由 apple.com（P2）/Bilibili（P2+P7）/阮一峰（P3）/Juice Shop（P5）/docs.python.org（P6）等其他站点实机验证
 
 **当前测试：80 个全部通过**（补验未引入回归）
 
@@ -291,16 +295,16 @@
 
 ## 当前状态
 
-**P0-P7 全部完成 ✅，剩余验收补跑完成 ✅（知乎/HN/YouTube/Bilibili 受本机网络限制待可达网络实测）**
+**P0-P7 全部完成 ✅，剩余验收补跑完成 ✅（Bilibili 全面通过；知乎/HN/YouTube 受本机网络限制待可达网络实测）**
 
 - P0：CrawlHarness 骨架可运行（真实 LLM 端到端跑通）
 - P1：引擎回退链 + AntiBot hooks + 时间精度修复完成（403/429 触发升级链已验证）
-- P2：清洗/提取/分块/提示词/用量模块已实现，苹果官网实机验证通过（知乎 403 待网络）
+- P2：清洗/提取/分块/提示词/用量模块已实现，苹果官网实机验证通过；**Bilibili P2 Markdown 清洗补验通过**（知乎 IP 级封禁待换网络）
 - P3：文件整理/媒体下载/输出 API/前端 Output 页完成，阮一峰 5 篇实机落盘验收通过
 - P4：监控 + Lanes 完成，**真实监控 e2e 补验通过**（含告警通知状态持久化 bug 修复）
 - P5：安全扫描完成，Juice Shop 6 漏洞/5 类别实测通过
 - P6：压缩/持久化/深爬完成，**100 页 compaction + 崩溃恢复 e2e 补验通过**
-- P7：影视内容代码级通过，YouTube/Bilibili 真实站点网络不可达（代码路径已验证）
+- P7：影视内容 **Bilibili 全面通过**（P2 清洗 + P7 元数据/下载/404 友好报错）；YouTube 网络不可达（代码路径已验证）
 - 真实 LLM 需要更换 API key（当前 DeepSeek key 已失效）
 - 服务运行在 http://localhost:8000
 
@@ -327,9 +331,9 @@ docker-compose up -d           # 启动数据库容器
 ## 下一步
 
 ### 待可达网络环境补验（本机网络限制，非代码缺陷）
-1. **知乎验收** - 抓取 zhihu.com/question 出干净 Markdown（本机 IP 被 403，三引擎均 403，换网络可试）
-2. **P0 HN 端到端** - news.ycombinator.com（本机 ConnectTimeout，可试；不行保留备注）
-3. **P7 YouTube/Bilibili** - YouTube 元数据 + yt-dlp 下载、Bilibili 带 cookie 下载（本机网络不可达/反爬拦截，代码路径已验证）
+1. **知乎验收** - 抓取 zhihu.com/question 出干净 Markdown（Playwright 完整浏览器仍 403，IP 级封禁，换网络/带 cookie 可试）
+2. **P0 HN 端到端** - news.ycombinator.com（GFW DNS 污染 + IP 阻断，需代理）
+3. **P7 YouTube** - YouTube 元数据 + yt-dlp 下载（GFW 封锁，需代理）
 4. **LLM 过滤器验证** - LLMContentFilter 用真实 key 跑通（需更换失效的 DeepSeek API key）
 
 ### 中优先级（功能增强）

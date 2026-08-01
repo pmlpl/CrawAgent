@@ -338,7 +338,7 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] 抓取 `https://www.apple.com/shop/buy-iphone` 商品页：httpx 直连成功、Markdown 无 `</path>` 残留、无 html 前缀（2026-08-01 实测）
 - [x] HN 相对链接 `/item/1` 转为绝对 URL（单元测试覆盖，2026-08-01）
 - [x] **脏数据**：空 body / 纯 script / 1MB 超大 HTML，清洗不崩（40 个测试全过）
-- [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声（**网络不可达**：2026-08-01 补验，本机 IP 被知乎 403，httpx→curl_cffi→playwright 三引擎均 403，IP 级屏蔽非引擎指纹可绕过；代码路径由 apple.com 实机验证，待换网络实测）
+- [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声（**IP 级封禁**：2026-08-01 补验，Playwright 完整浏览器+真实指纹仍返回 403 + "你似乎来到了没有知识存在的荒原"反爬页；httpx→curl_cffi→playwright 三引擎均 403，确认 IP 级封禁非引擎指纹可绕过；代码路径由 Bilibili 实机验证通过，待换 IP/带登录 cookie 实测）
 
 ### P3 验收
 - [x] 抓取 5 篇阮一峰博客文章，按 `~/crawagent/articles/{domain}/{date}/{title}.md` 落盘（2026-08-01 实测 5/5，同名文件自动 -2 去重）
@@ -373,7 +373,7 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] 前端 Video.vue：4 Tab 页面（下载/已下载/视频提取/广告移除）+ 弹窗播放器
 - [x] 集成测试：广告移除→视频提取→URL拼接 全流程贯通（2026-08-01 单测通过）
 - [ ] YouTube 视频页元数据提取 + yt-dlp 下载（**网络不可达**：本机连接 YouTube 超时，MediaDownloader.extract_info 代码路径已验证——30s 超时保护返回 success=False + 明确错误，待可达网络环境实测）
-- [ ] Bilibili 带 cookie 下载（**反爬拦截**：本机返回 HTTP 412 Precondition Failed，代码路径由单测覆盖，待有效 cookie/可达网络实测）
+- [x] Bilibili 带 cookie 下载（2026-08-01 补验通过：Playwright 登录导出 cookie → yt-dlp extract_info 提取元数据成功[标题/UP主/时长/播放量/11种格式] → download 下载 77.6MB MP4 文件成功；不带 cookie 时 412 反爬拦截已由错误处理覆盖）
 - [x] **脏数据**：已下架视频友好报错（2026-08-01 补验：Bilibili 不存在视频 BVZZZZZZZZ 返回 404 + "信息提取失败" 友好错误；YouTube 不存在视频因网络不可达 60s 超时返回明确错误，不崩溃）
 
 ### P8 验收
