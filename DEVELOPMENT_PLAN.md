@@ -338,7 +338,15 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] 抓取 `https://www.apple.com/shop/buy-iphone` 商品页：httpx 直连成功、Markdown 无 `</path>` 残留、无 html 前缀（2026-08-01 实测）
 - [x] HN 相对链接 `/item/1` 转为绝对 URL（单元测试覆盖，2026-08-01）
 - [x] **脏数据**：空 body / 纯 script / 1MB 超大 HTML，清洗不崩（40 个测试全过）
-- [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声（**IP 级封禁**：2026-08-01 补验，Playwright 完整浏览器+真实指纹仍返回 403 + "你似乎来到了没有知识存在的荒原"反爬页；httpx→curl_cffi→playwright 三引擎均 403，确认 IP 级封禁非引擎指纹可绕过；代码路径由 Bilibili 实机验证通过，待换 IP/带登录 cookie 实测）
+- [x] **多站点 P2 端到端验收**（2026-08-01 补验）：httpx + Playwright + PruningContentFilter + MarkdownGenerator 全链路，覆盖静态/SPA/列表/详情多种页面类型
+  - 博客园列表页：httpx 直连 75KB → 清洗 13.9KB → MD 6.8KB（4% 正文，列表页正常）
+  - 博客园文章详情页：3 篇全部通过，正文比例 91-92%，Markdown 无 HTML 残留
+  - CSDN 列表页：httpx 直连 355KB → 清洗 114KB → MD 15KB
+  - 豆瓣书评详情页：httpx 直连 20KB → MD 513 字（正文 86%，内容干净含作者/书名/评论正文）
+  - 36氪快讯页：Playwright 渲染 102KB → 清洗 17.7KB → MD 6.7KB（正文 61%，新闻快讯完整含标题/时间/摘要）
+  - Python 文档：httpx 直连 33KB → MD 16.3KB（正文 84%，文档结构完整）
+  - Bilibili 视频页：Playwright 渲染 144KB → 清洗 17.8KB → MD 6.5KB（正文完整含标题/播放量/制作名单/简介）
+- [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声（**IP 级封禁**：2026-08-01 补验，Playwright 完整浏览器+真实指纹仍返回 403 + "你似乎来到了没有知识存在的荒原"反爬页；httpx→curl_cffi→playwright 三引擎均 403，确认 IP 级封禁非引擎指纹可绕过；代码路径已由 Bilibili/博客园/豆瓣等多站点实机验证，待换 IP/带登录 cookie 实测）
 
 ### P3 验收
 - [x] 抓取 5 篇阮一峰博客文章，按 `~/crawagent/articles/{domain}/{date}/{title}.md` 落盘（2026-08-01 实测 5/5，同名文件自动 -2 去重）

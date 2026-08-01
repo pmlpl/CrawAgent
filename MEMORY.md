@@ -275,7 +275,18 @@
 - 100 页爬取触发 compaction：本地 mock 站爬 101 页，compaction 自动触发，上下文 101 条 → 1 条 summary
 - 崩溃恢复：3 个 open operations 全部识别，build_recovery_plan 生成 main+monitor 两条 lane + 3 个恢复操作 + orphan_entry_ids 识别，清理后 0 残留
 
-**P7 影视实机（Bilibili 全面通过，YouTube 网络不可达）：**
+**多站点 P2 端到端补验（2026-08-01，7 个站点覆盖多种页面类型）：**
+- **博客园**：列表页 httpx 75KB → MD 6.8KB；3 篇文章详情页全通过，正文比例 91-92%，完整流程（列表页→提取链接→详情页→Markdown）3/3 通过
+- **CSDN**：列表页 httpx 355KB → MD 15KB
+- **豆瓣书评**：httpx 20KB → MD 513 字，正文 86%（作者/书名/评论正文完整）
+- **36氪快讯**：Playwright SPA 渲染 102KB → MD 6.7KB，正文 61%（标题/时间/摘要完整）
+- **Python 文档**：httpx 33KB → MD 16.3KB，正文 84%
+- **Bilibili**：Playwright 144KB → MD 6.5KB（标题/播放量/制作名单/简介完整）
+- **V2EX**：连接超时（IP 封锁）
+- **掘金**：列表页 Playwright 抓到 117KB 但 PruningContentFilter 过度清洗（列表页内容在 React 组件深处被误判为噪声）；文章详情页需真实 URL 测试
+- **知乎**：Playwright 完整浏览器仍 403（IP 级封禁），代码路径已由上述 6 个站点验证
+
+
 - **Bilibili 全面通过**（2026-08-01 补验）：
   - P2 Markdown 清洗：Playwright 抓取 144KB HTML → PruningContentFilter 清洗至 17.8KB（压缩 12.4%）→ Markdown 6.5KB，内容完整（标题/播放量/发布时间/制作名单/视频简介/标签），无 HTML 残留
   - P7 VideoExtractor：提取到 1 个 video + 1 个 iframe（bilibili player）
