@@ -1,6 +1,6 @@
 # CrawAgent - 项目记忆文档
 
-> 最后更新：2026-07-31
+> 最后更新：2026-08-01
 
 ---
 
@@ -134,14 +134,45 @@
 - FastAPI 启动 + Harness API 端点测试通过
 - DeepSeek API key 失效（401），需更换
 
+### 10. P1 收尾闭环完成（2026-08-01）
+
+**7 项关键修复（提交 8e16029）：**
+- 对话消息顺序反转：`session.get_entries` 默认按时间正序
+- `loop._step` 接入 SystemPromptAssembler（系统提示词真正发给 LLM）
+- `RunResult.error` → `RunResult.from_error`（异常路径崩溃修复）
+- AntiBot hooks 接入 supervisor：`before_tool` 注入 use_browser，`after_tool` 从 `stages.crawl.status` 提取真实 HTTP 状态
+- lane leaf 指针随消息追加更新（对话树不再是扁平列表）
+- Compaction 在 checkpoint 触发
+- API 修复：quick-crawl 返回真实 session_id、统一 instruction 字段、新增 DELETE /sessions/{id}
+
+**时间精度修复（提交 b964140）：**
+- harness 表时间列 Float(单精度) → Double（Unix 时间戳丢亚秒精度导致同秒排序不稳）
+- 新增 `docker/mysql/migrate_v2_time_precision.sql` 迁移脚本
+
+### 11. P2 阶段完成（2026-08-01，代码级）
+
+**内容清洗 + LLM 提取 + 提示词工程：**
+- `core/content_filter.py`：三档过滤器（Pruning 规则去噪 / BM25 相关性过滤（自实现）/ LLM 语义过滤）
+- `core/markdown_generator.py`：html2text 定制转换 + citation 引用格式 + fit_markdown 截断
+- `core/chunking.py`：7 种分块策略（identity/regex/sentence/fixed/sliding/overlapping/recursive）
+- `core/extractor.py`：策略模式 8 种提取器（CSS/XPath/LLM/Regex/JSON-LD/Meta/Table/JsonCss）
+- `llm/prompts.py`：6 个高质量提示词 + JSON_SCHEMA_BUILDER（保留旧流水线提示词兼容）
+- `llm/usage.py`：TokenUsage 跟踪（响应元数据自动采集 + LangChain callback）
+
+**管线接入：**
+- Supervisor 增加 clean 阶段：crawl → clean（去噪 + Markdown）→ extract → save
+- 测试 37 个全部通过（含脏数据：空 body / 纯 script / 1MB HTML 清洗不崩）
+
 ---
 
 ## 当前状态
 
-**P0 阶段已完成 ✅**
+**P0 + P1 完成 ✅，P2 代码完成（待真实网站验收）**
 
-- CrawlHarness 骨架可运行（Mock 模式）
-- 真实 LLM 需要更换 API key
+- P0：CrawlHarness 骨架可运行（Mock 模式）
+- P1：引擎回退链 + AntiBot hooks + 时间精度修复完成
+- P2：清洗/提取/分块/提示词/用量模块已实现并通过 37 个测试
+- 真实 LLM 需要更换 API key（当前 DeepSeek key 已失效）
 - 服务运行在 http://localhost:8000
 
 **可运行的命令：**
@@ -166,13 +197,19 @@ docker-compose up -d           # 启动数据库容器
 
 ## 下一步
 
-### P1 阶段（当前优先级）
+### P2 验收（当前优先级）
 
-1. **AntiBot 检测** - 完善反爬检测逻辑
-2. **引擎 fallback 链** - 多引擎降级策略
-3. **Hooks 接入** - 将 hook 骨架接入实际爬取流程
-4. **更换 DeepSeek API key** - 当前 key 已失效（401）
-5. **frontier.py SQLite → MySQL 迁移** - 统一数据库
+1. **真实网站验收** - 换有效 API key 后抓取知乎问题页，确认 Markdown 干净无噪声
+2. **脏数据验收** - 空 body / 纯 script / 1MB 超大 HTML 清洗不崩（单测已覆盖，真实跑一遍）
+3. **LLM 过滤器验证** - LLMContentFilter 用真实 key 跑通（PROMPT_FILTER_CONTENT）
+
+### 中优先级
+
+4. **P3 文件整理** - output/organizer + media_downloader + save 工具增强
+5. **WebSocket 支持** - Agent 执行时实时推送日志到前端
+6. **任务持久化** - 当前任务结果存在内存，需要持久化到 MySQL
+7. **frontier.py SQLite → MySQL 迁移** - 统一数据库
+8. **工具执行器补充** - monitor / scan_vuln 执行器
 
 ### 中优先级
 
@@ -194,14 +231,13 @@ docker-compose up -d           # 启动数据库容器
 ## 已知问题
 
 1. **DeepSeek API key 失效（401）** - 需更换有效 key
-2. **frontier.py 仍使用 SQLite** - 待迁移到 MySQL（原 P0-15，现划入 P1）
-3. **工具执行器只有定义没有实际实现** - harness/tools.py 的 7 个工具只有接口，P1 阶段实现
-4. **LLM 未绑定工具（tool calling 未启用）** - 需要在 loop.py 中接入 tool calling
-5. **Compaction 未在 checkpoint 中自动触发** - 需要在 CrawlLoop.checkpoint 中调用
-6. `crawagent/graph/site_analyzer.py` 依赖 Playwright，需要 `playwright install chromium`
-7. LLM 每次生成的 CSS 选择器不一致，有时不准
-8. 系统代理问题：必须通过 `main.py` 启动才能正确禁用代理
-9. 多个任务共用同一个 frontier 数据库，可能互相干扰
+2. **frontier.py 仍使用 SQLite** - 待迁移到 MySQL
+3. **monitor / scan_vuln 执行器仍为空** - 对应 P4/P5 阶段
+4. **LLMContentFilter 未用真实 key 验证** - 单测只覆盖非 LLM 路径
+5. `crawagent/graph/site_analyzer.py` 依赖 Playwright，需要 `playwright install chromium`
+6. LLM 每次生成的 CSS 选择器不一致，有时不准
+7. 系统代理问题：必须通过 `main.py` 启动才能正确禁用代理
+8. 多个任务共用同一个 frontier 数据库，可能互相干扰
 
 ---
 

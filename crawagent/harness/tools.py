@@ -851,7 +851,7 @@ class CrawlSupervisor:
         }
 
         # ========== 1. crawl ==========
-        logger.info(f"[Supervisor] 1/4 crawl: {url} (use_browser={use_browser})")
+        logger.info(f"[Supervisor] 1/5 crawl: {url} (use_browser={use_browser})")
         crawl_args: Dict[str, Any] = {"url": url}
         if use_browser:
             crawl_args["use_browser"] = True
@@ -866,16 +866,32 @@ class CrawlSupervisor:
         html = crawl_result.get("html", crawl_result.get("content", ""))
         page_signature = crawl_result.get("page_signature", "")
 
-        # ========== 2. 检查蓝图缓存 ==========
+        # ========== 2. clean：去噪 + 生成干净 Markdown（P2） ==========
+        logger.info(f"[Supervisor] 2/5 clean: {url}")
+        from crawagent.core.content_filter import PruningContentFilter
+        from crawagent.core.markdown_generator import MarkdownGenerator
+
+        clean_html = PruningContentFilter().filter_content(html)
+        markdown = MarkdownGenerator(max_length=200_000).generate(
+            clean_html, url=url, title=crawl_result.get("title", ""), clean=False
+        )
+        result["stages"]["clean"] = {
+            "html_length": len(clean_html),
+            "markdown_length": len(markdown),
+        }
+        result["clean_html"] = clean_html
+        result["markdown"] = markdown
+
+        # ========== 3. 检查蓝图缓存 ==========
         blueprint = self.blueprint_cache.get(page_signature) if page_signature else None
         if blueprint:
-            logger.info(f"[Supervisor] 2/4 蓝图缓存命中 (signature={page_signature[:8]}...)")
+            logger.info(f"[Supervisor] 3/5 蓝图缓存命中 (signature={page_signature[:8]}...)")
             result["stages"]["blueprint"] = {"status": "cached", "confidence": blueprint.confidence}
         else:
-            logger.info(f"[Supervisor] 2/4 蓝图未命中，调用 analyze 生成蓝图")
+            logger.info(f"[Supervisor] 3/5 蓝图未命中，调用 analyze 生成蓝图")
             analyze_result = await analyze_executor({
                 "url": url,
-                "html": html,
+                "html": clean_html,
                 "page_signature": page_signature,
             })
             if analyze_result.get("status_code") == STATUS_OK:
@@ -892,13 +908,13 @@ class CrawlSupervisor:
             else:
                 result["stages"]["blueprint"] = {"status": "failed", "error": analyze_result.get("content", "")}
 
-        # ========== 3. extract（带 NEED_REANALYSIS 重试） ==========
+        # ========== 4. extract（带 NEED_REANALYSIS 重试） ==========
         retry_count = 0
         extract_result: Dict[str, Any] = {}
         while retry_count <= self.MAX_REANALYSIS_RETRIES:
-            logger.info(f"[Supervisor] 3/4 extract (attempt {retry_count + 1})")
+            logger.info(f"[Supervisor] 4/5 extract (attempt {retry_count + 1})")
             extract_args = {
-                "html": html,
+                "html": clean_html,
                 "url": url,
                 "blueprint": blueprint.to_dict() if blueprint else None,
             }
@@ -924,7 +940,7 @@ class CrawlSupervisor:
                 )
                 reanalyze_result = await analyze_executor({
                     "url": url,
-                    "html": html,
+                    "html": clean_html,
                     "page_signature": page_signature,
                     "focus_fields": failed_fields,
                 })
@@ -947,8 +963,8 @@ class CrawlSupervisor:
             result["content"] = extract_result.get("content", "提取失败")
             return result
 
-        # ========== 4. save ==========
-        logger.info(f"[Supervisor] 4/4 save")
+        # ========== 5. save ==========
+        logger.info(f"[Supervisor] 5/5 save")
         items = extract_result.get("items", [])
         # 推断输出路径
         output_path = self._decide_output_path(url, instruction)

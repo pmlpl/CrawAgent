@@ -20,6 +20,10 @@ dependencies = [
     "lxml>=5.0.0",
     "w3lib>=2.0.0",
 
+    # HTML → Markdown（P2）
+    "html2text>=2024.2.26",
+    "markdownify>=0.12.0",
+
     # 配置与序列化
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
@@ -71,6 +75,7 @@ stealth = [
 data = [
     "pandas>=2.0.0",
     "orjson>=3.9.0",
+    "trafilatura>=1.8.0",
 ]
 
 # 完整安装

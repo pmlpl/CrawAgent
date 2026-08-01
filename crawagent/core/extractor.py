@@ -304,6 +304,286 @@ class LLMExtractor(BaseExtractor):
         return text.strip()
 
 
+class RegexExtractor(BaseExtractor):
+    """正则提取器：按字段名 → 正则模式提取（P2-3）。"""
+
+    def __init__(self, patterns: Optional[Dict[str, str]] = None, flags: int = re.I | re.M):
+        self.patterns = patterns or {}
+        self.flags = flags
+
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        if not ctx.html:
+            return []
+        patterns = self.patterns
+        if not patterns and isinstance(ctx.selectors.extra, dict):
+            patterns = ctx.selectors.extra.get("patterns") or {}
+        if not patterns:
+            return []
+
+        # 剥离标签后做纯文本正则
+        text = re.sub(r"<[^>]+>", " ", ctx.html)
+        text = re.sub(r"\s+", " ", text)
+
+        item: Dict[str, Any] = {}
+        for field, pattern in patterns.items():
+            m = re.search(pattern, text, self.flags)
+            if m:
+                item[field] = m.group(1) if m.groups() else m.group(0)
+            else:
+                item[field] = ""
+
+        try:
+            return [ctx.target_schema(**item)]
+        except Exception:
+            return []
+
+
+class JsonLdExtractor(BaseExtractor):
+    """JSON-LD 提取器：解析 <script type="application/ld+json">（P2-3）。"""
+
+    _FIELD_MAP = {
+        "title": ("headline", "name", "title"),
+        "url": ("url", "mainEntityOfPage", "sameAs"),
+        "content": ("articleBody", "description", "abstract", "text"),
+        "summary": ("description", "abstract"),
+        "publish_time": ("datePublished", "dateCreated"),
+        "author": ("author", "creator"),
+        "image": ("image", "thumbnailUrl"),
+    }
+
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        if not ctx.html:
+            return []
+        from bs4 import BeautifulSoup
+        import json
+
+        soup = BeautifulSoup(ctx.html, "html.parser")
+        objects: List[Dict] = []
+        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            raw = script.string or script.get_text()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            self._collect(data, objects)
+
+        results: List[BaseModel] = []
+        for obj in objects:
+            item: Dict[str, Any] = {}
+            for field, keys in self._FIELD_MAP.items():
+                value = self._pick(obj, keys)
+                if value is not None:
+                    item[field] = value
+            if ctx.url and not item.get("url"):
+                item["url"] = ctx.url
+            if not item:
+                continue
+            try:
+                results.append(ctx.target_schema(**item))
+            except Exception:
+                continue
+        return results
+
+    def _collect(self, data: Any, out: List[Dict]) -> None:
+        if isinstance(data, list):
+            for d in data:
+                self._collect(d, out)
+        elif isinstance(data, dict):
+            graph = data.get("@graph")
+            if isinstance(graph, list):
+                for g in graph:
+                    self._collect(g, out)
+            elif graph is not None:
+                self._collect(graph, out)
+            main = data.get("mainEntity")
+            if isinstance(main, (dict, list)):
+                self._collect(main, out)
+            if data.get("@type") or any(k in data for k in self._FIELD_MAP["title"]):
+                out.append(data)
+
+    def _pick(self, obj: Dict, keys) -> Any:
+        for key in keys:
+            value = obj.get(key)
+            if value is None:
+                continue
+            if isinstance(value, dict):
+                value = value.get("name") or value.get("@id") or value.get("url")
+            elif isinstance(value, list):
+                value = value[0] if value else None
+                if isinstance(value, dict):
+                    value = value.get("name") or value.get("url")
+            if value and not isinstance(value, (dict, list)):
+                return str(value)
+        return None
+
+
+class MetaExtractor(BaseExtractor):
+    """Meta 提取器：og:title / og:url / og:image / description（P2-3）。"""
+
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        if not ctx.html:
+            return []
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(ctx.html, "html.parser")
+
+        def meta_content(prop: str, attr: str = "property") -> str:
+            el = soup.find("meta", attrs={attr: prop})
+            return el.get("content", "").strip() if el else ""
+
+        item: Dict[str, Any] = {}
+        title = meta_content("og:title") or (soup.title.string.strip() if soup.title and soup.title.string else "")
+        if title:
+            item["title"] = title
+        url = meta_content("og:url") or meta_content("canonical", "rel")
+        if not url and ctx.url:
+            url = ctx.url
+        if url:
+            item["url"] = url
+        image = meta_content("og:image")
+        if image:
+            item["image"] = image
+        desc = meta_content("og:description") or meta_content("description", "name")
+        if desc:
+            if "content" in ctx.target_schema.model_fields:
+                item["content"] = desc
+            else:
+                item["summary"] = desc
+        h1 = soup.find("h1")
+        if not item.get("title") and h1:
+            item["title"] = h1.get_text(strip=True)
+        if not item:
+            return []
+        try:
+            return [ctx.target_schema(**item)]
+        except Exception:
+            return []
+
+
+class TableExtractor(BaseExtractor):
+    """表格提取器：HTML <table> → 行字典列表（P2-3）。"""
+
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        if not ctx.html:
+            return []
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(ctx.html, "html.parser")
+        results: List[BaseModel] = []
+        for table in soup.find_all("table"):
+            header: List[str] = []
+            header_row = table.find("tr")
+            if header_row:
+                header = [th.get_text(strip=True) for th in header_row.find_all("th")]
+            rows = table.find_all("tr")
+            if not header and rows:
+                # 首行当表头
+                header = [td.get_text(strip=True) for td in rows[0].find_all(["td", "th"])]
+                header_row = rows[0]
+                rows = rows[1:]
+            elif header_row is not None:
+                rows = [r for r in rows if r is not header_row]
+            if not header:
+                continue
+            for row in rows:
+                cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                if len(cells) < len(header):
+                    cells += [""] * (len(header) - len(cells))
+                item = {header[i]: cells[i] for i in range(len(header))}
+                try:
+                    results.append(ctx.target_schema(**item))
+                except Exception:
+                    continue
+        return results
+
+
+class JsonCssExtractor(BaseExtractor):
+    """嵌套 CSS 选择器提取（Crawl4AI JsonCss 风格，P2-3）。
+
+    选择器树格式：
+    {
+      "items": ".item",
+      "fields": {
+        "title": "h3",
+        "url": {"selector": "a", "attribute": "href"},
+        "author": {"selector": ".author", "default": ""},
+        "nested": {"fields": {...}, "items": "..."}
+      }
+    }
+    """
+
+    def __init__(self, selectors_tree: Optional[Dict[str, Any]] = None):
+        self.selectors_tree = selectors_tree or {}
+
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        if not ctx.html:
+            return []
+        tree = self.selectors_tree
+        if not tree and isinstance(ctx.selectors.extra, dict):
+            tree = ctx.selectors.extra.get("json_css") or {}
+        if not tree:
+            return []
+
+        from selectolax.parser import HTMLParser
+
+        parser = HTMLParser(ctx.html)
+        items_sel = tree.get("items")
+        fields = tree.get("fields", {})
+        if not items_sel:
+            node = parser.body or parser
+            item = self._extract_node(node, fields, ctx)
+            try:
+                return [ctx.target_schema(**item)] if item else []
+            except Exception:
+                return []
+
+        nodes = parser.css(items_sel)
+        results: List[BaseModel] = []
+        for node in nodes:
+            item = self._extract_node(node, fields, ctx)
+            if item:
+                try:
+                    results.append(ctx.target_schema(**item))
+                except Exception:
+                    continue
+        return results
+
+    def _extract_node(self, node, fields: Dict, ctx: ExtractionContext) -> Dict[str, Any]:
+        item: Dict[str, Any] = {}
+        for name, conf in fields.items():
+            if isinstance(conf, dict) and ("items" in conf or "fields" in conf):
+                # 嵌套对象
+                if "items" in conf:
+                    sub_nodes = node.css(conf["items"])
+                    item[name] = [self._extract_node(n, conf.get("fields", {}), ctx) for n in sub_nodes]
+                else:
+                    item[name] = self._extract_node(node, conf.get("fields", {}), ctx)
+                continue
+
+            selector = conf.get("selector") if isinstance(conf, dict) else conf
+            attr = conf.get("attribute") if isinstance(conf, dict) else None
+            default = conf.get("default") if isinstance(conf, dict) else None
+            el = node.css_first(selector) if selector else node
+            if el is None:
+                if default is not None:
+                    item[name] = default
+                continue
+            if attr:
+                value = el.attributes.get(attr, "")
+                if attr == "href" and value and ctx.base_url:
+                    from urllib.parse import urljoin
+                    value = urljoin(ctx.base_url, value)
+            else:
+                value = el.text().strip()
+            if value:
+                item[name] = value
+            elif default is not None:
+                item[name] = default
+        return item
+
+
 class CompositeExtractor:
     """
     组合提取器：CSS -> XPath -> LLM 三级回退
@@ -313,6 +593,22 @@ class CompositeExtractor:
         self._css = SelectolaxExtractor()
         self._xpath = LxmlExtractor()
         self._llm = LLMExtractor()
+        self._strategies = {
+            "css": self._css,
+            "selectolax": self._css,
+            "xpath": self._xpath,
+            "lxml": self._xpath,
+            "llm": self._llm,
+            "regex": RegexExtractor(),
+            "jsonld": JsonLdExtractor(),
+            "meta": MetaExtractor(),
+            "table": TableExtractor(),
+            "json_css": JsonCssExtractor(),
+        }
+
+    def get(self, strategy: str) -> Optional[BaseExtractor]:
+        """按名称获取提取器。"""
+        return self._strategies.get(strategy)
 
     def extract(
         self,
@@ -321,8 +617,9 @@ class CompositeExtractor:
         selectors: Selectors,
         target_schema: Type[BaseModel],
         base_url: str = "",
+        strategy: Optional[str] = None,
     ) -> List[BaseModel]:
-        """三级回退提取"""
+        """提取；指定 strategy 时用单一策略，否则三级回退。"""
         if not base_url:
             from urllib.parse import urlparse
             parsed = urlparse(url)
@@ -335,6 +632,12 @@ class CompositeExtractor:
             target_schema=target_schema,
             base_url=base_url,
         )
+
+        if strategy:
+            extractor = self._strategies.get(strategy)
+            if extractor is None:
+                raise ValueError(f"未知提取策略: {strategy}，可选: {list(self._strategies)}")
+            return extractor.extract(ctx)
 
         # 1. 尝试 CSS (selectolax)
         if selectors.item:
