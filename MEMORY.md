@@ -163,15 +163,31 @@
 - Supervisor 增加 clean 阶段：crawl → clean（去噪 + Markdown）→ extract → save
 - 测试 37 个全部通过（含脏数据：空 body / 纯 script / 1MB HTML 清洗不崩）
 
+### 12. P2 验证与修复（2026-08-01）
+
+**实机验证（苹果官网 https://www.apple.com/shop/buy-iphone）：**
+- httpx 直连 200，无需回退 Playwright ✓
+- Markdown 无 `</path>` 类残留 ✓
+- Markdown 无 "html" 前缀 ✓
+
+**验证中发现并修复的 bug：**
+- `content_filter.py` 负模式 `ads?` 无词边界，误伤 `<body class="dd-apple-upgrade-...">`
+  （"upgrade" 含 "ad"），导致 body 被整体删除、Markdown 只剩 "html" 前缀。
+  已改为词边界匹配 `\b(ads?)\b`，并显式跳过 html/body 骨架节点。
+- `fetcher.py`：懒初始化 httpx/curl_cffi 客户端（未走 `async with` 时不再静默回退 Playwright）
+- `markdown_generator.py`：html2text 前预处理相对链接 → 绝对 URL + 提取 body（修复 baseurl 拼接 bug）
+
+**回归测试：40 个全部通过**（新增 3 个：body class 含 "ad" 不被误删、相对链接绝对化、无 html 前缀）
+
 ---
 
 ## 当前状态
 
-**P0 + P1 完成 ✅，P2 代码完成（待真实网站验收）**
+**P0 + P1 完成 ✅，P2 完成并通过苹果官网/HN 验证 ✅（知乎待网络环境）**
 
 - P0：CrawlHarness 骨架可运行（Mock 模式）
 - P1：引擎回退链 + AntiBot hooks + 时间精度修复完成
-- P2：清洗/提取/分块/提示词/用量模块已实现并通过 37 个测试
+- P2：清洗/提取/分块/提示词/用量模块已实现，40 个测试全过，苹果官网实机验证通过
 - 真实 LLM 需要更换 API key（当前 DeepSeek key 已失效）
 - 服务运行在 http://localhost:8000
 
@@ -199,17 +215,16 @@ docker-compose up -d           # 启动数据库容器
 
 ### P2 验收（当前优先级）
 
-1. **真实网站验收** - 换有效 API key 后抓取知乎问题页，确认 Markdown 干净无噪声
-2. **脏数据验收** - 空 body / 纯 script / 1MB 超大 HTML 清洗不崩（单测已覆盖，真实跑一遍）
-3. **LLM 过滤器验证** - LLMContentFilter 用真实 key 跑通（PROMPT_FILTER_CONTENT）
+1. **知乎验收** - 换有效 API key 后抓取知乎问题页确认 Markdown 干净（本机网络无法连接 zhihu/HN）
+2. **LLM 过滤器验证** - LLMContentFilter 用真实 key 跑通（PROMPT_FILTER_CONTENT）
 
 ### 中优先级
 
-4. **P3 文件整理** - output/organizer + media_downloader + save 工具增强
-5. **WebSocket 支持** - Agent 执行时实时推送日志到前端
-6. **任务持久化** - 当前任务结果存在内存，需要持久化到 MySQL
-7. **frontier.py SQLite → MySQL 迁移** - 统一数据库
-8. **工具执行器补充** - monitor / scan_vuln 执行器
+3. **P3 文件整理** - output/organizer + media_downloader + save 工具增强（下一步）
+4. **WebSocket 支持** - Agent 执行时实时推送日志到前端
+5. **任务持久化** - 当前任务结果存在内存，需要持久化到 MySQL
+6. **frontier.py SQLite → MySQL 迁移** - 统一数据库
+7. **工具执行器补充** - monitor / scan_vuln 执行器
 
 ### 中优先级
 

@@ -326,8 +326,10 @@ P0（bug修+MySQL+Harness骨架）→ P1（反爬+引擎链+hooks）→ P2（清
 - [ ] **脏数据**：`https://httpbin.org/status/403` / `429` / `500`，引擎正确分类重试/放弃
 
 ### P2 验收
-- [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声
-- [ ] **脏数据**：空 body / 纯 script / 1MB 超大 HTML，清洗不崩
+- [x] 抓取 `https://www.apple.com/shop/buy-iphone` 商品页：httpx 直连成功、Markdown 无 `</path>` 残留、无 html 前缀（2026-08-01 实测）
+- [x] HN 相对链接 `/item/1` 转为绝对 URL（单元测试覆盖，2026-08-01）
+- [x] **脏数据**：空 body / 纯 script / 1MB 超大 HTML，清洗不崩（40 个测试全过）
+- [ ] 抓取 `https://www.zhihu.com/question/XXXXX`，Markdown 干净无噪声（待真实网络环境验证）
 
 ### P3 验收
 - [ ] 抓取 5 篇阮一峰博客文章，按 `~/crawagent/articles/{domain}/{date}/{title}.md` 落盘

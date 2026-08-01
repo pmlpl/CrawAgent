@@ -85,9 +85,10 @@ class RelevantContentFilter(ABC):
             "form", "iframe", "noscript", "svg",
         }
         self.header_tags = {"h1", "h2", "h3", "h4", "h5", "h6"}
+        # 注意：ads? 必须带词边界，否则会误伤 "upgrade/header/load" 等含 "ad" 的类名
         self.negative_patterns = re.compile(
-            r"nav|footer|header|sidebar|ads?|comment|promo|advert|social|"
-            r"share|recommend|copyright|login|register|cookie|breadcrumb",
+            r"\b(nav|footer|header|sidebar|ads?|comment|promo|advert|social|"
+            r"share|recommend|copyright|login|register|cookie|breadcrumb)\b",
             re.I,
         )
 
@@ -155,6 +156,8 @@ class PruningContentFilter(RelevantContentFilter):
         for el in soup.find_all(True):
             if getattr(el, "attrs", None) is None:
                 continue  # 已在上一步 decompose 的残留节点
+            if el.name in ("html", "body"):
+                continue  # 骨架节点永不动
             classes = el.get("class") or []
             if isinstance(classes, str):
                 classes = [classes]

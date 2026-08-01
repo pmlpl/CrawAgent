@@ -46,3 +46,30 @@ def test_empty_html():
 def test_dirty_html_pure_script():
     md = html_to_clean_markdown("<html><body><script>bad();</script></body></html>", url="https://a.com")
     assert "bad" not in md
+
+
+def test_relative_links_absolutized():
+    """回归：相对链接 /item/1 应转为绝对 URL（HN 场景）。"""
+    html = """
+    <html><head><title>HN</title></head><body>
+      <p><a href="item?id=1">第一条</a></p>
+      <p><a href="/item/2">第二条</a></p>
+      <p><a href="https://news.ycombinator.com/item/3">第三条</a></p>
+    </body></html>
+    """
+    md = MarkdownGenerator().generate(
+        html, url="https://news.ycombinator.com/item?id=1", title="HN", clean=False
+    )
+    assert "https://news.ycombinator.com/item?id=1" in md
+    assert "https://news.ycombinator.com/item/2" in md
+    assert "https://news.ycombinator.com/item/3" in md
+    # 不允许残留相对链接（html2text 会给绝对 URL 加尖括号 <url>）
+    assert "](item" not in md
+    assert "](/" not in md
+
+
+def test_markdown_no_html_prefix():
+    """回归：body 存在时输出不得以 "html" 开头。"""
+    html = '<html><head><title>t</title></head><body><p>正文</p></body></html>'
+    md = MarkdownGenerator().generate(html, url="https://x.com/", title="t", clean=False)
+    assert not md.lstrip().startswith("html ")

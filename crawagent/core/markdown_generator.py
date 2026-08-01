@@ -38,10 +38,40 @@ class MarkdownGenerator:
         self.cite_style = cite_style
         self.max_length = max_length
 
+    def _preprocess_links(self, html: str, baseurl: str = "") -> str:
+        """预处理 HTML：把所有相对链接转为绝对 URL，并提取 body 部分。
+
+        修复 html2text 的 baseurl 参数 bug：
+        - 绝对路径 href（如 /cn/shop/...）会被错误拼接为 baseurl 路径 + </href>
+        - <html>/<head> 标签会被文本化为 "html " 前缀
+        """
+        if not html or not html.strip() or not baseurl:
+            return html
+        try:
+            from urllib.parse import urljoin
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(html, "html.parser")
+            # 把所有 <a href> 和 <img src> 的相对路径转为绝对 URL
+            for tag in soup.find_all(["a", "img", "source", "link"]):
+                attr = "href" if tag.name in ("a", "link") else "src"
+                val = tag.get(attr)
+                if val and not val.startswith(("http://", "https://", "#", "mailto:", "tel:", "javascript:", "data:")):
+                    tag[attr] = urljoin(baseurl, val)
+            # 只提取 body 部分，避免 <html>/<head> 被文本化
+            body = soup.body or soup
+            return str(body)
+        except Exception as e:
+            logger.debug(f"链接预处理失败，用原始 HTML: {e}")
+            return html
+
     def html_to_markdown(self, html: str, baseurl: str = "") -> str:
         """html2text 转换，失败时回退 markdownify。"""
         if not html or not html.strip():
             return ""
+
+        # 预处理：相对链接转绝对 + 提取 body，绕过 html2text 的 baseurl bug
+        source = self._preprocess_links(html, baseurl) if baseurl else html
 
         try:
             import html2text
@@ -53,9 +83,8 @@ class MarkdownGenerator:
             h.protect_links = True
             h.unicode_snob = True
             h.single_line_break = False
-            if baseurl:
-                h.baseurl = baseurl
-            return h.handle(html)
+            # 不再传 baseurl（已预处理为绝对链接），避免 html2text 的拼接 bug
+            return h.handle(source)
         except Exception as e:
             logger.debug(f"html2text 失败，回退 markdownify: {e}")
 
@@ -69,7 +98,7 @@ class MarkdownGenerator:
             }
             if self.ignore_links:
                 options["strip"] = options["strip"] + ["a"]
-            return md_convert(html, **options)
+            return md_convert(source, **options)
         except Exception as e2:
             logger.warning(f"markdownify 也失败: {e2}")
             return ""

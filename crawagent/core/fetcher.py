@@ -462,6 +462,11 @@ class Fetcher:
         if self._closed:
             raise RuntimeError("Fetcher closed")
 
+        # 懒初始化客户端：未通过 async with 使用时，首次 fetch 自动初始化
+        # httpx/curl_cffi session，避免静默回退 Playwright
+        if self._httpx_client is None:
+            await self._init_clients()
+
         domain = self._get_domain(url)
         limiter = await self._get_limiter(domain)
         ua = await self._ua_rotator.get_ua()

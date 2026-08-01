@@ -42,6 +42,20 @@ def test_prune_removes_noise_keeps_article():
     assert "requests" in result
 
 
+def test_prune_does_not_kill_body_with_ad_in_class():
+    """回归：body class 含 "ad"（如 dd-apple-upgrade）不得被负模式误删。"""
+    html = """
+    <html><body class="dd-apple-upgrade-202607-theme">
+      <div class="ad-box">广告位</div>
+      <article><p>正文内容必须保留。</p></article>
+    </body></html>
+    """
+    result = PruningContentFilter().filter_content(html)
+    assert "<body" in result
+    assert "正文内容必须保留" in result
+    assert "广告位" not in result
+
+
 def test_prune_empty_body():
     assert PruningContentFilter().filter_content("") == ""
     assert PruningContentFilter().filter_content("   ") == ""
