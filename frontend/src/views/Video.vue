@@ -35,10 +35,10 @@
       </div>
       <div class="button-row">
         <button @click="fetchInfo" :disabled="loading" class="btn btn-secondary">
-          {{ loading ? '查询中...' : '查询信息' }
+          {{ loading ? '查询中...' : '查询信息' }}
         </button>
         <button @click="downloadVideo" :disabled="downloading" class="btn btn-primary">
-          {{ downloading ? '下载中...' : '下载视频' }
+          {{ downloading ? '下载中...' : '下载视频' }}
         </button>
       </div>
 
@@ -124,7 +124,7 @@
         <textarea v-model="extractHtml" rows="8" placeholder="<video src='...'></video>" class="input-field textarea"></textarea>
       </div>
       <button @click="extractVideos" :disabled="extracting" class="btn btn-primary">
-        {{ extracting ? '提取中...' : '提取视频 URL' }
+        {{ extracting ? '提取中...' : '提取视频 URL' }}
       </button>
 
       <div v-if="extractResult" class="result-card">
@@ -166,7 +166,7 @@
         <textarea v-model="adRemoveHtml" rows="8" placeholder="<html>...</html>" class="input-field textarea"></textarea>
       </div>
       <button @click="removeAds" :disabled="removingAds" class="btn btn-primary">
-        {{ removingAds ? '清理中...' : '移除广告' }
+        {{ removingAds ? '清理中...' : '移除广告' }}
       </button>
       <div v-if="cleanedHtml" class="result-card">
         <h3>清理结果</h3>

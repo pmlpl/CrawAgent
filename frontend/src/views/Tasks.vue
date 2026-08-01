@@ -38,7 +38,7 @@
           <div class="session-info">
             <div class="session-name">{{ s.name || '未命名对话' }}</div>
             <div class="session-meta">
-              <span class="meta-item">#{{ s.session_id.slice(0, 12) }}</span>
+              <span class="meta-item">#{{ (s.id || s.session_id || '').slice(0, 12) }}</span>
               <span class="meta-item">{{ formatTime(s.created_at) }}</span>
               <span class="meta-item" v-if="s.lane_count">{{ s.lane_count }} 个 lane</span>
             </div>
@@ -71,7 +71,7 @@ async function loadSessions() {
   loading.value = true
   try {
     const res = await harnessApi.listSessions(50)
-    sessions.value = res || []
+    sessions.value = res.sessions || res || []
   } catch (e) {
     sessions.value = []
   } finally {
