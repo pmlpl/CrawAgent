@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Boolean, Float, String, Text, UniqueConstraint, select, update
+from sqlalchemy import Boolean, Double, String, Text, UniqueConstraint, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,8 +40,8 @@ class SessionModel(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), default="")
-    created_at: Mapped[float] = mapped_column(Float, default=0.0)
-    updated_at: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[float] = mapped_column(Double, default=0.0)
+    updated_at: Mapped[float] = mapped_column(Double, default=0.0)
 
 
 class EntryModel(Base):
@@ -56,7 +56,7 @@ class EntryModel(Base):
     tool_calls: Mapped[str] = mapped_column(Text, default="[]")
     tool_call_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[float] = mapped_column(Double, default=0.0)
 
 
 class LaneModel(Base):
@@ -81,8 +81,8 @@ class OperationLogModel(Base):
     session_id: Mapped[str] = mapped_column(String(32), index=True)
     lane_name: Mapped[str] = mapped_column(String(64))
     op_type: Mapped[str] = mapped_column(String(32))
-    started_at: Mapped[float] = mapped_column(Float, default=0.0)
-    finished_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    started_at: Mapped[float] = mapped_column(Double, default=0.0)
+    finished_at: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     entries_json: Mapped[str] = mapped_column(Text, default="[]")
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
@@ -98,7 +98,7 @@ class GlobalFactModel(Base):
     session_id: Mapped[str] = mapped_column(String(32), index=True)
     key: Mapped[str] = mapped_column(String(255))
     value: Mapped[str] = mapped_column(Text)
-    updated_at: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[float] = mapped_column(Double, default=0.0)
 
 
 # ---------------------------------------------------------------------------
