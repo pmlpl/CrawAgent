@@ -1,202 +1,91 @@
-"""配置管理 —— 加载 models.json
-
-文件结构（非常简单）:
-    {
-      "current": "deepseek",
-      "models": [
-        {
-          "name": "deepseek",
-          "provider": "openai",
-          "base_url": "https://api.deepseek.com/v1",
-          "model_name": "deepseek-chat",
-          "api_key": "sk-xxxxxxxxxx",
-          "temperature": 0.7,
-          "max_tokens": 2000
-        },
-        {
-          "name": "ollama-qwen",
-          "provider": "ollama",
-          "base_url": "http://localhost:11434",
-          "model_name": "qwen2.5:7b",
-          "api_key": "",
-          "temperature": 0.7,
-          "max_tokens": 2000
-        }
-      ]
-    }
-
-provider 只有两种:
-  - "openai"     —— 任何 OpenAI 兼容 API（DeepSeek / OpenAI / LM Studio / Ollama / 通义千问...）
-  - "anthropic"  —— Anthropic Claude 系列
-"""
 from __future__ import annotations
 
-import json
-import logging
-import os
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
-from typing import Any
+from functools import lru_cache
+from typing import List, Optional
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# ---------- 日志配置 ----------
-def setup_logging(level: int = logging.INFO) -> None:
-    """配置全局日志系统"""
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+class Settings(BaseSettings):
+    """应用配置"""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
     )
 
+    # 应用基础
+    app_name: str = "CrawAgent"
+    app_version: str = "1.0.0"
+    debug: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8000
 
-def get_logger(name: str) -> logging.Logger:
-    """获取指定名称的 logger"""
-    return logging.getLogger(name)
+    # MySQL 配置
+    mysql_host: str = "localhost"
+    mysql_port: int = 3306
+    mysql_user: str = "crawagent"
+    mysql_password: str = "crawagent"
+    mysql_database: str = "crawagent"
+    mysql_pool_size: int = 10
+    mysql_echo: bool = False
 
+    # Redis 配置
+    redis_url: str = "redis://localhost:6379/0"
 
-logger = get_logger(__name__)
+    # SQLite 路径（兼容旧功能）
+    data_dir: str = "data"
+    frontier_db_path: str = "data/frontier.db"
+    retriever_db_path: str = "data/retriever.db"
+    checkpointer_db_path: str = "data/checkpoints.db"
 
+    # LLM 配置（任意 OpenAI 兼容 API）
+    openai_api_key: Optional[str] = None
+    openai_base_url: str = "https://api.openai.com/v1"
+    default_model: str = "gpt-4o-mini"
+    default_temperature: float = 0.1
+    max_tokens: int = 4096
+    request_timeout: float = 60.0
+    mock_mode: bool = False
 
-@dataclass
-class ModelConfig:
-    name: str
-    provider: str           # "openai" 或 "anthropic"
-    base_url: str
-    model_name: str
-    api_key: str = ""
-    temperature: float = 0.7
-    max_tokens: int = 2000
-    description: str = ""
+    # Ollama 本地（可选）
+    ollama_base_url: Optional[str] = None
 
-    def display(self) -> str:
-        if self.description:
-            return f"{self.name} [{self.provider}] {self.description}"
-        return f"{self.name} [{self.provider}] {self.model_name}"
+    # 爬虫配置
+    per_domain_rate: float = 0.5  # req/sec per domain
+    max_concurrent: int = 50
+    request_timeout: float = 30.0
+    max_retries: int = 3
+    max_pages: int = 100
+    max_depth: int = 3
 
+    # 反爬配置
+    impersonate: str = "chrome120"
+    use_curl_cffi: bool = True
+    proxy_pool: List[str] = []
+    custom_user_agents: List[str] = []
 
-class Settings:
-    """全局配置 —— 从 models.json 加载"""
+    # Agent Harness 配置
+    harness_max_turns: int = 50
+    harness_compaction_threshold: int = 80000  # token 数，超过触发压缩
+    harness_default_lane: str = "main"
 
-    def __init__(self, models_file: Path):
-        self.models_file = models_file
-        self.models: list[ModelConfig] = []
-        self.current: str = ""
-        self.project_root = models_file.parent
-        self.output_dir = self.project_root / "output"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._load()
+    # 日志
+    log_level: str = "INFO"
+    log_file: str = "logs/crawagent.log"
 
-    # ---------- 加载 / 保存 ----------
-
-    def _load(self) -> None:
-        if not self.models_file.exists():
-            self._create_default()
-            return
-        try:
-            with open(self.models_file, "r", encoding="utf-8") as f:
-                data: dict[str, Any] = json.load(f)
-            self.models = [self._load_model_config(m) for m in data.get("models", [])]
-            self.current = str(data.get("current", "")) or (self.models[0].name if self.models else "")
-        except Exception as e:
-            print(f"[警告] 加载 {self.models_file.name} 失败: {e}")
-            self._create_default()
-    
-    def _load_model_config(self, model_data: dict) -> ModelConfig:
-        """加载单个模型配置，支持环境变量读取 api_key"""
-        name = model_data.get("name", "")
-        api_key = model_data.get("api_key", "")
-        
-        # 如果 api_key 以 $ 开头，从环境变量读取
-        if api_key.startswith("$"):
-            env_var = api_key[1:]  # 去掉 $ 前缀
-            api_key = os.environ.get(env_var, "")
-        # 如果 api_key 为空字符串，也尝试从环境变量读取
-        elif not api_key:
-            # 尝试常见的环境变量名
-            for env_name in [
-                f"{name.upper()}_API_KEY",
-                f"{name.upper().replace('-', '_')}_API_KEY",
-                "DEEPSEEK_API_KEY",
-                "MIMO_API_KEY",
-            ]:
-                if env_name in os.environ:
-                    api_key = os.environ[env_name]
-                    break
-        
-        # 更新 model_data 中的 api_key
-        model_data["api_key"] = api_key
-        return ModelConfig(**model_data)
-
-    def _create_default(self) -> None:
-        self.models = [
-            ModelConfig(
-                name="deepseek",
-                provider="openai",
-                base_url="https://api.deepseek.com/v1",
-                model_name="deepseek-chat",
-                api_key="",  # 请在启动后用 /add_model 添加，或手动修改此文件
-                description="DeepSeek 对话模型",
-            ),
-        ]
-        self.current = "deepseek"
-        self.save()
-        logger.info(f"已创建默认 {self.models_file.name}")
-        logger.info("运行 /add_model 添加你的模型，或直接编辑该文件")
-
-    def save(self) -> None:
-        """保存 models.json"""
-        data = {
-            "current": self.current,
-            "models": [asdict(m) for m in self.models],
-        }
-        with open(self.models_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-    # ---------- 查询 ----------
-
-    def get_model(self, name: str) -> ModelConfig | None:
-        for m in self.models:
-            if m.name == name:
-                return m
-        return None
-
-    def list_models(self) -> list[ModelConfig]:
-        return list(self.models)
-
-    # ---------- 修改 ----------
-
-    def add_model(self, cfg: ModelConfig) -> tuple[bool, str]:
-        if self.get_model(cfg.name):
-            return False, f"模型名 '{cfg.name}' 已存在，用 /rm_model 删除后再添加"
-        self.models.append(cfg)
-        if not self.current:
-            self.current = cfg.name
-        self.save()
-        return True, f"已添加: {cfg.display()}"
-
-    def remove_model(self, name: str) -> tuple[bool, str]:
-        if not self.get_model(name):
-            return False, f"未找到模型 '{name}'"
-        self.models = [m for m in self.models if m.name != name]
-        if self.current == name:
-            self.current = self.models[0].name if self.models else ""
-        self.save()
-        return True, f"已删除: {name}"
-
-    def set_current(self, name: str) -> tuple[bool, str]:
-        if not self.get_model(name):
-            return False, f"未找到模型 '{name}'"
-        self.current = name
-        self.save()
-        return True, f"当前模型: {name}"
+    @property
+    def mysql_dsn(self) -> str:
+        """MySQL 连接字符串（async）"""
+        return (
+            f"mysql+aiomysql://{self.mysql_user}:{self.mysql_password}"
+            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}"
+        )
 
 
-# ---------- 全局入口 ----------
-
-def load_settings(models_file: str | Path | None = None) -> Settings:
-    """加载配置（常用入口）"""
-    if models_file is None:
-        models_file = Path(__file__).resolve().parent.parent.parent / "models.json"
-    else:
-        models_file = Path(models_file)
-    return Settings(models_file)
+@lru_cache()
+def get_settings() -> Settings:
+    """获取配置单例"""
+    return Settings()

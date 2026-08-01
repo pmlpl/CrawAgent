@@ -1,8 +1,31 @@
-"""LLM 封装层 —— 统一的多模型接入
-
-Provider: openai (DeepSeek / OpenAI / LM Studio 等)  或  ollama
-配置统一在 models.json 中管理。
 """
-from .factory import LLMFactory, to_chat_messages
+CrawAgent LLM - 多提供商 LLM 工厂
+"""
 
-__all__ = ["LLMFactory", "to_chat_messages"]
+from crawagent.llm.factory import (
+    LLMFactory,
+    LLMProvider,
+    get_factory,
+    get_llm,
+    get_llm_with_tools,
+)
+from crawagent.llm.prompts import (
+    SITE_ANALYZER_PROMPT,
+    CLASSIFY_PROMPT,
+    PLAN_PROMPT,
+    DECIDE_PROMPT,
+    EXTRACTION_SCHEMA_PROMPT,
+)
+
+__all__ = [
+    "LLMFactory",
+    "LLMProvider",
+    "get_factory",
+    "get_llm",
+    "get_llm_with_tools",
+    "SITE_ANALYZER_PROMPT",
+    "CLASSIFY_PROMPT",
+    "PLAN_PROMPT",
+    "DECIDE_PROMPT",
+    "EXTRACTION_SCHEMA_PROMPT",
+]

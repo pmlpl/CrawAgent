@@ -1,164 +1,215 @@
-"""LLM 工厂 —— 统一接口
-
-支持两种 provider:
-  - "openai"     —— OpenAI / DeepSeek / LM Studio / Ollama / 通义千问 等一切兼容 API
-  - "anthropic"  —— Anthropic Claude 系列
-
-统一暴露为 LangChain BaseChatModel 接口。
-"""
 from __future__ import annotations
 
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from functools import lru_cache
+import os
+from typing import Any, Dict, List, Optional
 
-from ..config.settings import ModelConfig, Settings
+# 禁用系统代理，防止 Privoxy 等代理拦截 API 请求
+os.environ["NO_PROXY"] = "*"
+os.environ["no_proxy"] = "*"
 
+from langchain_core.language_models import BaseChatModel
+from langchain_core.tools import BaseTool
+from pydantic import BaseModel, Field
 
-# ============================================================
-# Provider 创建函数
-# ============================================================
-
-def _create_openai(cfg: ModelConfig) -> BaseChatModel:
-    """OpenAI 兼容 API（OpenAI / DeepSeek / LM Studio / 通义千问 等）"""
-    try:
-        from langchain_openai import ChatOpenAI
-    except ImportError as e:
-        raise RuntimeError(
-            "缺少依赖 langchain-openai。请运行: pip install langchain-openai"
-        ) from e
-
-    # 本地服务（LM Studio 等）不需要 API key，但 ChatOpenAI 要求非空字符串
-    api_key = cfg.api_key if cfg.api_key else "not-needed"
-
-    return ChatOpenAI(
-        model=cfg.model_name,
-        api_key=api_key,
-        base_url=cfg.base_url,
-        temperature=cfg.temperature,
-        max_tokens=cfg.max_tokens,
-    )
+from crawagent.config.settings import get_settings
 
 
-def _create_anthropic(cfg: ModelConfig) -> BaseChatModel:
-    """Anthropic Claude 系列"""
-    try:
-        from langchain_anthropic import ChatAnthropic
-    except ImportError as e:
-        raise RuntimeError(
-            "缺少依赖 langchain-anthropic。请运行: pip install langchain-anthropic"
-        ) from e
+class LLMProvider(BaseModel):
+    """LLM 提供商配置"""
+    name: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    model: str = ""
+    temperature: float = 0.1
+    max_tokens: int = 4096
+    extra_params: Dict[str, Any] = Field(default_factory=dict)
 
-    if not cfg.api_key:
-        raise RuntimeError(
-            f"Anthropic 模型 '{cfg.name}' 需要配置 api_key。"
-            "请在 models.json 中填写 Anthropic API Key。"
-        )
-
-    return ChatAnthropic(
-        model=cfg.model_name,
-        anthropic_api_key=cfg.api_key,
-        temperature=cfg.temperature,
-        max_tokens=cfg.max_tokens,
-    )
-
-
-_PROVIDERS = {
-    "openai": _create_openai,
-    "anthropic": _create_anthropic,
-}
-
-
-# ============================================================
-# LLM 工厂
-# ============================================================
 
 class LLMFactory:
+    """多提供商 LLM 工厂"""
 
-    def __init__(self, settings: Settings):
-        self._settings = settings
-        self._cache: dict[str, BaseChatModel] = {}
-        self._current: str = settings.current
+    def __init__(self):
+        self._providers: Dict[str, LLMProvider] = {}
+        self._clients: Dict[str, BaseChatModel] = {}
+        self._request_timeout: float = 300.0
+        self._load_from_settings()
 
-    def get_llm(self, name: str) -> BaseChatModel:
-        cfg = self._settings.get_model(name)
-        if not cfg:
-            available = ", ".join(m.name for m in self._settings.list_models())
-            raise ValueError(f"未找到模型 '{name}'。可用: {available}")
-        if name in self._cache:
-            return self._cache[name]
-
-        creator = _PROVIDERS.get(cfg.provider)
-        if not creator:
-            raise ValueError(
-                f"未知 provider: '{cfg.provider}'。"
-                "只支持 openai / anthropic"
+    def _load_from_settings(self) -> None:
+        """从配置加载提供商"""
+        settings = get_settings()
+        self._request_timeout = settings.request_timeout
+        
+        # Mock 模式优先
+        if settings.mock_mode:
+            self._providers["mock"] = LLMProvider(
+                name="mock",
+                model="mock-model",
+                temperature=0.0,
+                max_tokens=4096,
+            )
+            return
+        
+        # OpenAI 兼容接口（DeepSeek/OpenAI/智谱/百川/月之暗面/...）
+        if settings.openai_api_key:
+            self._providers["openai"] = LLMProvider(
+                name="openai",
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                model=settings.default_model,
+                temperature=settings.default_temperature,
+                max_tokens=settings.max_tokens,
             )
 
-        llm = creator(cfg)
-        self._cache[name] = llm
-        return llm
+        # Ollama 本地
+        if settings.ollama_base_url:
+            self._providers["ollama"] = LLMProvider(
+                name="ollama",
+                base_url=settings.ollama_base_url,
+                model=settings.default_model,
+                temperature=settings.default_temperature,
+                max_tokens=settings.max_tokens,
+            )
 
-    def get_default(self) -> BaseChatModel:
-        if not self._current:
-            raise ValueError("未配置任何模型，请先 /add_model 添加")
-        return self.get_llm(self._current)
+    def register_provider(self, provider: LLMProvider) -> None:
+        """注册新提供商"""
+        self._providers[provider.name] = provider
+        self._clients.pop(provider.name, None)
 
-    def current_name(self) -> str:
-        return self._current
+    def get_provider(self, name: str) -> Optional[LLMProvider]:
+        return self._providers.get(name)
 
-    def switch_to(self, name: str) -> tuple[bool, str]:
-        cfg = self._settings.get_model(name)
-        if not cfg:
-            return False, f"未找到模型 '{name}'"
-        try:
-            self.get_llm(name)
-        except Exception as e:
-            return False, f"模型加载失败: {e}"
-        self._current = name
-        self._settings.set_current(name)
-        return True, f"已切换到: {cfg.display()}"
+    def list_providers(self) -> List[str]:
+        return list(self._providers.keys())
 
-    def list_models(self) -> list[tuple[str, str, str]]:
-        """返回 [(name, display_string, provider), ...]"""
-        return [(m.name, m.display(), m.provider) for m in self._settings.list_models()]
+    def _create_client(self, provider: LLMProvider) -> BaseChatModel:
+        """创建 LLM 客户端"""
+        if provider.name == "mock":
+            from crawagent.llm.mock import MockLLM
+            return MockLLM(
+                model=provider.model,
+                temperature=provider.temperature,
+            )
+        
+        if provider.name == "ollama":
+            from langchain_community.chat_models import ChatOllama
+            return ChatOllama(
+                model=provider.model,
+                base_url=provider.base_url,
+                temperature=provider.temperature,
+                **provider.extra_params,
+            )
+        
+        # 任意 OpenAI 兼容 API
+        from langchain_openai import ChatOpenAI
 
-    # ---------- 直接对话 ----------
+        base_url = provider.base_url or ""
+        is_local = any(host in base_url for host in ["localhost", "127.0.0.1", "10.", "172.", "192.168."])
+        
+        if is_local:
+            os.environ["no_proxy"] = base_url.split("://")[1].split("/")[0] if "://" in base_url else base_url
+            os.environ["NO_PROXY"] = os.environ["no_proxy"]
+            os.environ["LANGCHAIN_OPENAI_TCP_KEEPALIVE"] = "0"
 
-    def chat(
+        client_kwargs = dict(
+            model=provider.model,
+            api_key=provider.api_key,
+            base_url=base_url,
+            temperature=provider.temperature,
+            max_tokens=provider.max_tokens,
+            timeout=self._request_timeout,
+        )
+        return ChatOpenAI(**provider.extra_params, **client_kwargs)
+
+    def get_llm(
         self,
-        user_msg: str,
-        system_msg: str = "你是 CrawAgent，一个专注于网页爬取与数据整理的助手。回答简洁明了。",
-        model_name: str | None = None,
-    ) -> str:
-        try:
-            llm = self.get_llm(model_name) if model_name else self.get_default()
-        except Exception as e:
-            return f"[LLM 不可用] {e}\n请用 /add_model 添加一个模型"
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> BaseChatModel:
+        """获取 LLM 实例（带缓存，使用 _clients 字典替代 @lru_cache）"""
+        if provider:
+            provider_name = provider
+        elif "mock" in self._providers:
+            provider_name = "mock"
+        elif "openai" in self._providers:
+            provider_name = "openai"
+        else:
+            provider_name = list(self._providers.keys())[0] if self._providers else "openai"
+        
+        if provider_name not in self._providers:
+            raise ValueError(f"Provider not found: {provider_name}. Available: {list(self._providers.keys())}")
 
-        messages: list[BaseMessage] = [
-            SystemMessage(content=system_msg),
-            HumanMessage(content=user_msg),
-        ]
-        try:
-            resp: AIMessage = llm.invoke(messages)
-            return str(resp.content)
-        except Exception as e:
-            return f"[LLM 调用失败] {e}"
+        provider_config = self._providers[provider_name]
+        
+        final_model = model or provider_config.model
+        final_temp = temperature if temperature is not None else provider_config.temperature
+
+        cache_key = f"{provider_name}:{final_model}:{final_temp}"
+
+        # 只缓存基础 client，不缓存绑定工具的版本（避免不同工具集串扰）
+        if cache_key in self._clients:
+            base_client = self._clients[cache_key]
+        else:
+            provider_copy = provider_config.model_copy(update={
+                "model": final_model,
+                "temperature": final_temp,
+            })
+            base_client = self._create_client(provider_copy)
+            self._clients[cache_key] = base_client
+
+        # 绑定工具时返回新的 RunnableBinding，不污染缓存
+        if kwargs.get("tools"):
+            return base_client.bind_tools(kwargs["tools"])
+
+        return base_client
+
+    def get_llm_with_tools(
+        self,
+        tools: List[BaseTool],
+        provider: Optional[str] = None,
+        **kwargs
+    ) -> BaseChatModel:
+        """获取绑定工具的 LLM"""
+        return self.get_llm(provider=provider, tools=tools, **kwargs)
+
+    def clear_cache(self) -> None:
+        self._clients.clear()
+
+    def reload(self) -> None:
+        """重新加载配置（修改设置后调用）"""
+        self._providers.clear()
+        self._clients.clear()
+        self._load_from_settings()
 
 
-def to_chat_messages(
-    user_msg: str,
-    system_msg: str | None = None,
-    history: list[tuple[str, str]] | None = None,
-) -> list[BaseMessage]:
-    msgs: list[BaseMessage] = []
-    if system_msg:
-        msgs.append(SystemMessage(content=system_msg))
-    if history:
-        for role, text in history:
-            if role == "user":
-                msgs.append(HumanMessage(content=text))
-            elif role == "ai":
-                msgs.append(AIMessage(content=text))
-    msgs.append(HumanMessage(content=user_msg))
-    return msgs
+_factory = None
+
+@lru_cache()
+def get_factory() -> LLMFactory:
+    global _factory
+    if _factory is None:
+        _factory = LLMFactory()
+    return _factory
+
+
+def get_llm(
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    **kwargs
+) -> BaseChatModel:
+    """获取 LLM 实例"""
+    factory = get_factory()
+    return factory.get_llm(provider=provider, model=model, temperature=temperature, **kwargs)
+
+
+def get_llm_with_tools(
+    tools: List[BaseTool],
+    provider: Optional[str] = None,
+    **kwargs
+) -> BaseChatModel:
+    """获取绑定工具的 LLM"""
+    factory = get_factory()
+    return factory.get_llm_with_tools(tools, provider=provider, **kwargs)

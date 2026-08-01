@@ -1,7 +1,10 @@
-"""CrawAgent - 智能爬虫 Agent
-
-配置驱动的多模型接入 + LangGraph 工作流 + 终端 UI。
 """
-from .settings import Settings, ModelConfig, load_settings
+CrawAgent Config - 配置管理
+"""
 
-__all__ = ["Settings", "ModelConfig", "load_settings"]
+from crawagent.config.settings import Settings, get_settings
+
+__all__ = [
+    "Settings",
+    "get_settings",
+]

@@ -1,0 +1,525 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Type, Union, Callable
+from urllib.parse import urljoin
+
+from lxml import html as lxml_html
+from lxml import etree
+from pydantic import BaseModel, ConfigDict, create_model
+from selectolax.parser import HTMLParser
+
+from crawagent.core.models import CrawlResult, ExtractedItem, Selectors, SiteAnalysis
+from crawagent.llm.factory import get_llm
+from loguru import logger
+
+
+@dataclass
+class ExtractionContext:
+    """提取上下文"""
+    url: str
+    html: str
+    selectors: Selectors
+    target_schema: Type[BaseModel]
+    base_url: str = ""
+
+
+class BaseExtractor(ABC):
+    """提取器基类"""
+
+    @abstractmethod
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        pass
+
+    def _normalize_text(self, text: str) -> str:
+        """规范化文本"""
+        if not text:
+            return ""
+        # 压缩空白字符
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def _convert_selector(self, selector: str) -> str:
+        """
+        转换 SiteAnalyzer 的 @attr 语法为标准 CSS 属性选择器
+        例: video@title -> video[title]
+            a@href -> a[href]
+            img@src -> img[src]
+        """
+        if not selector or '@' not in selector:
+            return selector
+        # 处理 tag@attr 格式
+        parts = selector.split('@')
+        if len(parts) == 2:
+            tag, attr = parts
+            return f"{tag}[{attr}]"
+        return selector
+
+
+class SelectolaxExtractor(BaseExtractor):
+    """Selectolax CSS 选择器提取器（快）"""
+
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        if not ctx.html or not ctx.selectors.item:
+            return []
+
+        parser = HTMLParser(ctx.html)
+        container = None
+
+        if ctx.selectors.list_container:
+            container = parser.css_first(ctx.selectors.list_container)
+            if not container:
+                return []
+        else:
+            container = parser
+
+        items = container.css(ctx.selectors.item)
+        results = []
+
+        for idx, item in enumerate(items):
+            data = self._extract_item(item, ctx, idx)
+            if data:
+                try:
+                    model = ctx.target_schema(**data)
+                    results.append(model)
+                except Exception as e:
+                    logger.debug(f"Schema validation failed for item {idx}: {e}")
+                    continue
+
+        return results
+
+    def _extract_item(self, node, ctx: ExtractionContext, idx: int) -> Optional[Dict]:
+        """从单个节点提取数据"""
+        data = {}
+
+        # 标题
+        if ctx.selectors.title:
+            sel = self._convert_selector(ctx.selectors.title)
+            el = node.css_first(sel)
+            if el:
+                data["title"] = self._normalize_text(el.text())
+
+        # URL
+        if ctx.selectors.url:
+            sel = self._convert_selector(ctx.selectors.url)
+            el = node.css_first(sel)
+            if el:
+                href = el.attributes.get("href") or el.text()
+                if href:
+                    data["url"] = urljoin(ctx.base_url, href.strip())
+
+        # 额外字段
+        for field_name, selector in ctx.selectors.extra.items():
+            sel = self._convert_selector(selector)
+            el = node.css_first(sel)
+            if el:
+                if el.tag in ("a", "link"):
+                    data[field_name] = urljoin(ctx.base_url, el.attributes.get("href", "").strip())
+                elif el.tag in ("img", "image"):
+                    data[field_name] = urljoin(ctx.base_url, el.attributes.get("src", "").strip())
+                else:
+                    data[field_name] = self._normalize_text(el.text())
+
+        # 如果没有任何字段，返回 None
+        if not data:
+            return None
+
+        data["_source_index"] = idx
+        return data
+
+
+class LxmlExtractor(BaseExtractor):
+    """lxml XPath/CSS 提取器（强）"""
+
+    def _convert_selector(self, selector: str) -> str:
+        """转换 @attr 语法为标准 CSS"""
+        if not selector or '@' not in selector:
+            return selector
+        parts = selector.split('@')
+        if len(parts) == 2:
+            tag, attr = parts
+            return f"{tag}[{attr}]"
+        return selector
+
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        if not ctx.html or not ctx.selectors.item:
+            return []
+
+        try:
+            doc = lxml_html.fromstring(ctx.html)
+            doc.make_links_absolute(ctx.base_url)
+        except Exception as e:
+            logger.debug(f"lxml parse failed: {e}")
+            return []
+
+        # 容器
+        if ctx.selectors.list_container:
+            containers = doc.cssselect(ctx.selectors.list_container)
+            if not containers:
+                return []
+            root = containers[0]
+        else:
+            root = doc
+
+        items = root.cssselect(ctx.selectors.item)
+        results = []
+
+        for idx, item in enumerate(items):
+            data = self._extract_item(item, ctx, idx)
+            if data:
+                try:
+                    model = ctx.target_schema(**data)
+                    results.append(model)
+                except Exception as e:
+                    logger.debug(f"Schema validation failed for item {idx}: {e}")
+
+        return results
+
+    def _extract_item(self, node, ctx: ExtractionContext, idx: int) -> Optional[Dict]:
+        data = {}
+
+        # 标题
+        if ctx.selectors.title:
+            sel = self._convert_selector(ctx.selectors.title)
+            els = node.cssselect(sel)
+            if els:
+                data["title"] = self._normalize_text(els[0].text_content())
+
+        # URL
+        if ctx.selectors.url:
+            sel = self._convert_selector(ctx.selectors.url)
+            els = node.cssselect(sel)
+            if els:
+                href = els[0].get("href") or els[0].text_content()
+                if href:
+                    data["url"] = urljoin(ctx.base_url, href.strip())
+
+        # 额外字段
+        for field_name, selector in ctx.selectors.extra.items():
+            sel = self._convert_selector(selector)
+            els = node.cssselect(sel)
+            if els:
+                el = els[0]
+                tag = el.tag.lower()
+                if tag in ("a", "link"):
+                    data[field_name] = urljoin(ctx.base_url, el.get("href", "").strip())
+                elif tag in ("img", "image"):
+                    data[field_name] = urljoin(ctx.base_url, el.get("src", "").strip())
+                else:
+                    data[field_name] = self._normalize_text(el.text_content())
+
+        if not data:
+            return None
+
+        data["_source_index"] = idx
+        return data
+
+
+class LLMExtractor(BaseExtractor):
+    """LLM 兜底提取器（当选择器失效时）"""
+
+    def __init__(self):
+        self._llm = None
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = get_llm()
+        return self._llm
+
+    def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
+        if not ctx.html:
+            return []
+
+        # 截断 HTML（避免超长）
+        truncated = ctx.html[:8000] if len(ctx.html) > 8000 else ctx.html
+
+        # 构造 prompt
+        schema_info = ctx.target_schema.model_json_schema()
+        fields_desc = []
+        for name, info in schema_info.get("properties", {}).items():
+            desc = info.get("description", name)
+            fields_desc.append(f"  - {name}: {desc}")
+
+        prompt = f"""从以下 HTML 页面中提取结构化数据。
+
+目标 URL: {ctx.url}
+目标字段:
+{chr(10).join(fields_desc)}
+
+页面 HTML (截断):
+{truncated}
+
+请提取所有符合条目的数据，返回 JSON 数组。每个对象包含上述字段。
+如果某字段在页面中找不到，设为 null。
+只返回 JSON，不要任何解释。"""
+
+        try:
+            # 使用 function calling 强制结构化输出
+            tool_schema = {
+                "name": "extract_items",
+                "description": "提取结构化数据",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": schema_info,
+                        }
+                    },
+                    "required": ["items"],
+                },
+            }
+
+            # 这里简化：直接调用 LLM，实际应用中应使用 function calling
+            response = self.llm.invoke(prompt)
+
+            # 尝试解析 JSON
+            import json
+            json_match = re.search(r"\[.*\]", response.content, re.DOTALL)
+            if json_match:
+                items = json.loads(json_match.group())
+                results = []
+                for item in items:
+                    try:
+                        model = ctx.target_schema(**item)
+                        results.append(model)
+                    except Exception:
+                        continue
+                return results
+
+        except Exception as e:
+            logger.warning(f"LLM extraction failed: {e}")
+
+        return []
+
+    def _normalize_text(self, text: str) -> str:
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+
+class CompositeExtractor:
+    """
+    组合提取器：CSS -> XPath -> LLM 三级回退
+    """
+
+    def __init__(self):
+        self._css = SelectolaxExtractor()
+        self._xpath = LxmlExtractor()
+        self._llm = LLMExtractor()
+
+    def extract(
+        self,
+        url: str,
+        html: str,
+        selectors: Selectors,
+        target_schema: Type[BaseModel],
+        base_url: str = "",
+    ) -> List[BaseModel]:
+        """三级回退提取"""
+        if not base_url:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+        ctx = ExtractionContext(
+            url=url,
+            html=html,
+            selectors=selectors,
+            target_schema=target_schema,
+            base_url=base_url,
+        )
+
+        # 1. 尝试 CSS (selectolax)
+        if selectors.item:
+            logger.debug("尝试 CSS 选择器提取")
+            results = self._css.extract(ctx)
+            if results:
+                logger.debug(f"CSS 提取成功: {len(results)} 条")
+                return results
+
+        # 2. 尝试 XPath (lxml)
+        logger.debug("CSS 失败，尝试 XPath 提取")
+        results = self._xpath.extract(ctx)
+        if results:
+            logger.debug(f"XPath 提取成功: {len(results)} 条")
+            return results
+
+        # 3. LLM 兜底
+        logger.debug("选择器均失效，启用 LLM 兜底提取")
+        results = self._llm.extract(ctx)
+        logger.debug(f"LLM 提取: {len(results)} 条")
+        return results
+
+    def _fallback_generic(self, result: CrawlResult, base_url: str, target_schema: Type[BaseModel]) -> List[BaseModel]:
+        """通用兜底提取：从 HTML 中提取 title、links 和 images"""
+        from bs4 import BeautifulSoup
+        from urllib.parse import urljoin
+        
+        soup = BeautifulSoup(result.html, "html.parser")
+        items = []
+        
+        # 提取页面标题
+        title = soup.find("title")
+        title_text = title.get_text(strip=True) if title else ""
+        
+        # 提取主要图片（og:image、大图）
+        main_image = None
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            main_image = og_image["content"].strip()
+        
+        # 提取所有图片链接（过滤小图标）
+        images = []
+        for img in soup.find_all("img", src=True):
+            src = img["src"].strip()
+            if not src or src.startswith(("data:", "#", "javascript:")):
+                continue
+            abs_img = urljoin(base_url, src)
+            alt = img.get("alt", "").strip()
+            # 过滤掉小图标
+            width = img.get("width")
+            height = img.get("height")
+            if width and str(width).isdigit() and int(width) < 50:
+                continue
+            if height and str(height).isdigit() and int(height) < 50:
+                continue
+            images.append({"src": abs_img, "alt": alt})
+        
+        # 提取链接（同时提取链接内的图片）
+        links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+            abs_url = urljoin(base_url, href)
+            text = a.get_text(strip=True) or href
+            
+            # 尝试从链接内提取图片
+            img = a.find("img", src=True)
+            img_src = None
+            if img:
+                src = img.get("src", "").strip()
+                if src and not src.startswith(("data:", "#", "javascript:")):
+                    img_src = urljoin(base_url, src)
+            
+            links.append({"title": text, "url": abs_url, "image": img_src})
+        
+        schema_fields = target_schema.model_fields.keys()
+        has_image_field = any(k in schema_fields for k in ["image", "img", "picture", "photo", "src", "image_url"])
+        has_title_field = "title" in schema_fields
+        has_url_field = "url" in schema_fields
+        has_content_field = "content" in schema_fields
+        
+        # 判断是否是"详情页"（单页，URL 包含 look/detail/item 等关键词）
+        is_detail_page = any(k in base_url.lower() for k in ["look", "detail", "item", "show", "view", "/p/", "/post/"])
+        
+        if has_image_field and images:
+            # 图片字段明确：每张图片一条
+            for img in images:
+                item = {
+                    "title": img.get("alt") or title_text,
+                    "image": img["src"],
+                    "url": img["src"],
+                }
+                items.append(item)
+        elif is_detail_page and (main_image or images):
+            # 详情页模式：返回页面标题 + 主图 URL
+            item = {"title": title_text, "url": result.url}
+            if main_image:
+                item["url"] = urljoin(base_url, main_image)
+                item["image"] = item["url"]
+            elif images:
+                # 选最大的那张（简单策略：选 alt 非空的第一个，或第一个）
+                best = next((img for img in images if img.get("alt")), images[0])
+                item["url"] = best["src"]
+                item["image"] = best["src"]
+                if not item["title"] and best.get("alt"):
+                    item["title"] = best["alt"]
+            if has_content_field:
+                item["content"] = title_text
+            items.append(item)
+        elif links:
+            # 列表页模式：链接为主，附带图片
+            for link in links:
+                item = {
+                    "title": link["title"],
+                    "url": link["url"],
+                    "source_title": title_text,
+                }
+                if link.get("image"):
+                    item["image"] = link["image"]
+                items.append(item)
+        elif title_text:
+            items.append({"title": title_text, "url": result.url})
+        
+        # 转换为 target_schema
+        results = []
+        for item in items:
+            try:
+                model = target_schema(**item)
+                results.append(model)
+            except Exception:
+                continue
+        
+        return results
+
+
+def create_dynamic_schema(fields: Dict[str, Dict], schema_name: str = "DynamicItem") -> Type[BaseModel]:
+    """
+    根据字段定义动态创建 Pydantic 模型
+    fields 格式: {"field_name": {"type": "str", "description": "描述", "required": True}}
+    """
+    type_map = {
+        "str": (str, ...),
+        "int": (int, ...),
+        "float": (float, ...),
+        "bool": (bool, ...),
+        "list": (List[Any], ...),
+        "dict": (Dict[str, Any], ...),
+        "optional_str": (Optional[str], None),
+        "optional_int": (Optional[int], None),
+    }
+
+    field_definitions = {}
+    for name, spec in fields.items():
+        if not isinstance(spec, dict):
+            # LLM 可能直接返回 {"title": "str"} 格式
+            spec = {"type": str(spec) if spec else "str"}
+        
+        field_type = spec.get("type", "str")
+        # 所有字段都设为 Optional，LLM 选择器可能匹配不到某些字段
+        if field_type in type_map:
+            py_type, _ = type_map[field_type]
+            py_type = Optional[py_type]
+        else:
+            py_type = Optional[str]
+        field_definitions[name] = (py_type, None)
+
+    model = create_model(
+        schema_name, 
+        **field_definitions,
+        __config__=ConfigDict(extra="allow")
+    )
+    return model
+
+
+# 导出
+DEFAULT_EXTRACTOR = CompositeExtractor()
+
+__all__ = [
+    "BaseExtractor",
+    "SelectolaxExtractor",
+    "LxmlExtractor",
+    "LLMExtractor",
+    "CompositeExtractor",
+    "ExtractionContext",
+    "create_dynamic_schema",
+    "DEFAULT_EXTRACTOR",
+]

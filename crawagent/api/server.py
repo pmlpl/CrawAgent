@@ -1,341 +1,798 @@
-"""CrawAgent FastAPI 服务
-
-用法:
-    uvicorn crawagent.api.server:app --reload --port 8000
-    或
-    python -m crawagent.api.server
-
-端点:
-    GET  /           - 健康检查
-    POST /crawl      - 爬取 URL (支持视频/壁纸/普通网页)
-    GET  /video      - 查看视频爬虫配置
-    GET  /wallpaper  - 查看壁纸爬虫配置
-"""
 from __future__ import annotations
 
-import os
-import sys
-from datetime import datetime
-from typing import Any
-
-# 确保 crawagent 包可导入
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import asyncio
+import json
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from ..config.settings import load_settings, get_logger
-from ..llm.factory import LLMFactory
-from ..graph.workflow import CrawWorkflow
-from ..tools import Crawler
-from ..tools.base_crawler import smart_scrape_videos, smart_scrape_wallpapers, VideoItem, WallpaperItem
-
-logger = get_logger(__name__)
-
-
-# ============================================================
-# Pydantic 模型
-# ============================================================
-
-class CrawlRequest(BaseModel):
-    """爬取请求"""
-    url: str = Field(..., description="目标 URL", examples=["https://v.youku.com/v_show/id_xxx.html"])
-    mode: str = Field(
-        default="auto",
-        description="爬取模式: auto=自动识别 | video=视频网站 | wallpaper=壁纸网站 | basic=普通网页",
-    )
-    max_wallpapers: int = Field(default=12, ge=1, le=100, description="壁纸最大下载数量")
-    max_videos: int = Field(default=10, ge=1, le=100, description="视频最大解析数量")
-    image_output_dir: str = Field(default="output/img", description="图片/壁纸输出目录")
-    video_output_dir: str = Field(default="output/video", description="视频元数据输出目录")
-    force_browser: bool | None = Field(default=None, description="True=强制浏览器, False=只用httpx")
-    debug_mode: bool = Field(default=False, description="开启有头调试模式")
+from crawagent.config.settings import get_settings
+from crawagent.graph.agent_workflow import AgentRunner, get_agent_runner
+from crawagent.core.fetcher import Fetcher
+from crawagent.core.frontier import SQLiteFrontier
+from crawagent.core.extractor import DEFAULT_EXTRACTOR
+from crawagent.core.job_store import get_job_store
+from crawagent.graph.site_analyzer import analyze_site
+from crawagent.graph.anti_bot import handle_anti_bot_challenge
+from crawagent.core.models import (
+    SiteAnalysis, Selectors, CrawlPlan, CrawlJob, PageType, CrawlJobStatus
+)
+from crawagent.harness import (
+    CrawlHarness, SessionManager, CrawlHooks, create_default_tools,
+    create_antibot_hooks, CrawlEnv, RunResult,
+)
+from crawagent.core.database import get_db, close_db
+from loguru import logger
 
 
-class CrawlResponse(BaseModel):
-    """爬取响应"""
-    success: bool
+# ==================== Harness 实例 ====================
+
+_harness: Optional[CrawlHarness] = None
+_db_instance = None
+
+
+async def _get_harness() -> CrawlHarness:
+    """获取 CrawlHarness 单例"""
+    global _harness
+    if _harness is None:
+        settings = get_settings()
+        session_manager = SessionManager(settings.mysql_dsn)
+        await session_manager.initialize()
+        hooks = CrawlHooks()
+        # 注册 AntiBot hooks（检测反爬 → 自动注入升级策略）
+        create_antibot_hooks(hooks)
+        tool_registry = create_default_tools()
+        _harness = CrawlHarness(
+            session_manager=session_manager,
+            hooks=hooks,
+            tools=tool_registry.list_tools(),
+            tool_executors=tool_registry.get_all_executors(),
+        )
+    return _harness
+
+
+# ==================== 请求/响应模型 ====================
+
+class RunRequest(BaseModel):
+    instruction: str
+    seed_urls: List[str] = []
+    thread_id: Optional[str] = None
+    max_pages: int = 50
+    max_depth: int = 2
+
+
+class AnalyzeRequest(BaseModel):
     url: str
-    strategy: str
-    status_code: int = 0
-    title: str = ""
-    text_preview: str = ""
-    html_length: int = 0
-    links_count: int = 0
-
-    # 视频元数据（视频网站时填充）
-    video: dict[str, Any] | None = None
-
-    # 壁纸信息（壁纸网站时填充）
-    wallpapers: list[dict[str, Any]] = []
-
-    # 图片下载结果
-    images: list[dict[str, Any]] = []
-
-    # 错误
-    error: str = ""
-    warnings: list[str] = []
-
-    # 耗时
-    duration_ms: int = 0
 
 
-class HealthResponse(BaseModel):
+class CrawlDirectRequest(BaseModel):
+    urls: List[str]
+    selectors: Optional[Dict[str, str]] = None
+    max_pages: int = 50
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
     status: str
-    timestamp: str
-    version: str = "1.0.0"
+    progress: Dict[str, int]
+    items_count: int
+    items: List[Dict[str, Any]] = []
+    messages: List[str] = []
+    error: Optional[str] = None
+    logs: List[Dict[str, str]] = []
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
 
 
-class ConfigResponse(BaseModel):
-    """配置响应"""
-    video_output_dir: str
-    image_output_dir: str
-    max_wallpapers: int
-    video_sites: list[str]
-    wallpaper_sites: list[str]
+class RunResponse(BaseModel):
+    thread_id: str
+    job_id: str
+    status: str = "running"
 
 
-# ============================================================
-# FastAPI 应用
-# ============================================================
+# ---- Harness 请求/响应模型 ----
+
+class HarnessPromptRequest(BaseModel):
+    """CrawlHarness prompt 请求"""
+    message: str
+    session_id: Optional[str] = None
+    lane: str = "main"
+
+
+class HarnessPromptResponse(BaseModel):
+    """CrawlHarness prompt 响应"""
+    session_id: str
+    kind: str  # "completed" / "needs_input" / "error" / "cancelled"
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class HarnessQuickCrawlRequest(BaseModel):
+    """快速爬取请求"""
+    url: str
+    instruction: str = ""
+
+
+class HarnessSessionResponse(BaseModel):
+    """Session 响应"""
+    session_id: str
+    name: str
+    lanes: List[Dict[str, Any]] = []
+
+
+# 内存缓存（运行中的任务用，结束后持久化）
+_job_cache: Dict[str, Dict] = {}
+
+
+async def _get_job(job_id: str) -> Optional[Dict]:
+    """优先从缓存取，没有从数据库取"""
+    if job_id in _job_cache:
+        return _job_cache[job_id]
+    # 从数据库加载
+    store = get_job_store()
+    job = await store.get_job(job_id)
+    if job:
+        _job_cache[job_id] = job
+    return job
+
+
+async def _save_job_to_db(job_id: str, final: bool = False):
+    """把缓存中的任务同步到数据库"""
+    if job_id not in _job_cache:
+        return
+    job = _job_cache[job_id]
+    store = get_job_store()
+    
+    # 检查是否存在
+    existing = await store.get_job(job_id)
+    if not existing:
+        await store.create_job(job_id, job.get("instruction", ""), job.get("seed_urls", []))
+    
+    update_data = {
+        "status": job.get("status", "running"),
+        "progress": job.get("progress", {}),
+        "items_count": job.get("items_count", 0),
+        "items": job.get("items", []),
+        "logs": job.get("logs", []),
+        "error": job.get("error"),
+    }
+    await store.update_job(job_id, **update_data)
+    
+    # 如果是最终状态，从缓存移除（释放内存）
+    if final and job.get("status") in ("completed", "failed"):
+        del _job_cache[job_id]
+
+
+async def _run_agent_background(job_id: str, instruction: str, seed_urls: List[str], thread_id: str, max_pages: int = 50, max_depth: int = 2):
+    try:
+        # 初始化缓存
+        _job_cache[job_id] = {
+            "job_id": job_id,
+            "instruction": instruction,
+            "seed_urls": seed_urls,
+            "status": "running",
+            "progress": {"pages_crawled": 0, "pages_total": 1},
+            "items_count": 0,
+            "items": [],
+            "messages": [],
+            "error": None,
+            "logs": [{"level": "INFO", "message": f"任务 {job_id} 开始执行"}],
+        }
+        
+        # 先写入数据库
+        await _save_job_to_db(job_id)
+        
+        _job_cache[job_id]["logs"].append({"level": "INFO", "message": "初始化 Agent..."})
+        
+        runner = get_agent_runner()
+        
+        _job_cache[job_id]["logs"].append({"level": "INFO", "message": "开始执行工作流..."})
+        
+        last_log_count = 0
+        final_items = []
+        final_error = None
+        final_pages = 0
+        last_db_sync = 0
+        
+        try:
+            async def _run_with_timeout():
+                nonlocal final_items, final_error, final_pages, last_log_count, last_db_sync
+                try:
+                    async for state_chunk in runner.astream_state(
+                        user_input=instruction, seed_urls=seed_urls, thread_id=thread_id,
+                        max_pages=max_pages, max_depth=max_depth
+                    ):
+                        # state_chunk 是 dict: {node_name: state}
+                        for node_name, state in state_chunk.items():
+                            if not isinstance(state, dict):
+                                continue
+                            # 更新状态
+                            job = state.get("current_job")
+                            if job:
+                                pages = job.stats.get("pages_crawled", 0)
+                                total = job.plan.max_pages if job.plan else 1
+                                items_count = job.stats.get("items_extracted", 0)
+                                final_pages = pages
+                                _job_cache[job_id]["progress"] = {
+                                    "pages_crawled": pages,
+                                    "pages_total": total,
+                                }
+                                _job_cache[job_id]["items_count"] = items_count
+                            
+                            # 同步日志
+                            logs = state.get("logs", [])
+                            if len(logs) > last_log_count:
+                                new_logs = logs[last_log_count:]
+                                _job_cache[job_id]["logs"].extend(new_logs)
+                                last_log_count = len(logs)
+                            
+                            # 保存最终 items
+                            if state.get("extracted_items"):
+                                final_items = state["extracted_items"]
+                            
+                            if state.get("error_message"):
+                                final_error = state["error_message"]
+                            
+                            # 每 10 秒同步一次到数据库
+                            import time
+                            now = time.time()
+                            if now - last_db_sync > 10:
+                                last_db_sync = now
+                                # 异步同步，不阻塞
+                                asyncio.create_task(_save_job_to_db(job_id))
+                except Exception as e:
+                    final_error = str(e)
+                    raise
+            
+            await asyncio.wait_for(_run_with_timeout(), timeout=300)
+        except asyncio.TimeoutError:
+            final_error = "任务执行超时（5分钟）"
+            raise RuntimeError(final_error)
+        
+        items_dict = [item.model_dump() if hasattr(item, "model_dump") else item for item in final_items]
+        
+        _job_cache[job_id].update({
+            "status": "failed" if final_error else "completed",
+            "progress": {"pages_crawled": final_pages, "pages_total": final_pages},
+            "items_count": len(items_dict),
+            "items": items_dict,
+            "error": final_error,
+            "logs": _job_cache[job_id]["logs"] + (
+                [{"level": "SUCCESS", "message": "任务完成"}] if not final_error 
+                else [{"level": "ERROR", "message": final_error}]
+            ),
+        })
+        
+        # 最终写入数据库
+        await _save_job_to_db(job_id, final=True)
+    except Exception as e:
+        logger.exception(f"任务 {job_id} 执行失败: {e}")
+        if job_id in _job_cache:
+            _job_cache[job_id].update({
+                "status": "failed",
+                "error": str(e),
+                "logs": _job_cache[job_id]["logs"] + [{"level": "ERROR", "message": str(e)}],
+            })
+            await _save_job_to_db(job_id, final=True)
+
+
+# ==================== 生命周期 ====================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动
+    settings = get_settings()
+    logger.info(f"启动 {settings.app_name} v{settings.app_version}")
+    
+    # 禁用系统代理（防止 Privoxy 等代理拦截请求）
+    import os
+    os.environ["no_proxy"] = "*"
+    os.environ["NO_PROXY"] = "*"
+    
+    # 初始化数据库
+    global _db_instance
+    _db_instance = await get_db()
+    logger.info("数据库初始化完成")
+    
+    # 预热旧组件（兼容）
+    frontier = SQLiteFrontier()
+    await frontier.initialize()
+    await frontier.close()
+    
+    yield
+    
+    # 关闭
+    global _harness
+    if _harness:
+        await _harness.close()
+        _harness = None
+    await close_db()
+    logger.info("关闭服务")
+
 
 app = FastAPI(
     title="CrawAgent API",
-    description=(
-        "CrawAgent 爬虫工具的 REST API 接口。\n\n"
-        "支持：\n"
-        "- 普通网页爬取（文本、链接、结构化数据）\n"
-        "- 视频网站元数据提取（优酷/B站/爱奇艺/腾讯视频等）\n"
-        "- 壁纸网站智能爬取（haowallpaper 等）\n"
-        "- 自动识别 URL 类型，选择最佳爬取策略\n"
-    ),
+    description="基于 LLM Agent 的智能爬虫系统",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
-# CORS - 允许跨域
+# CORS 中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 全局爬虫实例（懒加载）
-_crawler: Crawler | None = None
 
+# ==================== API 路由 ====================
 
-def get_crawler() -> Crawler:
-    global _crawler
-    if _crawler is None:
-        _crawler = Crawler(headless=True)
-    return _crawler
-
-
-# ============================================================
-# 辅助函数
-# ============================================================
-
-def _video_to_dict(v: VideoItem) -> dict[str, Any]:
-    return {
-        "title": v.title,
-        "site": v.site,
-        "page_url": v.page_url,
-        "description": v.description,
-        "directors": v.directors,
-        "actors": v.actors,
-        "tags": v.tags,
-        "episodes": v.episodes,
-        "episode_count": v.episode_count,
-        "play_count": v.play_count,
-        "rating": v.rating,
-        "stream_urls": v.stream_urls,
-        "poster_urls": v.poster_urls,
-    }
-
-
-def _wallpaper_to_dict(w: WallpaperItem) -> dict[str, Any]:
-    return {
-        "title": w.title,
-        "media_url": w.media_url,
-        "media_type": w.media_type,
-        "detail_url": w.detail_url,
-        "resolution": w.resolution,
-        "size": w.size,
-        "filename": w.filename,
-        "local_path": w.local_path,
-    }
-
-
-# ============================================================
-# 端点
-# ============================================================
-
-@app.get("/", response_model=HealthResponse, tags=["系统"])
-async def health_check():
-    """健康检查"""
-    return HealthResponse(
-        status="ok",
-        timestamp=datetime.now().isoformat(),
-        version="1.0.0",
-    )
-
-
-@app.post("/crawl", response_model=CrawlResponse, tags=["爬取"])
-async def crawl_url(req: CrawlRequest):
-    """爬取目标 URL
-
-    自动识别 URL 类型并选择最佳爬取策略：
-    - 视频网站（youku/bilibili/iqiyi/qq/youtube 等）→ 提取元数据
-    - 壁纸网站（haowallpaper 等）→ 智能下载壁纸
-    - 普通网页 → 提取文本、链接、结构化数据
-    """
-    import time
-    start = time.time()
-
-    url = req.url.strip()
-    if not url:
-        raise HTTPException(status_code=400, detail="url 不能为空")
-
-    # 基本的 URL 格式校验
-    if not url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="url 必须以 http:// 或 https:// 开头")
-
-    crawler = get_crawler()
-    result = None
-    video_item: VideoItem | None = None
-    wallpapers: list[WallpaperItem] = []
-    warnings: list[str] = []
-
+@app.get("/api/health")
+async def health():
+    from crawagent.config.settings import get_settings
+    s = get_settings()
+    db_ok = False
     try:
-        # ---- 视频网站处理 ----
-        is_video_site = req.mode == "video" or (
-            req.mode == "auto" and
-            any(site in url.lower() for site in (
-                "youku.com", "bilibili.com", "v.qq.com", "iqiyi.com",
-                "youtube.com", "douyin.com", "mgtv.com", "sohu.com",
-            ))
-        )
-        is_wallpaper = req.mode == "wallpaper" or (
-            req.mode == "auto" and
-            ("haowallpaper" in url.lower() or "hwallpaper" in url.lower())
-        )
+        if _db_instance is not None:
+            from sqlalchemy import text
+            async with _db_instance.engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+                db_ok = True
+    except Exception:
+        db_ok = False
+    return {
+        "status": "ok",
+        "service": "CrawAgent",
+        "database": db_ok,
+        "mock_mode": s.mock_mode,
+    }
 
-        # ---- 壁纸网站处理 ----
-        if is_wallpaper:
-            wps, msg = smart_scrape_wallpapers(
-                crawler, url, req.image_output_dir,
-                max_wallpapers=req.max_wallpapers,
-            )
-            wallpapers = wps
-            result = crawler.fetch(url)  # 同时保留基础爬取结果
-            if msg and "❌" in msg:
-                warnings.append(msg)
 
-        # ---- 视频网站处理 ----
-        elif is_video_site:
-            video_item, msg = smart_scrape_videos(crawler, url)
-            result = crawler.fetch(url)
-            if msg and "❌" in msg:
-                warnings.append(msg)
-            # 主流视频网站可能拿不到直链，提醒用户
-            if video_item and not video_item.stream_urls:
-                warnings.append(
-                    "该视频网站使用了加密/需登录的流协议，CrawAgent 已提取元数据，但无法提供可下载的直链地址。"
-                )
+@app.post("/api/agent/run", response_model=RunResponse)
+async def run_agent(req: RunRequest):
+    """运行 Agent 任务（异步）"""
+    job_id = str(uuid.uuid4())[:8]
+    thread_id = req.thread_id or str(uuid.uuid4())
+    
+    asyncio.create_task(
+        _run_agent_background(job_id, req.instruction, req.seed_urls, thread_id, req.max_pages, req.max_depth)
+    )
+    
+    return RunResponse(thread_id=thread_id, job_id=job_id, status="running")
 
-        # ---- 普通网页处理 ----
-        else:
-            result = crawler.fetch(url)
 
-        # ---- 构造响应 ----
-        if result is None:
-            return CrawlResponse(
-                success=False,
-                url=url,
-                strategy="none",
-                error="爬取失败，未获取到任何结果",
-                duration_ms=int((time.time() - start) * 1000),
-            )
+@app.get("/api/agent/status/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str):
+    """查询任务状态"""
+    job = await _get_job(job_id)
+    if not job:
+        raise HTTPException(404, f"任务 {job_id} 不存在")
+    return job
 
-        return CrawlResponse(
-            success=result.success,
-            url=url,
-            strategy=result.strategy or "basic",
-            status_code=result.status_code or 0,
-            title=result.title or "",
-            text_preview=(result.text or "")[:2000],
-            html_length=len(result.html or ""),
-            links_count=len(result.links or []),
-            video=_video_to_dict(video_item) if video_item else None,
-            wallpapers=[_wallpaper_to_dict(w) for w in wallpapers],
-            images=[],  # 简化：暂不返回图片下载列表
-            error=result.error or "",
-            warnings=warnings,
-            duration_ms=int((time.time() - start) * 1000),
-        )
 
+@app.get("/api/agent/jobs")
+async def list_jobs(limit: int = 20, status: str = None):
+    """获取任务列表"""
+    store = get_job_store()
+    jobs = await store.list_jobs(limit=limit, status=status)
+    return {
+        "total": len(jobs),
+        "jobs": jobs,
+    }
+
+
+@app.delete("/api/agent/jobs/{job_id}")
+async def delete_job(job_id: str):
+    """删除任务"""
+    store = get_job_store()
+    ok = await store.delete_job(job_id)
+    if not ok:
+        raise HTTPException(404, f"任务 {job_id} 不存在")
+    return {"ok": True}
+
+
+@app.post("/api/agent/analyze", response_model=SiteAnalysis)
+async def analyze_site_endpoint(req: AnalyzeRequest):
+    """分析站点结构"""
+    try:
+        analysis = await analyze_site(req.url)
+        return analysis
     except Exception as e:
-        return CrawlResponse(
-            success=False,
-            url=url,
-            strategy="error",
-            error=f"爬取出错: {str(e)}",
-            duration_ms=int((time.time() - start) * 1000),
+        logger.error(f"站点分析失败: {e}")
+        raise HTTPException(500, f"分析失败: {e}")
+
+
+@app.post("/api/crawl/direct")
+async def crawl_direct(req: CrawlDirectRequest):
+    """直接爬取（不经过 Agent 规划）"""
+    frontier = SQLiteFrontier()
+    await frontier.initialize()
+    
+    fetcher = Fetcher(frontier=frontier, per_domain_rate=0.5)
+    extractor = DEFAULT_EXTRACTOR
+    
+    all_items = []
+    page_count = 0
+    
+    try:
+        await frontier.add_urls_batch([
+            {"url": u, "depth": 0, "priority": 10} for u in req.urls
+        ])
+        
+        if req.selectors:
+            sel_obj = Selectors(**req.selectors)
+        else:
+            sel_obj = None
+        
+        async with fetcher:
+            while page_count < req.max_pages:
+                records = await frontier.pop_next(limit=5)
+                if not records:
+                    break
+                
+                results = await fetcher.fetch_batch([r.url for r in records])
+                
+                for rec, result in zip(records, results):
+                    if isinstance(result, Exception) or not result.success:
+                        continue
+                    
+                    if sel_obj:
+                        items = extractor.extract(
+                            url=result.url,
+                            html=result.html,
+                            selectors=sel_obj,
+                            target_schema=None,
+                            base_url=result.url,
+                        )
+                    else:
+                        # ponytail: 无选择器时只保存基础元信息，不走不存在的 _fallback_generic
+                        items = [{"url": result.url, "title": result.title or "", "status": result.status_code}]
+
+                    all_items.extend([item.model_dump() if hasattr(item, "model_dump") else item for item in items])
+                    
+                    if result.links:
+                        await frontier.add_urls_batch([
+                            {"url": link_url, "depth": rec.depth + 1, "parent_url": rec.url}
+                            for link_url, _ in result.links[:20]
+                        ])
+                    
+                    await frontier.mark_done(result.url, True)
+                    page_count += 1
+                    
+                    if page_count >= req.max_pages:
+                        break
+    finally:
+        await fetcher.close()
+        await frontier.close()
+    
+    return {
+        "items": all_items,
+        "count": len(all_items),
+        "pages": page_count,
+    }
+
+
+@app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str):
+    """获取任务状态"""
+    frontier = SQLiteFrontier()
+    await frontier.initialize()
+    
+    try:
+        job = await frontier.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        
+        items = await frontier.get_items(job_id, limit=1)
+        return JobStatusResponse(
+            job_id=job[0],
+            status=job[3],
+            progress=json.loads(job[4]),
+            items_count=len(items),
         )
+    finally:
+        await frontier.close()
 
 
-@app.get("/video", response_model=ConfigResponse, tags=["配置"])
-async def get_video_config():
-    """查看视频爬虫配置"""
-    return ConfigResponse(
-        video_output_dir="output/video",
-        image_output_dir="output/img",
-        max_wallpapers=12,
-        video_sites=[
-            "youku.com", "bilibili.com", "v.qq.com", "iqiyi.com",
-            "youtube.com", "douyin.com", "mgtv.com", "sohu.com",
-        ],
-        wallpaper_sites=["haowallpaper.com", "hwallpaper.com"],
+@app.get("/api/jobs/{job_id}/items")
+async def get_job_items(job_id: str, limit: int = 100, offset: int = 0):
+    """获取任务提取结果"""
+    frontier = SQLiteFrontier()
+    await frontier.initialize()
+    
+    try:
+        items = await frontier.get_items(job_id, limit=limit, offset=offset)
+        return {"items": items, "total": len(items)}
+    finally:
+        await frontier.close()
+
+
+@app.post("/api/anti-bot/handle")
+async def anti_bot_endpoint(
+    challenge_type: str,
+    current_strategy: str,
+    retry_count: int,
+    response_headers: Dict[str, str],
+    response_status: int,
+    error_message: str,
+):
+    """反爬挑战处理"""
+    try:
+        upgrade = await handle_anti_bot_challenge(
+            challenge_type=challenge_type,
+            current_strategy=current_strategy,
+            retry_count=retry_count,
+            max_retries=3,
+            response_headers=response_headers,
+            response_status=response_status,
+            error_message=error_message,
+        )
+        return upgrade
+    except Exception as e:
+        raise HTTPException(500, f"反爬处理失败: {e}")
+
+
+# ==================== Harness API 路由 ====================
+
+@app.get("/api/harness/sessions")
+async def list_harness_sessions(limit: int = 50):
+    """列出所有 Session"""
+    harness = await _get_harness()
+    sessions = await harness._session_manager.list_sessions()
+    return {"sessions": sessions[:limit]}
+
+
+@app.post("/api/harness/sessions", response_model=HarnessSessionResponse)
+async def create_harness_session(name: str = ""):
+    """创建 CrawlHarness Session"""
+    harness = await _get_harness()
+    session = await harness.create_session(name=name)
+    lanes = await harness.list_lanes(session.session_id)
+    return HarnessSessionResponse(
+        session_id=session.session_id,
+        name=name,
+        lanes=[{"name": l.name, "leaf_id": l.leaf_id, "has_open_operation": l.has_open_operation} for l in lanes],
     )
 
 
-@app.get("/wallpaper", response_model=ConfigResponse, tags=["配置"])
-async def get_wallpaper_config():
-    """查看壁纸爬虫配置"""
-    return ConfigResponse(
-        video_output_dir="output/video",
-        image_output_dir="output/img",
-        max_wallpapers=12,
-        video_sites=[
-            "youku.com", "bilibili.com", "v.qq.com", "iqiyi.com",
-            "youtube.com", "douyin.com", "mgtv.com", "sohu.com",
-        ],
-        wallpaper_sites=["haowallpaper.com", "hwallpaper.com"],
+@app.post("/api/harness/prompt", response_model=HarnessPromptResponse)
+async def harness_prompt(req: HarnessPromptRequest):
+    """通过 CrawlHarness 执行 Agent Loop"""
+    harness = await _get_harness()
+
+    # 如果没有 session_id，自动创建
+    if not req.session_id:
+        session = await harness.create_session(name=f"prompt:{req.message[:30]}")
+        session_id = session.session_id
+    else:
+        session_id = req.session_id
+
+    result = await harness.prompt(session_id, req.message, lane_name=req.lane)
+
+    return HarnessPromptResponse(
+        session_id=session_id,
+        kind=result.kind,
+        data=result.data,
+        error=result.error,
     )
 
 
-# ============================================================
-# 启动脚本
-# ============================================================
+@app.post("/api/harness/quick-crawl", response_model=HarnessPromptResponse)
+async def harness_quick_crawl(req: HarnessQuickCrawlRequest):
+    """快速爬取（自动创建 session）"""
+    harness = await _get_harness()
+    result = await harness.quick_crawl(url=req.url, instruction=req.instruction)
+
+    # quick_crawl 已把 session_id 塞进 result.data
+    session_id = (result.data or {}).get("session_id", "")
+
+    return HarnessPromptResponse(
+        session_id=session_id,
+        kind=result.kind,
+        data=result.data,
+        error=result.error,
+    )
+
+
+@app.get("/api/harness/sessions/{session_id}/entries")
+async def get_harness_entries(session_id: str, limit: int = 50):
+    """获取 Session 的对话历史"""
+    harness = await _get_harness()
+    session = await harness._session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    # 前端展示"最新在前"，用 desc；loop 内部调用走默认 asc
+    entries = await session.get_entries(limit=limit, order="desc")
+    return {
+        "entries": [
+            {
+                "id": e.id,
+                "parent_id": e.parent_id,
+                "role": e.role,
+                "content": e.content,
+                "tool_calls": e.tool_calls,
+                "tool_call_id": e.tool_call_id,
+                "created_at": e.created_at,
+            }
+            for e in entries
+        ]
+    }
+
+
+@app.delete("/api/harness/sessions/{session_id}")
+async def delete_harness_session(session_id: str):
+    """删除 Session 及其所有关联数据（对话树 / lanes / 操作日志 / 全局事实）"""
+    harness = await _get_harness()
+    deleted = await harness._session_manager.delete_session(session_id)
+    if not deleted:
+        raise HTTPException(404, "Session not found")
+    # 同时清理内存缓存
+    harness._sessions.pop(session_id, None)
+    harness._loops.pop(session_id, None)
+    return {"deleted": True, "session_id": session_id}
+
+
+@app.get("/api/harness/sessions/{session_id}/lanes")
+async def list_harness_lanes(session_id: str):
+    """列出 Session 的 Lanes"""
+    harness = await _get_harness()
+    lanes = await harness.list_lanes(session_id)
+    return {"lanes": [{"name": l.name, "leaf_id": l.leaf_id, "has_open_operation": l.has_open_operation} for l in lanes]}
+
+
+@app.post("/api/harness/sessions/{session_id}/lanes")
+async def create_harness_lane(session_id: str, name: str):
+    """创建 Lane"""
+    harness = await _get_harness()
+    lane = await harness.create_lane(session_id, name)
+    return {"name": lane.name, "leaf_id": lane.leaf_id}
+
+
+@app.post("/api/harness/sessions/{session_id}/stop")
+async def stop_harness_session(session_id: str):
+    """停止 Session 的运行"""
+    harness = await _get_harness()
+    await harness.stop(session_id)
+    return {"ok": True}
+
+
+@app.get("/api/stats")
+async def get_stats():
+    """系统统计"""
+    frontier = SQLiteFrontier()
+    await frontier.initialize()
+    
+    try:
+        stats = await frontier.get_stats()
+        return stats
+    finally:
+        await frontier.close()
+
+
+class SettingsResponse(BaseModel):
+    openai_base_url: str
+    openai_api_key: str = Field(default="", description="返回时脱敏")
+    default_model: str
+    default_temperature: float
+    max_tokens: int
+    max_concurrent: int
+    per_domain_rate: float
+    request_timeout: float
+    max_retries: int
+    max_pages: int
+    max_depth: int
+    impersonate: str
+    use_curl_cffi: bool
+    mock_mode: bool
+
+
+class SettingsUpdateRequest(BaseModel):
+    openai_base_url: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    default_model: Optional[str] = None
+    default_temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    max_concurrent: Optional[int] = None
+    per_domain_rate: Optional[float] = None
+    request_timeout: Optional[float] = None
+    max_retries: Optional[int] = None
+    max_pages: Optional[int] = None
+    max_depth: Optional[int] = None
+    impersonate: Optional[str] = None
+    use_curl_cffi: Optional[bool] = None
+    mock_mode: Optional[bool] = None
+
+
+@app.get("/api/settings", response_model=SettingsResponse)
+async def get_settings_endpoint():
+    """获取当前配置"""
+    s = get_settings()
+    return SettingsResponse(
+        openai_base_url=s.openai_base_url,
+        openai_api_key="******" if s.openai_api_key else "",
+        default_model=s.default_model,
+        default_temperature=s.default_temperature,
+        max_tokens=s.max_tokens,
+        max_concurrent=s.max_concurrent,
+        per_domain_rate=s.per_domain_rate,
+        request_timeout=s.request_timeout,
+        max_retries=s.max_retries,
+        max_pages=s.max_pages,
+        max_depth=s.max_depth,
+        impersonate=s.impersonate,
+        use_curl_cffi=s.use_curl_cffi,
+        mock_mode=s.mock_mode,
+    )
+
+
+@app.put("/api/settings")
+async def update_settings(req: SettingsUpdateRequest):
+    """更新配置（写入 .env 并清除缓存）"""
+    env_path = Path(".env")
+    
+    current_env = {}
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").split("\n"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                current_env[key] = value
+    
+    mapping = {
+        "openai_base_url": "OPENAI_BASE_URL",
+        "openai_api_key": "OPENAI_API_KEY",
+        "default_model": "DEFAULT_MODEL",
+        "default_temperature": "DEFAULT_TEMPERATURE",
+        "max_tokens": "MAX_TOKENS",
+        "max_concurrent": "MAX_CONCURRENT",
+        "per_domain_rate": "PER_DOMAIN_RATE",
+        "request_timeout": "REQUEST_TIMEOUT",
+        "max_retries": "MAX_RETRIES",
+        "max_pages": "MAX_PAGES",
+        "max_depth": "MAX_DEPTH",
+        "impersonate": "IMPERSONATE",
+        "use_curl_cffi": "USE_CURL_CFFI",
+        "mock_mode": "MOCK_MODE",
+    }
+    
+    for field, env_key in mapping.items():
+        value = getattr(req, field, None)
+        if value is not None:
+            current_env[env_key] = str(value)
+    
+    lines = []
+    for key, value in current_env.items():
+        lines.append(f"{key}={value}")
+    
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    
+    from crawagent.config.settings import get_settings
+    from crawagent.llm.factory import get_factory
+    
+    get_settings.cache_clear()
+    get_factory.cache_clear()
+    # 重新加载 factory 的 providers
+    factory = get_factory()
+    factory.reload()
+    
+    return {"message": "配置已保存，立即生效"}
+
+
+# ==================== 启动入口 ====================
 
 if __name__ == "__main__":
     import uvicorn
-
-    logger.info("=" * 60)
-    logger.info("CrawAgent API 服务")
-    logger.info("=" * 60)
-    logger.info("  文档: http://localhost:8000/docs")
-    logger.info("  ReDoc: http://localhost:8000/redoc")
-    logger.info("  示例: POST /crawl  { \"url\": \"https://...\" }")
-    logger.info("=" * 60)
-
+    settings = get_settings()
     uvicorn.run(
         "crawagent.api.server:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug,
     )

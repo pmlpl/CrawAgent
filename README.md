@@ -1,383 +1,233 @@
 # CrawAgent
 
-<div align="center">
+基于 LLM Agent 的智能爬虫系统 - 生产级、可扩展、模型无关。
 
-<img src="logo.png" alt="CrawAgent Logo" width="180"/>
+## 🎯 项目定位
 
-**智能爬虫 Agent 框架**
+**核心理念**：把 LLM 当"大脑"（通过 OpenAI 兼容接口接入任意模型），把爬虫引擎、反爬、存储、调度当"身体+神经系统"自己造。模型是商品，工程才是护城河。
 
-基于 LangGraph 的智能爬虫系统，支持视频解析、网页爬取、数据提取等功能
+- **是什么**：生产级智能爬虫 Agent 框架
+- **目标**：给任意 URL → 自动分类 → 交互问"爬什么" → 自动发现站点数据接口 → 规模化抓取 → 结构化落库
+- **技术栈**：Python 3.11+ / LangGraph / FastAPI / httpx + curl_cffi / Playwright / SQLite FTS5 / Pydantic v2
+- **用途**：个人学习/研究，不分发不售卖
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![LangChain](https://img.shields.io/badge/LangChain-0.3+-green.svg)](https://github.com/langchain-ai/langchain)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+## 🏗️ 架构总览
 
-[功能特性](#功能特性) • [快速开始](#快速开始) • [使用示例](#使用示例) • [架构设计](#架构设计) • [配置说明](#配置说明)
+```
+用户指令
+   │
+   ▼
+┌─────────────────────────────────────┐
+│ Main Agent（主控脑，唯一对话入口）     │
+│  - 分类页面类型                       │
+│  - 规划 CrawlPlan                     │
+│  - 派活给子 Agent / 工具               │
+│  - 关键决断（反爬升级/翻页/终止）       │
+└──────┬──────────────┬────────────────┘
+       │              │
+       │              └──▶ AntiBot Agent（子，可选）
+       │                    反爬升级决策
+       ▼
+┌─────────────────────────────────────┐
+│ SiteAnalyzer 子图（重推理子 Agent）    │
+│  - Playwright 加载 + 拦截网络          │
+│  - 截 DOM 片段 + 网络摘要               │
+│  - LLM 推理产出：selectors / api / 分页 │
+│  - 内部自带循环：发现端点 → 理解 → 再发现 │
+└──────────┬────────────────────────────┘
+           │ 产出：SiteAnalysis（结构化规则）
+           ▼
+┌─────────────────────────────────────┐
+│ CrawlExecutor（纯代码，非 Agent！）    │
+│  Frontier → Fetcher → Extractor → Store │
+│  - 高频确定性活，不调 LLM               │
+│  - 被 Main 当工具调用                   │
+└─────────────────────────────────────┘
+```
 
-</div>
+**核心原则**：
+- **混合式 + 最多 2 层**：主 Agent + 1-2 个专项子 Agent（SiteAnalyzer 必选、AntiBot 可选）
+- **执行层全是代码**：Frontier/Fetcher/Extractor 不调 LLM，快、省、稳
+- **大脑外包**：任意 OpenAI 兼容 API（DeepSeek/OpenAI/智谱/百川/月之暗面/...）或本地 Ollama，改配置即换模型
 
----
+## 📦 核心组件
 
-## 📖 简介
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| **Fetcher** | `core/fetcher.py` | httpx + curl_cffi，指数退避+抖动重试、域名令牌桶限速、代理轮换、UA轮换、curl_cffi impersonate |
+| **Frontier** | `core/frontier.py` | SQLite + FTS5 队列、去重（URL规范化+内容哈希）、断点续爬、优先级+深度调度 |
+| **Extractor** | `core/extractor.py` | 三级回退：CSS → XPath → LLM，输出 Pydantic 模型，动态 Schema |
+| **Retriever** | `core/retriever.py` | SQLite FTS5 全文检索（BM25），预留向量检索接口 |
+| **SiteAnalyzer** | `graph/site_analyzer.py` | Playwright 加载+抓包 → LLM 逆向接口+选择器+分页 |
+| **AntiBot** | `graph/anti_bot.py` | LLM 决定升级策略：wait → proxy → curl_cffi → browser → captcha → human |
+| **Agent Workflow** | `graph/agent_workflow.py` | LangGraph 状态机：classify → plan → analyze → execute → decide |
 
-CrawAgent 是一个基于 LangGraph 构建的智能爬虫 Agent 框架，采用 **Think → Act → Observe → Reflect** 的循环架构，能够自主决策、执行和优化爬取策略。支持多种数据源爬取、视频解析播放、智能搜索匹配等功能。
+## 🚀 快速开始
 
-### ✨ 核心亮点
-
-- **智能决策引擎**: 基于 LLM 的自主决策系统，自动选择最佳爬取策略
-- **三级提取策略**: 正则表达式 → LLM 增强 → Playwright DOM 深度提取，确保高成功率
-- **视频播放器**: 内置 Flask 视频播放器，支持搜索、播放、进度记忆
-- **数据库缓存**: MySQL 持久化存储，避免重复爬取和反爬拦截
-- **智能匹配算法**: 连续实词匹配算法，提供精准搜索结果
-
----
-
-## 🚀 功能特性
-
-### 🤖 智能爬虫 Agent
-
-| 功能 | 描述 |
-|------|------|
-| **自主决策** | LLM 分析用户意图，自动选择合适工具 |
-| **多策略提取** | 正则 → LLM → 浏览器渲染三层回退机制 |
-| **反爬对抗** | TLS 指纹伪装、浏览器隐身、代理支持 |
-| **并发处理** | 多 URL 并行爬取，提升效率 |
-
-### 📺 视频解析与播放
-
-- **视频搜索**: 支持关键词搜索，智能匹配标题
-- **在线播放**: Web 播放器，支持 HLS (.m3u8) 流媒体
-- **集数管理**: 自动识别电视剧/综艺集数，支持选集播放
-- **封面展示**: 自动提取视频封面，优化浏览体验
-
-### 🔍 智能搜索匹配
-
-- **连续实词匹配**: 优先匹配连续字符（2字: 80分，3字: 180分，全词: 1000分）
-- **数据库优先**: 先查询本地数据库，减少网络请求
-- **增量更新**: 自动检测新视频，保持数据最新
-
-### 💾 数据存储
-
-- **MySQL 存储**: 可选 MySQL 数据库，支持大规模数据
-- **SQLite 兼容**: 默认 SQLite，无需额外配置
-- **自动去重**: 智能合并重复记录，保留最新数据
-
----
-
-## 📦 快速开始
-
-### 环境要求
-
-- Python 3.10+
-- MySQL 8.0+ (可选)
-- Chrome/Edge 浏览器（用于浏览器自动化）
-
-### 安装步骤
+### 1. 安装依赖
 
 ```bash
-# 1. 克隆项目
-git clone https://github.com/your-username/CrawAgent.git
-cd CrawAgent
+# 核心依赖
+pip install -e . --no-build-isolation
 
-# 2. 创建虚拟环境
-python -m venv .venv
-.venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # Linux/macOS
+# 可选：浏览器自动化
+pip install playwright && playwright install chromium
 
-# 3. 安装依赖
-pip install -r requirements.txt
-
-# 4. 安装浏览器驱动
-playwright install chromium
-
-# 5. 配置环境变量（可选）
-cp .env.example .env
-# 编辑 .env 文件，填入 API Key
-
-# 6. 检查依赖
-python main.py --check-deps
+# 可选：反爬指纹
+pip install browserforge
 ```
 
-### 配置模型
-
-编辑 `models.json` 文件，配置你的 LLM API：
-
-```json
-{
-  "provider": "deepseek",
-  "model": "deepseek-chat",
-  "api_key": "sk-xxxxx",
-  "base_url": "https://api.deepseek.com"
-}
-```
-
-或使用环境变量（在 `.env` 文件中）：
+### 2. 配置模型
 
 ```bash
-DEEPSEEK_API_KEY=sk-xxxxx
+# .env（只填你要用的）
+# OpenAI 兼容接口（DeepSeek/OpenAI/智谱/百川/月之暗面/...）
+OPENAI_API_KEY=your_key
+OPENAI_BASE_URL=https://api.deepseek.com/v1  # 换成你的 API 地址
+DEFAULT_MODEL=deepseek-chat                   # 换成你要的模型
+
+# 或用 Ollama 本地模型
+# OLLAMA_BASE_URL=http://localhost:11434
+# DEFAULT_MODEL=qwen2.5:7b
 ```
 
-### 启动应用
+### 3. 运行
 
 ```bash
-# 启动交互式终端
-python main.py
+# 初始化数据目录
+python main.py init
 
-# 启动视频播放器
-python video_player_app.py
-# 访问 http://localhost:5000
+# 环境检查
+python main.py check
+
+# 交互式运行 Agent
+python main.py run "爬取 https://example.com 的文章标题和链接" --max-pages 20
+
+# 直接爬取（不经过 Agent 规划）
+python main.py crawl "https://example.com" --selector title=.title a --max-pages 10
+
+# 分析站点结构
+python main.py analyze "https://example.com"
+
+# 启动 API 服务
+python main.py serve --port 8000
 ```
 
----
+### 4. API 调用
 
-## 💡 使用示例
+```bash
+# 启动 Agent 任务
+curl -X POST http://localhost:8000/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{"instruction": "爬取 https://news.ycombinator.com 的标题和链接", "max_pages": 5}'
 
-### 交互式终端
+# 分析站点
+curl -X POST http://localhost:8000/agent/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
 
-启动后，你可以直接输入自然语言指令：
-
-```
-CrawAgent> 爬取 https://weibo.com 热榜
-CrawAgent> 搜索《奔跑吧》综艺节目
-CrawAgent> 我想看《长安女子鉴》电视剧
-CrawAgent> 提取这个页面的所有链接：https://example.com
-```
-
-### 视频播放器
-
-访问 `http://localhost:5000`，在搜索框输入视频名称：
-
-- 搜索支持模糊匹配
-- 点击视频卡片进入播放页
-- 支持选集播放
-- 自动记忆播放进度
-
-### Python API
-
-```python
-from crawagent.tools.video_parser import FengHuangVideoParser
-
-# 初始化解析器
-parser = FengHuangVideoParser()
-
-# 搜索视频
-results = parser.search("奔跑吧", page=1, page_size=20)
-
-# 获取播放链接
-play_url = parser.get_play_url(video_id="12345", some_id="1", episode=1)
-
-# 获取视频详情
-info = parser.get_video_info("12345")
+# 直接爬取
+curl -X POST http://localhost:8000/crawl/direct \
+  -H "Content-Type: application/json" \
+  -d '{"urls": ["https://example.com"], "max_pages": 10}'
 ```
 
----
-
-## 🏗️ 架构设计
-
-### 核心架构
-
-```mermaid
-graph TB
-    subgraph Input["📥 输入层"]
-        User([用户输入])
-    end
-
-    subgraph Core["⚙️ 核心引擎"]
-        Agent[Agent Workflow<br/>工作流编排]
-        Think["🤔 Think<br/>分析意图"]
-        Act["⚡ Act<br/>执行工具"]
-        Observe["👁️ Observe<br/>观察结果"]
-        Reflect["🔄 Reflect<br/>反思决策"]
-    end
-
-    subgraph Support["🔌 支撑模块"]
-        LLM["🧠 LLM Factory<br/>DeepSeek / OpenAI / Claude"]
-        Tools["🔧 Tools<br/>爬虫工具集"]
-        DB["💾 Database<br/>MySQL / SQLite"]
-        Strategy["三级提取策略<br/>①正则 → ②LLM → ③DOM"]
-    end
-
-    subgraph Output["📤 输出层"]
-        Result["输出结果<br/>爬取数据 / 搜索结果 / 视频播放"]
-    end
-
-    User --> Agent
-    Agent --> Think
-    Think --> Act
-    Act --> Observe
-    Observe --> Reflect
-    Reflect --> Result
-
-    LLM --> Think
-    Act --> Tools
-    Observe --> DB
-    Strategy --> Act
-
-    Reflect -."不满意?\n重新执行".-x Think
-```
-
-> 💡 **详细架构图**: 同时提供了 [architecture-diagram.excalidraw](architecture-diagram.excalidraw)，可在 [Excalidraw](https://excalidraw.com) 中打开编辑
-
-**架构核心：Think → Act → Observe → Reflect 循环**
-
-| 阶段 | 说明 |
-|------|------|
-| **🤔 Think** | LLM 分析用户意图，决策选择工具和策略 |
-| **⚡ Act** | 执行选定的爬虫工具，进行实际数据获取 |
-| **👁️ Observe** | 观察执行结果，提取数据并存储到数据库 |
-| **🔄 Reflect** | 反思结果质量，不满意则调整策略重新执行 |
-
-**关键特性：**
-- 三级提取策略（正则 → LLM → DOM 深度提取）
-- LLM Factory 支持多种模型（DeepSeek、OpenAI、Claude）
-- MySQL 数据库持久化存储
-- 循环迭代机制，确保数据质量
-
-### 目录结构
+## 📂 项目结构
 
 ```
 CrawAgent/
-├── crawagent/                 # 核心模块
-│   ├── agent/                 # Agent 定义
-│   │   ├── tools.py          # 工具注册
-│   │   └── skill_loader.py   # 技能加载
-│   ├── graph/                 # 工作流图
-│   │   ├── agent_workflow.py # Agent 主工作流
-│   │   └── workflow.py       # 任务编排
-│   ├── tools/                 # 爬虫工具
-│   │   ├── base_crawler.py   # 基础爬虫
-│   │   ├── browser_crawler.py# 浏览器爬虫
-│   │   ├── list_extractor.py # 列表提取器
-│   │   ├── video_parser.py   # 视频解析器
-│   │   ├── database.py       # 数据库管理
-│   │   └── ...               # 其他工具
-│   ├── llm/                   # LLM 工厂
-│   │   └── factory.py        # 模型创建
-│   ├── config/                # 配置管理
-│   │   └── settings.py       # 全局配置
-│   └── ui/                    # 用户界面
-│       └── terminal.py       # 终端 UI
-├── video_player_app.py        # 视频播放器应用
-├── main.py                    # 主入口
-├── requirements.txt           # 依赖列表
-└── README.md                  # 本文档
+├── main.py                    # CLI 入口
+├── pyproject.toml             # 依赖与构建配置
+├── .env.example               # 环境变量模板
+├── data/                      # SQLite 数据目录
+├── logs/                      # 日志目录
+├── crawagent/
+│   ├── __init__.py            # 统一导出
+│   ├── config/
+│   │   └── settings.py        # Pydantic Settings 配置
+│   ├── core/                  # 身体：纯工程组件
+│   │   ├── fetcher.py         # 抓取器
+│   │   ├── frontier.py        # 前沿/队列/去重
+│   │   ├── extractor.py       # 提取器（三级回退）
+│   │   ├── retriever.py       # 检索器
+│   │   ├── executor.py        # 执行器
+│   │   └── models.py          # Pydantic 模型
+│   ├── graph/                 # 神经系统：Agent 编排
+│   │   ├── agent_workflow.py  # 主图
+│   │   ├── site_analyzer.py   # SiteAnalyzer 子图
+│   │   ├── anti_bot.py        # AntiBot 子图
+│   │   └── prompts/           # 提示词
+│   ├── llm/                   # 大脑接口
+│   │   ├── factory.py         # 多 Provider 工厂
+│   │   └── prompts.py         # 通用提示词
+│   ├── api/
+│   │   └── server.py          # FastAPI 服务
+│   └── cli/
+│       └── main.py            # Click CLI
+└── tests/                     # 测试（待补充）
 ```
 
-### 列表提取策略
+## ⚙️ 关键技术决策
 
-CrawAgent 采用三级回退策略提取网页列表：
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| **异步框架** | `asyncio` + `httpx` | I/O 密集、单线程万并发、原生 HTTP/2 |
+| **反爬指纹** | `curl_cffi` impersonate | TLS 指纹伪装 Chrome/Firefox/Safari，零配置 |
+| **浏览器自动化** | `Playwright` | 稳、支持网络拦截、CDP、无头模式成熟 |
+| **队列/去重/检索** | `SQLite + FTS5` | 零运维、单文件、事务、BM25 全文、断点续爬 |
+| **结构化输出** | `Pydantic v2` | 运行时验证、Schema 即契约、LLM function calling 友好 |
+| **Agent 编排** | `LangGraph` | 图状状态机、子图、Checkpointer、人工介入、流式 |
+| **多模型抽象** | `langchain_core.BaseChatModel` | 统一接口，换模型改配置，支持 tool calling |
+| **结构化提取** | CSS → XPath → LLM 三级回退 | 选择器优先（快/准），LLM 兜底（通用） |
 
-```
-第一级：正则表达式提取
-    │
-    ├─ 成功 ──▶ 返回结果
-    │
-    └─ 失败/质量低 ──▶ 第二级：LLM 增强
-                          │
-                          ├─ 成功 ──▶ 返回结果
-                          │
-                          └─ 失败 ──▶ 第三级：Playwright DOM 深度提取
-                                          │
-                                          └─ 返回最终结果
-```
+## 📈 演进路线
 
----
+| 阶段 | 目标 | 关键任务 |
+|------|------|----------|
+| **Phase 1** ✅ | 地基 | Frontier + Fetcher（限速/重试/去重/续爬） |
+| **Phase 2** ✅ | 结构化 | Extractor 三级回退 + Pydantic 动态 Schema |
+| **Phase 3** ✅ | 编排 | LangGraph 状态机：classify → plan → analyze → execute → decide |
+| **Phase 4** ✅ | 反爬实战 | curl_cffi impersonate + browserforge stealth + 升级策略 |
+| **Phase 5** ✅ | 差异化 | SiteAnalyzer（抓包+LLM逆向接口+选择器+分页） |
+| **Phase 6+** | 难站叠能力 | 登录/Cookie注入 → 签名接口逆向 → 验证码 → 视频流解密（逐平台专项） |
 
-## ⚙️ 配置说明
-
-### 环境变量 (.env)
+## 📂 配置说明
 
 ```bash
-# LLM API Keys
-DEEPSEEK_API_KEY=sk-xxxxx
-MIMO_API_KEY=tp-xxxxx
+# .env 示例
+# 任意 OpenAI 兼容 API（DeepSeek/OpenAI/智谱/百川/月之暗面/...）
+OPENAI_API_KEY=sk-xxx
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+DEFAULT_MODEL=deepseek-chat
 
-# 数据库配置
-CRAWAGENT_DB_TYPE=mysql          # 或 sqlite
-CRAWAGENT_MYSQL_HOST=localhost
-CRAWAGENT_MYSQL_PORT=3306
-CRAWAGENT_MYSQL_USER=root
-CRAWAGENT_MYSQL_PASSWORD=your_password
-CRAWAGENT_MYSQL_DATABASE=crawagent
+# 或本地 Ollama
+# OLLAMA_BASE_URL=http://localhost:11434
+# DEFAULT_MODEL=qwen2.5:7b
+
+# 爬虫行为
+PER_DOMAIN_RATE=0.5      # req/sec per domain
+MAX_CONCURRENT=50
+REQUEST_TIMEOUT=30.0
+MAX_RETRIES=3
+IMPERSONATE=chrome120
+USE_CURL_CFFI=true
 ```
 
-### 数据库表结构
+## 🔒 安全与合规
 
-**crawl_records 表**：
+| 措施 | 实现 |
+|------|------|
+| 礼貌爬取 | 域名限速（默认 0.5 req/s）+ `robots.txt` 可选检查 |
+| 用户代理轮换 | 内置 5 种主流 UA + 自定义池 |
+| 代理支持 | HTTP/SOCKS5 代理池轮换 |
+| 敏感数据不记录 | 日志不记录 Cookie/Token/完整响应体 |
+| 仅个人使用 | 不提供分发/商业服务接口 |
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER | 主键 |
-| url | TEXT | 页面 URL |
-| title | TEXT | 标题 |
-| content | TEXT | 内容 |
-| source | TEXT | 来源 |
-| extra_data | JSON | 额外数据 |
-| created_at | DATETIME | 创建时间 |
+## 📝 文档
 
----
+- [架构设计文档](ARCHITECTURE.md) - 详细架构设计、数据流、接口定义
+- [API 文档](http://localhost:8000/docs) - 启动服务后访问 Swagger UI
 
-## 🛠️ 开发指南
+## 📄 许可
 
-### 添加新工具
-
-1. 在 `crawagent/tools/` 创建工具文件
-2. 在 `crawagent/agent/tools.py` 注册工具
-3. 更新 `TOOL_SYSTEM_PROMPT` 添加工具说明
-
-### 自定义 LLM
-
-1. 在 `crawagent/llm/factory.py` 添加新 Provider
-2. 更新 `models.json` 配置
-
-### 扩展视频解析
-
-1. 分析目标网站 API
-2. 继承 `FengHuangVideoParser` 类
-3. 实现自定义解析逻辑
-
----
-
-## 📊 项目统计
-
-- **核心代码**: ~5000+ 行
-- **支持工具**: 10+ 种
-- **爬取策略**: 3 级回退
-- **搜索算法**: 连续实词匹配
-
----
-
-## 🤝 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
----
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
----
-
-## 🙏 致谢
-
-- [LangChain](https://github.com/langchain-ai/langchain) - LLM 应用框架
-- [LangGraph](https://github.com/langchain-ai/langgraph) - 工作流编排
-- [Playwright](https://playwright.dev/) - 浏览器自动化
-- [Scrapling](https://github.com/D4Vinci/Scrapling) - 高级爬虫库
-
----
-
-<div align="center">
-
-**如果这个项目对你有帮助，请给一个 ⭐️ Star！**
-
-Made with ❤️ by CrawAgent Team
-
-</div>
+个人学习项目，仅供研究学习使用。
