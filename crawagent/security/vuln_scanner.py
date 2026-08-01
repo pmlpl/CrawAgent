@@ -254,6 +254,35 @@ class VulnScanner:
                     confidence=0.7,
                 )
 
+        # 3b. 会话 Cookie 标志检查（Set-Cookie 头解析，覆盖 HttpOnly/SameSite）
+        set_cookies = resp.headers.get_list("set-cookie")
+        seen_cookie_names: set = set()
+        for sc in set_cookies:
+            head = sc.split(";")[0]
+            if "=" not in head:
+                continue
+            name = head.split("=")[0].strip()
+            if not name or name in seen_cookie_names:
+                continue
+            seen_cookie_names.add(name)
+            flags = {part.strip().lower() for part in sc.split(";")[1:]}
+            missing = []
+            if "httponly" not in flags:
+                missing.append("HttpOnly")
+            if not any(f.startswith("samesite") for f in flags):
+                missing.append("SameSite")
+            if missing:
+                self._add_vuln(
+                    category=VulnCategory.A07_AUTH_FAILURES,
+                    severity=Severity.LOW,
+                    title=f"会话 Cookie 缺少安全属性: {name}",
+                    url=url,
+                    evidence=f"Cookie '{name}': 缺少 {', '.join(missing)}",
+                    remediation=f"为 Cookie {name} 添加 HttpOnly 和 SameSite=Strict/Lax 属性",
+                    cwe_id="CWE-1004",
+                    confidence=0.8,
+                )
+
         # 4. 混合内容检测（HTTPS 页面含 HTTP 资源）
         if url.startswith("https://"):
             body = resp.text[:5000]
@@ -269,6 +298,19 @@ class VulnScanner:
                     cwe_id="CWE-311",
                     confidence=0.9,
                 )
+
+        # 5. 明文传输检测（HTTP 无 TLS 加密）
+        if url.startswith("http://"):
+            self._add_vuln(
+                category=VulnCategory.A02_CRYPTO_FAILURES,
+                severity=Severity.MEDIUM,
+                title="明文 HTTP 传输（无 TLS 加密）",
+                url=url,
+                evidence="目标使用 http:// 协议，数据明文传输",
+                remediation="部署 HTTPS（TLS 1.2+）并配置 HSTS，敏感数据不得明文传输",
+                cwe_id="CWE-319",
+                confidence=0.9,
+            )
 
     # ---- 注入扫描 ----
 

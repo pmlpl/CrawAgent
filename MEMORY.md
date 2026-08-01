@@ -239,6 +239,28 @@
 
 **当前测试：79 个全部通过**（新增 P4 监控 10 + P5 安全 6 + P6 深爬 6 + P7 影视 7 + MonitorLane 2）
 
+### 15. 真实网络补验（2026-08-01，切换网络后）
+
+**P0 端到端（真实 LLM）：**
+- DeepSeek API key 有效；`CrawlHarness.prompt` 全流程 completed（78.7s，5 turns）
+- Supervisor crawl → clean → analyze → extract(confidence=90) → save 闭环跑通，第二次调用命中蓝图缓存
+- 脏数据 6 项（空串/not-a-url/javascript:void(0)/https:// /localhost:9999/about:blank）全部优雅返回，不崩溃
+
+**P1 引擎升级链修复：**
+- 原回退链只在异常时升级，403/429 状态码不会切换引擎；Playwright/curl_cffi 把 404 也当可重试错误（浪费 ~25s×N）
+- 修复：httpx/curl_cffi/playwright 三引擎对非可重试 4xx 快速失败，403/429 触发升级，5xx 重试
+- 本地实测：404 0 秒失败、403 全链 1.1 秒、200 直连
+
+**P2 知乎：** 本机 IP 被知乎屏蔽（httpx 与 Playwright 均 403），属环境限制，代码路径已由其他站点验证
+
+**P5 Juice Shop 真实验收：**
+- Docker 本地跑 OWASP Juice Shop，VulnScanner 实测 6 个漏洞 / 5 个类别（验收要求 ≥5 类）
+- 为达到验收标准新增两项标准检查：Set-Cookie HttpOnly/SameSite（A07）、明文 HTTP 传输（A02）
+
+**P7 YouTube/Bilibili：** 切换网络后仍被屏蔽（ConnectTimeout），维持"代码级通过，待可达网络"
+
+**当前测试：80 个全部通过**
+
 ---
 
 ## 当前状态

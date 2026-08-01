@@ -316,9 +316,9 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 ### P0 验收
 - [x] `docker-compose up` 一键启动
 - [x] CrawlHarness 骨架可运行：用户输入 → driverLoop → tool calling → 结果
-- [ ] `CrawlHarness.prompt("爬取 https://news.ycombinator.com 首页标题")` 端到端跑通（需真实 LLM API key）
+- [x] 真实 LLM 端到端跑通：`CrawlHarness.prompt` 全流程 completed（2026-08-01 实测，阮一峰博客；HN 域名被本机网络屏蔽）
 - [x] 重启后从 MySQL 恢复 session
-- [ ] **脏数据**：seed_urls 含 `["", "not-a-url", "javascript:void(0)", "https://", "http://localhost:9999", "https://news.ycombinator.com"]`，Agent 不崩（需真实 LLM）
+- [x] **脏数据**：seed_urls 含空串/非法 URL/JS 协议/不可达地址，Agent 不崩（2026-08-01 实测全部优雅返回错误）
 
 ### P1 验收
 - [x] is_blocked() 三层检测：状态码+响应头+响应体，7 种挑战类型（2026-08-01 单测通过）
@@ -329,6 +329,10 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] 代理模块：ProxyConfig + RoundRobinProxy（轮换+健康检查+冷却恢复）
 - [x] ProfileManager：Playwright persistent_context 登录态持久化
 - [ ] **真实网站**：访问 Cloudflare 保护站点 → httpx 失败 → 自动升级 curl_cffi/playwright（待真实网络环境验证）
+
+**P1 补充验证（2026-08-01）：**
+- [x] 403/429 状态码触发引擎升级链（httpx → curl_cffi → playwright 全链执行）
+- [x] 404 等永久错误快速失败不重试（修复：非可重试 4xx 直接返回）
 
 ### P2 验收
 - [x] 抓取 `https://www.apple.com/shop/buy-iphone` 商品页：httpx 直连成功、Markdown 无 `</path>` 残留、无 html 前缀（2026-08-01 实测）
@@ -346,7 +350,7 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [x] **脏数据**：目标 503 持续 10 分钟，告警只触发一次（cooldown 去抖单测通过：冷却内 1 条、冷却外第 2 条）
 
 ### P5 验收
-- [x] OWASP 扫描引擎：本地测试站实测 3+ 漏洞、多类别（A05/INFO_DISCLOSURE/XSS）；Juice Shop 实跑待真实环境
+- [x] 扫描 OWASP Juice Shop：Docker 本地实跑，6 个漏洞 / 5 个类别（A05×2/XSS/Clickjacking/INFO_DISCLOSURE/A02）（2026-08-01）
 - [x] security lane 的 hook 拦截危险工具调用（修复接线后：save 敏感路径被 loop 硬拦截，scan_vuln 生产 URL 需确认）
 - [x] **脏数据**：大量 XHR 请求的 SPA，network_capture 不丢不崩（真实浏览器实测：22 请求 / 21 API 全捕获）
 

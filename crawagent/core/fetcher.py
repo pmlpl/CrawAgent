@@ -308,6 +308,12 @@ class Fetcher:
             if is_retryable_response(response):
                 raise RetryableError(get_retryable_error_message(response))
 
+            # 非可重试 4xx（404/403/401 等）：快速失败，不进入重试
+            if 400 <= response.status_code < 600:
+                result.error = f"HTTP {response.status_code}: {response.reason_phrase or ''}"
+                result.success = False
+                return result
+
             response.raise_for_status()
             result.html = response.text
             result.success = True
@@ -354,7 +360,10 @@ class Fetcher:
 
             # curl_cffi response doesn't have raise_for_status, check manually
             if 400 <= response.status_code < 600:
-                raise RetryableError(get_retryable_error_message(response))
+                # 非可重试 4xx（404/403 等）：快速失败，不重试
+                result.error = f"HTTP {response.status_code}"
+                result.success = False
+                return result
 
             result.html = response.text
             result.success = True
@@ -420,9 +429,13 @@ class Fetcher:
                 result.headers = dict(response.headers) if response else {}
 
                 if 400 <= result.status_code < 600:
-                    raise RetryableError(
-                        f"Playwright HTTP {result.status_code}"
-                    )
+                    result.error = f"Playwright HTTP {result.status_code}"
+                    result.success = False
+                    if result.status_code in (429, 500, 502, 503, 504):
+                        raise RetryableError(
+                            f"Playwright HTTP {result.status_code}"
+                        )
+                    return result
 
                 result.html = await page.content()
                 result.title = await page.title()
@@ -491,16 +504,26 @@ class Fetcher:
                     return await self._fetch_playwright(url, headers, proxy, effective_timeout)
 
                 # 三级回退链: httpx → curl_cffi → Playwright
+                # 升级条件：异常 或 反爬状态码（403/429），404 等非反爬状态直接返回
+                def _need_upgrade(result: CrawlResult) -> bool:
+                    return result.status_code in (403, 429)
+
                 # 1. httpx（最快，适合普通页面）
                 try:
-                    return await self._fetch_httpx(url, headers, proxy, effective_timeout, True)
+                    result = await self._fetch_httpx(url, headers, proxy, effective_timeout, True)
+                    if result.success or not _need_upgrade(result):
+                        return result
+                    logger.debug(f"httpx HTTP {result.status_code}（反爬），升级 curl_cffi")
                 except Exception as e:
                     logger.debug(f"httpx 失败，回退 curl_cffi: {e}")
 
                 # 2. curl_cffi（TLS 指纹绕过，适合 Cloudflare/WAF）
                 if effective_use_curl and self.use_curl_cffi:
                     try:
-                        return await self._fetch_curl_cffi(url, headers, proxy, effective_timeout)
+                        result = await self._fetch_curl_cffi(url, headers, proxy, effective_timeout)
+                        if result.success or not _need_upgrade(result):
+                            return result
+                        logger.debug(f"curl_cffi HTTP {result.status_code}（反爬），升级 Playwright")
                     except Exception as e:
                         logger.debug(f"curl_cffi 失败，回退 Playwright: {e}")
 

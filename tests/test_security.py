@@ -74,6 +74,37 @@ def test_vuln_scanner_graceful_on_dead_url(local_server):
     assert result.task.status.value == "completed"
 
 
+def test_vuln_scanner_cookie_flags_a07(local_server):
+    """回归：Set-Cookie 缺 HttpOnly/SameSite 应归为 A07 认证失败。"""
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"<html><body>ok</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Set-Cookie", "session=abc123; Path=/")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        task = ScanTask(url=url, categories=[VulnCategory.A07_AUTH_FAILURES], timeout=10)
+        result = _await(VulnScanner(task=task, max_requests=20).scan())
+        a07 = [v for v in result.vulnerabilities if v.category == VulnCategory.A07_AUTH_FAILURES]
+        assert len(a07) >= 1, [v.to_summary() for v in result.vulnerabilities]
+        assert "session" in a07[0].title
+    finally:
+        server.shutdown()
+
+
 def test_security_hook_blocks_dangerous():
     hook = SecurityHookHandler()
 
