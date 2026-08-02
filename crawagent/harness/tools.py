@@ -1829,6 +1829,7 @@ def _summarize(result: Dict, keys: List[str]) -> Dict[str, Any]:
 LLM_CALLABLE_TOOLS = {
     "supervisor",
     "deep_crawl",
+    "harvest_api",
     "search",
     "monitor",
     "check_change",

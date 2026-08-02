@@ -378,7 +378,7 @@ Phase 管理：`idle → turn → compact`。
 
 ### 5.6 内置工具集
 
-[文件](file:///c:/Users/MOM/Desktop/学习项目/CrawAgent/crawagent/harness/tools.py) — `create_default_tools()` 注册 9 个工具。仅 `LLM_CALLABLE_TOOLS` 暴露给 LLM，其余由 Supervisor 内部编排。
+[文件](file:///c:/Users/MOM/Desktop/学习项目/CrawAgent/crawagent/harness/tools.py) — `create_default_tools()` 注册 12 个工具。仅 `LLM_CALLABLE_TOOLS` 暴露给 LLM，其余由 Supervisor 内部编排。
 
 | 工具 | exec_mode | replay_safe | 暴露 LLM | 用途 |
 |------|-----------|-------------|----------|------|
@@ -386,6 +386,8 @@ Phase 管理：`idle → turn → compact`。
 | `extract` | SEQUENTIAL | ✅ | ❌ | 自适应提取（含置信度反馈） |
 | `analyze` | SEQUENTIAL | ✅ | ❌ | 站点结构分析，产出 ExtractionBlueprint |
 | `save` | SEQUENTIAL | ❌ | ❌ | 智能存储路由（模板渲染+格式推断+去重+图片下载） |
+| `deep_crawl` | SEQUENTIAL | ❌ | ✅ | BFS/DFS/Best-First 整站深爬（多页批量保存） |
+| `harvest_api` | SEQUENTIAL | ✅ | ✅ | 浏览器拦截签名 API（强风控站点，无需逆向算法） |
 | `supervisor` | SEQUENTIAL | ❌ | ✅ | **编排入口**：闭环协作 |
 | `search` | PARALLEL | ✅ | ✅ | 本地全文搜索已爬数据 |
 | `monitor` | SEQUENTIAL | ❌ | ✅ | 创建监控任务 |
