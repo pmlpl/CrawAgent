@@ -5,6 +5,20 @@
       <p class="subtitle">下载 YouTube/Bilibili 等平台视频，本地播放</p>
     </div>
 
+    <div class="help-banner">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+      </svg>
+      <span>
+        <b>使用流程：</b>
+        1) 在「下载」页输入视频 URL，先点"查询信息"查看详情，再点"下载视频"
+        2) 下载的视频保存在 <code>output/videos/</code> 目录
+        3) 切换到「已下载」tab 查看和播放已下载的视频
+        4) 「视频提取」用于从 HTML 页面中提取嵌入的视频链接，无需下载
+      </span>
+      <button class="help-close" @click="showHelp = false">×</button>
+    </div>
+
     <!-- Tab 切换 -->
     <div class="tabs">
       <button :class="['tab', { active: activeTab === 'download' }]" @click="activeTab = 'download'">下载</button>
@@ -60,12 +74,24 @@
 
       <!-- 下载进度 -->
       <div v-if="downloadResult" class="result-card">
-        <h3>下载结果</h3>
-        <p>成功: {{ downloadResult.downloaded }} / {{ downloadResult.total }}</p>
+        <div class="result-header">
+          <h3>下载结果</h3>
+          <button v-if="downloadResult.downloaded > 0" class="btn btn-secondary btn-sm" @click="openVideoFolder">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            打开视频文件夹
+          </button>
+        </div>
+        <p>成功: {{ downloadResult.downloaded ?? 0 }} / {{ downloadResult.total ?? '?' }}</p>
         <p v-if="downloadResult.failed > 0" class="error-text">失败: {{ downloadResult.failed }}</p>
+        <p v-if="downloadResult.error" class="error-text">错误: {{ downloadResult.error }}</p>
         <div v-for="item in downloadResult.items" :key="item.index" class="download-item">
           <span class="item-index">#{{ item.index }}</span>
-          <span class="item-title">{{ item.title }}</span>
+          <div class="item-info">
+            <div class="item-title">{{ item.title }}</div>
+            <div v-if="item.path" class="item-path">{{ item.path }}</div>
+          </div>
           <span :class="['item-status', item.success ? 'success' : 'failed']">
             {{ item.success ? '✓' : '✗' }}
           </span>
@@ -77,10 +103,20 @@
 
     <!-- 已下载文件 Tab -->
     <div v-if="activeTab === 'files'" class="tab-content">
-      <div class="button-row">
+      <div class="files-toolbar">
         <button @click="loadFiles" class="btn btn-secondary">刷新</button>
+        <button v-if="files.length > 0" @click="openVideoFolder" class="btn btn-secondary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          打开视频文件夹
+        </button>
+        <span v-if="files.length > 0" class="file-count">共 {{ files.length }} 个视频文件</span>
       </div>
-      <div v-if="files.length === 0" class="empty">暂无已下载的视频文件</div>
+      <div v-if="files.length === 0" class="empty">
+        <p>暂无已下载的视频文件</p>
+        <p class="empty-hint">去「下载」tab 输入视频 URL 开始下载</p>
+      </div>
       <div v-for="file in files" :key="file.path" class="file-item" @click="playVideo(file)">
         <div class="file-icon">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -91,8 +127,17 @@
         <div class="file-info">
           <div class="file-name">{{ file.name }}</div>
           <div class="file-meta">{{ formatSize(file.size) }} · {{ file.ext.toUpperCase() }} · {{ formatDate(file.modified) }}</div>
+          <div class="file-path-display" :title="file.path">{{ file.path }}</div>
         </div>
-        <button @click.stop="deleteFile(file)" class="btn btn-danger btn-sm">删除</button>
+        <div class="file-actions">
+          <button @click.stop="playVideo(file)" class="btn btn-primary btn-sm">播放</button>
+          <button @click.stop="openFileFolder(file.path)" class="btn btn-secondary btn-sm" title="打开所在文件夹">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+          </button>
+          <button @click.stop="deleteFile(file)" class="btn btn-danger btn-sm">删除</button>
+        </div>
       </div>
 
       <!-- 播放器 -->
@@ -182,6 +227,7 @@ import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api' })
 
+const showHelp = ref(true)
 const activeTab = ref('download')
 
 // 下载
@@ -308,7 +354,27 @@ async function removeAds() {
   }
 }
 
+async function openVideoFolder() {
+  try {
+    await api.post('/output/open', null, { params: { path: './output/videos' } })
+  } catch (e) {
+    alert(`无法打开文件夹: ${e.response?.data?.detail || e.message}`)
+  }
+}
+
+async function openFileFolder(filePath) {
+  const separator = filePath.includes('\\') ? '\\' : '/'
+  const lastSep = filePath.lastIndexOf(separator)
+  const folderPath = lastSep > 0 ? filePath.substring(0, lastSep) : filePath
+  try {
+    await api.post('/output/open', null, { params: { path: folderPath } })
+  } catch (e) {
+    alert(`无法打开文件夹: ${e.response?.data?.detail || e.message}`)
+  }
+}
+
 function formatSize(bytes) {
+  if (!bytes || isNaN(bytes) || bytes < 0) return ''
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
   if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
@@ -332,7 +398,7 @@ function formatDate(ts) {
 <style scoped>
 .video-page {
   padding: 24px;
-  max-width: 900px;
+  max-width: 960px;
   margin: 0 auto;
 }
 .page-header h1 {
@@ -342,7 +408,47 @@ function formatDate(ts) {
 .subtitle {
   color: var(--text-muted);
   font-size: 14px;
-  margin: 0 0 24px 0;
+  margin: 0 0 16px 0;
+}
+.help-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.help-banner svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--accent);
+}
+.help-banner b {
+  color: var(--text);
+}
+.help-banner code {
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+}
+.help-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.help-close:hover {
+  color: var(--text);
 }
 .tabs {
   display: flex;
@@ -574,5 +680,55 @@ function formatDate(ts) {
 }
 .error-text {
   color: #e53e3e;
+}
+.result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.result-header h3 {
+  margin: 0;
+}
+.files-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.file-count {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.empty-hint {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-top: 8px;
+}
+.file-path-display {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace;
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 400px;
+}
+.file-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.item-info {
+  flex: 1;
+  min-width: 0;
+}
+.item-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace;
+  margin-top: 2px;
+  word-break: break-all;
 }
 </style>

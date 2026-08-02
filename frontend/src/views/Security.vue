@@ -4,6 +4,21 @@
       <h2 class="font-display">安全扫描</h2>
     </header>
 
+    <div class="help-banner" v-if="showHelp">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+      </svg>
+      <span>
+        <b>使用流程：</b>
+        1) 填写目标 URL，选择扫描类别（可选），点击"开始扫描"
+        2) 扫描可能耗时数十秒，完成后自动显示漏洞列表
+        3) 点击任务列表中的"补丁"按钮可生成修复代码 diff
+        4) 扫描深度和最大请求数影响扫描范围，数值越大越全面但耗时更长
+        <br><span style="color: #dc3545;">⚠️ 请仅扫描已授权的目标，未经授权的扫描可能违法。</span>
+      </span>
+      <button class="help-close" @click="showHelp = false">×</button>
+    </div>
+
     <div class="settings-content">
       <!-- 发起扫描 -->
       <div class="settings-section">
@@ -149,6 +164,8 @@ import { ref, computed, onMounted } from 'vue'
 import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api', timeout: 180000 })
+
+const showHelp = ref(true)
 
 const form = ref({
   name: '',
@@ -307,8 +324,14 @@ function sevText(sev) {
 
 <style scoped>
 .security-page { padding: 24px 32px; max-width: 900px; margin: 0 auto; }
-.page-header { margin-bottom: 24px; }
+.page-header { margin-bottom: 16px; }
 .page-header h2 { font-size: 24px; margin: 0; }
+.help-banner { display: flex; align-items: flex-start; gap: 10px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 20px; font-size: 13px; line-height: 1.6; }
+.help-banner svg { flex-shrink: 0; margin-top: 2px; color: var(--accent); }
+.help-banner b { color: var(--text); }
+.help-banner code { background: var(--bg); padding: 1px 6px; border-radius: 4px; font-family: monospace; font-size: 12px; }
+.help-close { margin-left: auto; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 18px; line-height: 1; padding: 0 4px; }
+.help-close:hover { color: var(--text); }
 .settings-content { display: flex; flex-direction: column; gap: 24px; }
 .settings-section { background: var(--surface); border-radius: 12px; padding: 20px 24px; border: 1px solid var(--border); }
 .section-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }

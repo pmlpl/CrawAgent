@@ -11,7 +11,6 @@ from urllib.parse import urljoin
 from lxml import html as lxml_html
 from lxml import etree
 from pydantic import BaseModel, ConfigDict, create_model
-from selectolax.parser import HTMLParser
 
 from crawagent.core.models import CrawlResult, ExtractedItem, Selectors, SiteAnalysis
 from crawagent.llm.factory import get_llm
@@ -43,6 +42,29 @@ class BaseExtractor(ABC):
         text = re.sub(r"\s+", " ", text)
         return text.strip()
 
+    @staticmethod
+    def _cssselect(node, selector: str) -> list:
+        """防御性 cssselect：空/非法选择器返回空列表，避免提取链路崩溃。
+
+        LLM 生成的蓝图选择器可能为空串或非法语法（如尾随逗号），
+        lxml cssselect 会抛 CSSSyntaxError（Expected selector...），
+        这里统一吞掉，让调用方走正常空结果分支。
+        """
+        if not selector:
+            return []
+        try:
+            return node.cssselect(selector)
+        except Exception:
+            return []
+
+    # selectolax 支持的标准伪类（LLM 生成选择器时可能混入这些，需保留）
+    _KEEP_PSEUDO = {
+        "first-child", "last-child", "nth-child", "nth-of-type", "nth-last-child",
+        "nth-last-of-type", "not", "first-of-type", "last-of-type", "only-child",
+        "only-of-type", "empty", "root", "hover", "focus", "active", "visited",
+        "checked", "disabled", "enabled", "required", "optional", "selected",
+    }
+
     def _convert_selector(self, selector: str) -> str:
         """
         转换 SiteAnalyzer 的 @attr 语法为标准 CSS 属性选择器
@@ -59,6 +81,29 @@ class BaseExtractor(ABC):
             return f"{tag}[{attr}]"
         return selector
 
+    @classmethod
+    def sanitize_selector(cls, selector: str) -> str:
+        """
+        清洗 LLM 生成的 CSS 选择器，剥离 Tailwind 变体类 token（如 .sm:grid-cols-2 / .lg:grid-cols-3）。
+
+        原因：Tailwind 响应式前缀（sm:/md:/lg:）不是合法 CSS 伪类，
+        selectolax 会抛 Bad CSS Selectors，甚至对特定 HTML 触发原生崩溃（0xC0000005）。
+        清洗规则：移除「.类名:非伪类名」形式的 token，保留标准伪类（:first-child 等）。
+        """
+        if not selector or ":" not in selector:
+            return selector
+
+        def _repl(m):
+            pseudo = (m.group(2) or "").lower()
+            if pseudo in cls._KEEP_PSEUDO:
+                return m.group(0)
+            return ""  # Tailwind 变体类 → 剥离
+
+        cleaned = re.sub(r"\.([\w-]+):([\w-]+)(\([^)]*\))?", _repl, selector)
+        # 清理残留的重复点号与首尾空白
+        cleaned = re.sub(r"\.{2,}", ".", cleaned)
+        return cleaned.strip(" .")
+
 
 class SelectolaxExtractor(BaseExtractor):
     """Selectolax CSS 选择器提取器（快）"""
@@ -67,17 +112,32 @@ class SelectolaxExtractor(BaseExtractor):
         if not ctx.html or not ctx.selectors.item:
             return []
 
-        parser = HTMLParser(ctx.html)
+        # 委托 lxml 实现（selectolax 在 Windows/Python 3.13 上偶发原生崩溃 0xC0000005，
+        # 进程级 try/except 无法捕获；lxml 的 cssselect 同样支持 CSS 选择器，稳定无此问题）
+        try:
+            doc = lxml_html.fromstring(ctx.html)
+        except Exception as e:
+            logger.warning(f"lxml 解析 HTML 失败: {e}")
+            return []
+
         container = None
-
         if ctx.selectors.list_container:
-            container = parser.css_first(ctx.selectors.list_container)
-            if not container:
+            try:
+                containers = doc.cssselect(self.sanitize_selector(ctx.selectors.list_container))
+            except Exception as e:
+                logger.warning(f"lxml list_container 选择器无效: {e}")
+                containers = []
+            if not containers:
                 return []
+            container = containers[0]
         else:
-            container = parser
+            container = doc
 
-        items = container.css(ctx.selectors.item)
+        try:
+            items = container.cssselect(self.sanitize_selector(ctx.selectors.item))
+        except Exception as e:
+            logger.warning(f"lxml item 选择器无效: {e}")
+            return []
         results = []
 
         for idx, item in enumerate(items):
@@ -98,35 +158,40 @@ class SelectolaxExtractor(BaseExtractor):
 
         # 标题
         if ctx.selectors.title:
-            sel = self._convert_selector(ctx.selectors.title)
-            el = node.css_first(sel)
-            if el:
-                data["title"] = self._normalize_text(el.text())
+            sel = self.sanitize_selector(self._convert_selector(ctx.selectors.title))
+            els = self._cssselect(node, sel)
+            if els:
+                data["title"] = self._normalize_text(els[0].text_content())
 
         # URL
         if ctx.selectors.url:
-            sel = self._convert_selector(ctx.selectors.url)
-            el = node.css_first(sel)
-            if el:
-                href = el.attributes.get("href") or el.text()
+            sel = self.sanitize_selector(self._convert_selector(ctx.selectors.url))
+            els = self._cssselect(node, sel)
+            if els:
+                href = els[0].get("href") or els[0].text_content()
                 if href:
                     data["url"] = urljoin(ctx.base_url, href.strip())
 
         # 额外字段
         for field_name, selector in ctx.selectors.extra.items():
-            sel = self._convert_selector(selector)
-            el = node.css_first(sel)
-            if el:
-                if el.tag in ("a", "link"):
-                    data[field_name] = urljoin(ctx.base_url, el.attributes.get("href", "").strip())
-                elif el.tag in ("img", "image"):
-                    data[field_name] = urljoin(ctx.base_url, el.attributes.get("src", "").strip())
+            sel = self.sanitize_selector(self._convert_selector(selector))
+            els = self._cssselect(node, sel)
+            if els:
+                el = els[0]
+                tag = el.tag.lower()
+                if tag in ("a", "link"):
+                    data[field_name] = urljoin(ctx.base_url, (el.get("href") or "").strip())
+                elif tag in ("img", "image"):
+                    data[field_name] = urljoin(ctx.base_url, (el.get("src") or "").strip())
                 else:
-                    data[field_name] = self._normalize_text(el.text())
+                    data[field_name] = self._normalize_text(el.text_content())
 
         # 如果没有任何字段，返回 None
         if not data:
             return None
+
+        # 兜底：无 url 字段时回填页面 URL（保证 ExtractedItem 必填字段通过校验）
+        data.setdefault("url", ctx.url)
 
         data["_source_index"] = idx
         return data
@@ -137,13 +202,7 @@ class LxmlExtractor(BaseExtractor):
 
     def _convert_selector(self, selector: str) -> str:
         """转换 @attr 语法为标准 CSS"""
-        if not selector or '@' not in selector:
-            return selector
-        parts = selector.split('@')
-        if len(parts) == 2:
-            tag, attr = parts
-            return f"{tag}[{attr}]"
-        return selector
+        return super()._convert_selector(selector)
 
     def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
         if not ctx.html or not ctx.selectors.item:
@@ -158,14 +217,22 @@ class LxmlExtractor(BaseExtractor):
 
         # 容器
         if ctx.selectors.list_container:
-            containers = doc.cssselect(ctx.selectors.list_container)
+            try:
+                containers = doc.cssselect(self.sanitize_selector(ctx.selectors.list_container))
+            except Exception as e:
+                logger.debug(f"lxml list_container 选择器无效: {e}")
+                containers = []
             if not containers:
                 return []
             root = containers[0]
         else:
             root = doc
 
-        items = root.cssselect(ctx.selectors.item)
+        try:
+            items = root.cssselect(self.sanitize_selector(ctx.selectors.item))
+        except Exception as e:
+            logger.debug(f"lxml item 选择器无效: {e}")
+            return []
         results = []
 
         for idx, item in enumerate(items):
@@ -184,15 +251,15 @@ class LxmlExtractor(BaseExtractor):
 
         # 标题
         if ctx.selectors.title:
-            sel = self._convert_selector(ctx.selectors.title)
-            els = node.cssselect(sel)
+            sel = self.sanitize_selector(self._convert_selector(ctx.selectors.title))
+            els = self._cssselect(node, sel)
             if els:
                 data["title"] = self._normalize_text(els[0].text_content())
 
         # URL
         if ctx.selectors.url:
-            sel = self._convert_selector(ctx.selectors.url)
-            els = node.cssselect(sel)
+            sel = self.sanitize_selector(self._convert_selector(ctx.selectors.url))
+            els = self._cssselect(node, sel)
             if els:
                 href = els[0].get("href") or els[0].text_content()
                 if href:
@@ -200,8 +267,8 @@ class LxmlExtractor(BaseExtractor):
 
         # 额外字段
         for field_name, selector in ctx.selectors.extra.items():
-            sel = self._convert_selector(selector)
-            els = node.cssselect(sel)
+            sel = self.sanitize_selector(self._convert_selector(selector))
+            els = self._cssselect(node, sel)
             if els:
                 el = els[0]
                 tag = el.tag.lower()
@@ -214,6 +281,9 @@ class LxmlExtractor(BaseExtractor):
 
         if not data:
             return None
+
+        # 兜底：无 url 字段时回填页面 URL（保证 ExtractedItem 必填字段通过校验）
+        data.setdefault("url", ctx.url)
 
         data["_source_index"] = idx
         return data
@@ -277,10 +347,12 @@ class LLMExtractor(BaseExtractor):
 
             # 这里简化：直接调用 LLM，实际应用中应使用 function calling
             response = self.llm.invoke(prompt)
+            # 防御：LLM 可能返回空 content（None），直接 re.search 会抛 TypeError
+            content = response.content or ""
 
             # 尝试解析 JSON
             import json
-            json_match = re.search(r"\[.*\]", response.content, re.DOTALL)
+            json_match = re.search(r"\[.*\]", content, re.DOTALL)
             if json_match:
                 items = json.loads(json_match.group())
                 results = []
@@ -463,7 +535,16 @@ class MetaExtractor(BaseExtractor):
 
 
 class TableExtractor(BaseExtractor):
-    """表格提取器：HTML <table> → 行字典列表（P2-3）。"""
+    """表格提取器：HTML <table> → 行字典列表（P2-3）。
+
+    表头字段名与目标 schema 字段匹配时按名映射（原逻辑）；
+    否则智能映射到通用字段（title/url/content），保证 ExtractedItem 也能用。
+    url 缺省时回填页面 URL（与 _extract_item 兜底一致）。
+    """
+
+    # 通用字段映射关键词（表头匹配）
+    _TITLE_KEYS = ("title", "名称", "标题", "产品", "商品", "name")
+    _URL_KEYS = ("url", "链接", "link", "地址", "source")
 
     def extract(self, ctx: ExtractionContext) -> List[BaseModel]:
         if not ctx.html:
@@ -491,12 +572,56 @@ class TableExtractor(BaseExtractor):
                 cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
                 if len(cells) < len(header):
                     cells += [""] * (len(header) - len(cells))
-                item = {header[i]: cells[i] for i in range(len(header))}
+                item = self._build_item(header, cells, ctx)
+                if not item:
+                    continue
                 try:
                     results.append(ctx.target_schema(**item))
                 except Exception:
                     continue
         return results
+
+    def _build_item(self, header: List[str], cells: List[str], ctx: ExtractionContext) -> Optional[Dict[str, str]]:
+        """表头/单元格 → 目标 schema 字段字典。
+
+        优先按表头字段名直配；否则通用映射到 title/url/content。
+        """
+        schema_fields = ctx.target_schema.model_fields.keys()
+        direct = {header[i]: cells[i] for i in range(len(header))}
+
+        if any(h in schema_fields for h in header):
+            item = direct
+        else:
+            item = {}
+            t_idx = self._match_idx(header, self._TITLE_KEYS)
+            u_idx = self._match_idx(header, self._URL_KEYS)
+            title = cells[t_idx] if t_idx is not None else (cells[0] if cells else "")
+            if title:
+                item["title"] = title
+            if u_idx is not None and cells[u_idx]:
+                item["url"] = cells[u_idx]
+            # 其余列拼接进 content（保留列名）
+            extra_parts = [
+                f"{header[i]}: {cells[i]}"
+                for i in range(len(header))
+                if i not in (t_idx, u_idx) and cells[i] and header[i] != ""
+            ]
+            if extra_parts and "content" in schema_fields:
+                item["content"] = "\n".join(extra_parts)
+
+        # url 兜底：必填字段回填页面 URL
+        if "url" in schema_fields and not item.get("url"):
+            item["url"] = ctx.url
+        return item or None
+
+    @staticmethod
+    def _match_idx(header: List[str], keys: tuple) -> Optional[int]:
+        """返回表头中第一个包含任一关键词的列下标。"""
+        for i, h in enumerate(header):
+            hl = h.lower()
+            if any(k in hl for k in keys):
+                return i
+        return None
 
 
 class JsonCssExtractor(BaseExtractor):
@@ -526,20 +651,27 @@ class JsonCssExtractor(BaseExtractor):
         if not tree:
             return []
 
-        from selectolax.parser import HTMLParser
-
-        parser = HTMLParser(ctx.html)
+        # 用 lxml 解析（selectolax 在 Windows/Python 3.13 上偶发原生崩溃 0xC0000005）
+        try:
+            doc = lxml_html.fromstring(ctx.html)
+        except Exception as e:
+            logger.warning(f"lxml 解析 HTML 失败: {e}")
+            return []
         items_sel = tree.get("items")
         fields = tree.get("fields", {})
         if not items_sel:
-            node = parser.body or parser
+            node = doc.body or doc
             item = self._extract_node(node, fields, ctx)
             try:
                 return [ctx.target_schema(**item)] if item else []
             except Exception:
                 return []
 
-        nodes = parser.css(items_sel)
+        try:
+            nodes = doc.cssselect(self.sanitize_selector(items_sel))
+        except Exception as e:
+            logger.warning(f"lxml json_css items 选择器无效: {e}")
+            return []
         results: List[BaseModel] = []
         for node in nodes:
             item = self._extract_node(node, fields, ctx)
@@ -556,7 +688,11 @@ class JsonCssExtractor(BaseExtractor):
             if isinstance(conf, dict) and ("items" in conf or "fields" in conf):
                 # 嵌套对象
                 if "items" in conf:
-                    sub_nodes = node.css(conf["items"])
+                    try:
+                        sub_nodes = node.cssselect(self.sanitize_selector(conf["items"]))
+                    except Exception as e:
+                        logger.debug(f"lxml 嵌套 items 选择器无效: {e}")
+                        sub_nodes = []
                     item[name] = [self._extract_node(n, conf.get("fields", {}), ctx) for n in sub_nodes]
                 else:
                     item[name] = self._extract_node(node, conf.get("fields", {}), ctx)
@@ -565,18 +701,23 @@ class JsonCssExtractor(BaseExtractor):
             selector = conf.get("selector") if isinstance(conf, dict) else conf
             attr = conf.get("attribute") if isinstance(conf, dict) else None
             default = conf.get("default") if isinstance(conf, dict) else None
-            el = node.css_first(selector) if selector else node
+            try:
+                els = node.cssselect(self.sanitize_selector(selector)) if selector else []
+            except Exception as e:
+                logger.debug(f"lxml 字段选择器无效: {e}")
+                els = []
+            el = els[0] if els else None
             if el is None:
                 if default is not None:
                     item[name] = default
                 continue
             if attr:
-                value = el.attributes.get(attr, "")
+                value = el.get(attr, "") or ""
                 if attr == "href" and value and ctx.base_url:
                     from urllib.parse import urljoin
                     value = urljoin(ctx.base_url, value)
             else:
-                value = el.text().strip()
+                value = (el.text_content() or "").strip()
             if value:
                 item[name] = value
             elif default is not None:
@@ -590,7 +731,10 @@ class CompositeExtractor:
     """
 
     def __init__(self):
-        self._css = SelectolaxExtractor()
+        # CSS 策略改用 lxml 实现（cssselect 同样支持 CSS 选择器）：
+        # selectolax 在 Windows/Python 3.13 上解析特定 HTML 时偶发原生崩溃
+        # （0xC0000005，进程级，try/except 无法捕获），lxml 为纯 C 库稳定无此问题。
+        self._css = LxmlExtractor()
         self._xpath = LxmlExtractor()
         self._llm = LLMExtractor()
         self._strategies = {
@@ -620,6 +764,11 @@ class CompositeExtractor:
         strategy: Optional[str] = None,
     ) -> List[BaseModel]:
         """提取；指定 strategy 时用单一策略，否则三级回退。"""
+        # 调用方未提供 target_schema 时使用通用条目模型，
+        # 避免各提取器执行 None(**data) 抛 TypeError 导致结果恒为空
+        if target_schema is None:
+            target_schema = ExtractedItem
+
         if not base_url:
             from urllib.parse import urlparse
             parsed = urlparse(url)
@@ -639,7 +788,7 @@ class CompositeExtractor:
                 raise ValueError(f"未知提取策略: {strategy}，可选: {list(self._strategies)}")
             return extractor.extract(ctx)
 
-        # 1. 尝试 CSS (selectolax)
+        # 1. 尝试 CSS (lxml cssselect 实现，稳定无 selectolax 原生崩溃问题)
         if selectors.item:
             logger.debug("尝试 CSS 选择器提取")
             results = self._css.extract(ctx)
@@ -654,11 +803,270 @@ class CompositeExtractor:
             logger.debug(f"XPath 提取成功: {len(results)} 条")
             return results
 
+        # 2.5 表格回退：CSS/XPath 对 <table> 页面通常只取到碎片或为空，
+        # 页面含表格结构时优先 table 策略（表头→title/url/content 通用映射）
+        if self._has_table(ctx.html):
+            logger.debug("CSS/XPath 未命中，尝试 Table 提取")
+            results = self._strategies["table"].extract(ctx)
+            if results:
+                logger.debug(f"Table 提取成功: {len(results)} 条")
+                return results
+
         # 3. LLM 兜底
         logger.debug("选择器均失效，启用 LLM 兜底提取")
         results = self._llm.extract(ctx)
         logger.debug(f"LLM 提取: {len(results)} 条")
         return results
+
+    @staticmethod
+    def _has_table(html: str) -> bool:
+        """轻量表格结构检测：页面含 <table> 且至少 2 行非空数据。"""
+        if not html or "<table" not in html.lower():
+            return False
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            for t in soup.find_all("table"):
+                if len(t.find_all("tr")) >= 2 and t.get_text(strip=True):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def extract_images(
+        self,
+        url: str,
+        html: str,
+        min_width: int = 50,
+        min_height: int = 50,
+        max_images: int = 500,
+        base_url: str = "",
+    ) -> List[Dict[str, Any]]:
+        """图片专用批量提取：聚合 img/src/data-src/srcset/bg-image，去重并分类。
+
+        相比 _fallback_generic 的增强点：
+        - 覆盖懒加载属性：data-src / data-original / data-lazy / data-srcset
+        - 解析 srcset 拿到真实高清 URL（选最大 w/h）
+        - 抽取 style 中 background-image / inline 背景图
+        - 收集 og:image / twitter:image / JSON-LD image
+        - 对 a>img 组合补全 page_url（点击进入详情）
+        - 去重：按 URL hash + 同一 alt 聚类最小图
+
+        Args:
+            url: 页面 URL
+            html: 页面 HTML
+            min_width/max_height: 过滤小图标阈值（像素，解析到 width/height 属性时生效）
+            max_images: 最多返回条数（避免大图站炸内存）
+            base_url: 可选，覆盖 url 推断的基准
+
+        Returns:
+            按「清晰度优先」排序的图片字典列表，字段：
+            src / alt / title / width / height / kind(meta|og|inline|src|lazy|bg|link) / page_url
+        """
+        from bs4 import BeautifulSoup
+        import hashlib as _hl
+
+        if not base_url:
+            from urllib.parse import urlparse
+            _p = urlparse(url)
+            base_url = f"{_p.scheme}://{_p.netloc}"
+
+        soup = BeautifulSoup(html or "", "html.parser")
+        out: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        def _push(rec: Dict[str, Any]) -> None:
+            src = rec.get("src", "")
+            if not src or src.startswith(("data:", "#", "javascript:", "about:")):
+                return
+            abs_src = urljoin(base_url, src).strip()
+            if not abs_src:
+                return
+            # UI/装饰噪声图（favicon/logo/图标/头像/默认背景）直接过滤
+            if _is_ui_noise_image(abs_src, rec.get("alt", ""), rec.get("kind", "")):
+                return
+            # hash 去重（忽略 query 尾部签名差异）
+            try:
+                from urllib.parse import urlsplit, urlunsplit
+                sp = urlsplit(abs_src)
+                # scheme + netloc + path 做主键（query 里常见签名差异忽略）
+                key_src = urlunsplit((sp.scheme, sp.netloc, sp.path, "", ""))
+            except Exception:
+                key_src = abs_src
+            key = _hl.md5(key_src.encode("utf-8", errors="ignore")).hexdigest()
+            if key in seen:
+                return
+            seen.add(key)
+            rec["src"] = abs_src
+            out.append(rec)
+            if len(out) >= max_images:
+                return
+
+        # 1) Meta / OG / Twitter 图片（优先：一般是高质量缩略图）
+        for meta in soup.find_all("meta"):
+            prop = str(meta.get("property") or meta.get("name") or "").lower()
+            content = str(meta.get("content") or "").strip()
+            if not content:
+                continue
+            if prop in ("og:image", "twitter:image", "twitter:image:src", "image"):
+                kind = "og" if "og:" in prop else ("twitter" if "twitter" in prop else "meta")
+                _push({
+                    "src": content,
+                    "alt": str(soup.title.get_text(strip=True) if soup.title else ""),
+                    "title": "",
+                    "width": None, "height": None,
+                    "kind": kind, "page_url": url,
+                })
+            if len(out) >= max_images:
+                break
+
+        # 2) JSON-LD image
+        for ld in soup.find_all("script", type="application/ld+json"):
+            txt = ld.get_text(strip=True)
+            if not txt or "image" not in txt.lower():
+                continue
+            try:
+                data = json.loads(txt)
+            except Exception:
+                continue
+            stack = [data]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, dict):
+                    for k, v in node.items():
+                        if k.lower() == "image" and isinstance(v, (list, str, dict)):
+                            if isinstance(v, str):
+                                _push({"src": v, "alt": "", "title": "", "width": None, "height": None, "kind": "jsonld", "page_url": url})
+                            elif isinstance(v, list):
+                                for it in v:
+                                    if isinstance(it, str):
+                                        _push({"src": it, "alt": "", "title": "", "width": None, "height": None, "kind": "jsonld", "page_url": url})
+                                    elif isinstance(it, dict):
+                                        s = it.get("url") or it.get("contentUrl")
+                                        if s:
+                                            _push({
+                                                "src": s,
+                                                "alt": str(it.get("caption") or ""),
+                                                "title": str(it.get("name") or ""),
+                                                "width": it.get("width"),
+                                                "height": it.get("height"),
+                                                "kind": "jsonld", "page_url": url,
+                                            })
+                        else:
+                            stack.append(v)
+                elif isinstance(node, list):
+                    stack.extend(node)
+            if len(out) >= max_images:
+                break
+
+        # 3) <img> 标签：综合 src / 懒加载属性 / srcset，且解析 parent <a> 作为 page_url
+        for img in soup.find_all("img"):
+            if len(out) >= max_images:
+                break
+            attrs = img.attrs or {}
+            alt = str(attrs.get("alt") or "").strip()
+            title = str(attrs.get("title") or "").strip()
+            # 解析尺寸
+            w = attrs.get("width")
+            h = attrs.get("height")
+            try:
+                width_i = int(w) if isinstance(w, (str, int)) and str(w).lstrip("-").isdigit() else None
+                height_i = int(h) if isinstance(h, (str, int)) and str(h).lstrip("-").isdigit() else None
+            except Exception:
+                width_i, height_i = None, None
+            if (width_i is not None and width_i < min_width) or (height_i is not None and height_i < min_height):
+                continue
+
+            # parent link
+            page_url = url
+            parent_a = img.find_parent("a", href=True)
+            if parent_a:
+                page_url = urljoin(base_url, parent_a["href"])
+
+            # 候选源：优先级 lazy srcset > lazy src > srcset > src（懒加载属性往往是真实图）
+            candidates: List[str] = []
+            lazy_keys = ("data-src", "data-original", "data-lazy", "data-srcset", "data-url", "data-full")
+            src_keys = ("src", "srcset")
+            for k in lazy_keys:
+                if attrs.get(k):
+                    candidates.extend(_parse_srcset(str(attrs[k])))
+            for k in src_keys:
+                if attrs.get(k):
+                    candidates.extend(_parse_srcset(str(attrs[k])))
+            # 去重保留顺序
+            added: set = set()
+            ordered: List[str] = []
+            for c in candidates:
+                if c not in added:
+                    added.add(c)
+                    ordered.append(c)
+            if ordered:
+                # 首张图作为主图记录
+                main_src = ordered[0]
+                _push({
+                    "src": main_src,
+                    "alt": alt,
+                    "title": title,
+                    "width": width_i,
+                    "height": height_i,
+                    "kind": "lazy" if any(attrs.get(k) for k in lazy_keys) else "src",
+                    "page_url": page_url,
+                })
+                # 其他尺寸也记录（最多再追加 1 条，srcset 常含多个）
+                for s in ordered[1:2]:
+                    _push({
+                        "src": s,
+                        "alt": alt,
+                        "title": title,
+                        "width": width_i,
+                        "height": height_i,
+                        "kind": "srcset",
+                        "page_url": page_url,
+                    })
+            # inline style 背景
+            style = str(attrs.get("style") or "")
+            for bg in _parse_style_bg(style):
+                _push({
+                    "src": bg,
+                    "alt": alt,
+                    "title": title,
+                    "width": width_i,
+                    "height": height_i,
+                    "kind": "bg",
+                    "page_url": page_url,
+                })
+
+        # 4) 通用元素 style 背景图（div/section/li/figure 等带 background-image）
+        if len(out) < max_images:
+            for tag in soup.find_all(["div", "section", "li", "figure", "article", "span", "a"]):
+                if len(out) >= max_images:
+                    break
+                style = str(tag.get("style") or "")
+                if "background" not in style.lower():
+                    continue
+                page_url = url
+                if tag.name == "a" and tag.get("href"):
+                    page_url = urljoin(base_url, tag["href"])
+                for bg in _parse_style_bg(style):
+                    _push({
+                        "src": bg,
+                        "alt": "",
+                        "title": "",
+                        "width": None,
+                        "height": None,
+                        "kind": "bg",
+                        "page_url": page_url,
+                    })
+
+        # 排序：内容评分优先（壁纸/高清/封面等），其次 kind 优先级，再次带尺寸信息
+        def _sort_key(x):
+            content = -_content_image_score(x.get("src", ""), x.get("alt", ""))
+            has_size = 0 if (x.get("width") and x.get("height")) else 1
+            pref_kind = {"og": 0, "twitter": 1, "meta": 2, "jsonld": 3, "lazy": 4, "srcset": 5, "src": 6, "bg": 7, "link": 8}.get(x.get("kind", ""), 5)
+            return (content, pref_kind, has_size)
+
+        out.sort(key=_sort_key)
+        return out[:max_images]
 
     def _fallback_generic(self, result: CrawlResult, base_url: str, target_schema: Type[BaseModel]) -> List[BaseModel]:
         """通用兜底提取：从 HTML 中提取 title、links 和 images"""
@@ -772,6 +1180,129 @@ class CompositeExtractor:
                 continue
         
         return results
+
+
+def _parse_srcset(value: str) -> List[str]:
+    """解析 srcset / data-srcset 字符串，按宽度从大到小返回 URL 列表。
+
+    示例输入：
+      "https://a.jpg 1x, https://b.jpg 2x, https://c.jpg 1200w"
+    输出：[b.jpg, c.jpg, a.jpg] 或按原始顺序中可靠部分优先
+    """
+    if not value:
+        return []
+    value = value.strip()
+    # data URI（base64 内嵌图）整体跳过：内含逗号会被误切成伪 URL 片段
+    if value.lower().startswith("data:") or ";base64," in value.lower():
+        return []
+    if "," not in value and " " not in value.strip():
+        # 普通单个 URL
+        v = value.strip()
+        return [v] if v and not v.lower().startswith("data:") else []
+
+    entries: List[tuple] = []
+    for part in re.split(r",\s*", value):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = part.rsplit(maxsplit=1)
+        if len(tokens) == 1:
+            url = tokens[0]
+            size = 0
+        else:
+            url, sz = tokens
+            sz = sz.strip().lower()
+            # 1x / 2x / 1200w
+            if sz.endswith("x"):
+                try:
+                    size = int(float(sz[:-1]) * 1000)
+                except ValueError:
+                    size = 0
+            elif sz.endswith("w") or sz.endswith("h"):
+                try:
+                    size = int(sz[:-1])
+                except ValueError:
+                    size = 0
+            else:
+                size = 0
+        url = url.strip().strip("'\"")
+        if url and not url.lower().startswith("data:"):
+            entries.append((-size, url))
+    entries.sort()
+    return [u for _, u in entries]
+
+
+def _is_ui_noise_image(src: str = "", alt: str = "", kind: str = "") -> bool:
+    """判断是否为 UI/装饰噪声图（非内容图）：favicon、logo、图标、头像、默认背景等。
+
+    通用规则（不过度特化单个站点）：
+    - URL 特征：favicon / pwa / logo / icon / avatar / banner / defaultBg / bg 装饰
+    - alt 特征：上传图片 / 用户头像 / 图标 / logo 等 UI 文案
+    - kind=bg 且 URL 含默认背景特征（defaultBg / background-image 装饰）
+    """
+    low_src = (src or "").lower()
+    low_alt = (alt or "").strip().lower()
+
+    # 1) URL 路径特征
+    src_markers = (
+        "favicon", "pwa-", "/logo", "logo.", "logo_", "logo-",
+        ".icon", "_icon", "icon.", "icon_", "icon-",
+        "avatar", "userimg", "headimg",
+        "defaultbg", "default_bg", "bg-default", "background-default",
+        "banner-bg", "nav-bg", "header-bg", "footer-bg",
+    )
+    if any(m in low_src for m in src_markers):
+        return True
+
+    # 2) 构建产物（/_nuxt/、/static/ 下的资源通常非内容图）
+    if "/_nuxt/" in low_src or "/_assets/" in low_src:
+        return True
+
+    # 3) alt 为 UI 文案
+    alt_markers = ("上传图片", "用户头像", "网页icon", "图标", "logo", "icon", "avatar")
+    if low_alt and any(m in low_alt for m in alt_markers):
+        return True
+
+    return False
+
+
+def _content_image_score(src: str = "", alt: str = "") -> int:
+    """内容图加分：alt 含描述性关键词或 URL 含内容图特征 → 返回正分（排序优先）。
+
+    通用内容特征（壁纸/封面/相册/高清图等）：
+    - alt 含 壁纸/高清/背景图/封面/摄影/图片 等描述词（排除 UI 噪声已在上层过滤）
+    - URL 含 wallpaper / wall / cover / photo / pic / img / upload / 高清 等路径特征
+    """
+    score = 0
+    low_alt = (alt or "").strip().lower()
+    low_src = (src or "").lower()
+    alt_content = ("壁纸", "wallpaper", "高清", "背景图", "封面", "摄影", "图片", "照片", "桌面")
+    for kw in alt_content:
+        if kw in low_alt:
+            score += 1
+            break
+    src_content = ("wallpaper", "/wall/", "getcroppingimg", "/cover", "/photo", "/pic", "upload/", "image/", "/img/")
+    for kw in src_content:
+        if kw in low_src:
+            score += 1
+            break
+    return score
+
+
+def _parse_style_bg(style: str) -> List[str]:
+    """从 style 字符串中提取 background / background-image 的 url(...)。"""
+    if not style or "background" not in style.lower():
+        return []
+    results: List[str] = []
+    for m in re.finditer(
+        r"url\(\s*(['\"]?)([^'\"\)]+)\1\s*\)",
+        style,
+        flags=re.IGNORECASE,
+    ):
+        url = m.group(2).strip()
+        if url and not url.lower().startswith("data:"):
+            results.append(url)
+    return results
 
 
 def create_dynamic_schema(fields: Dict[str, Dict], schema_name: str = "DynamicItem") -> Type[BaseModel]:

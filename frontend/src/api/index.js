@@ -25,8 +25,12 @@ export const harnessApi = {
     return api.get('/harness/sessions', { params: { limit } })
   },
   // 发送消息（Agent Loop）
-  prompt(sessionId, message, lane = 'main') {
-    return api.post('/harness/prompt', { session_id: sessionId, message, lane })
+  prompt(sessionId, message, lane = 'main', options = {}) {
+    const payload = { session_id: sessionId, message, lane }
+    // 透传 max_pages/max_depth（用户指定时覆盖 LLM 默认规划）
+    if (options.max_pages != null) payload.max_pages = options.max_pages
+    if (options.max_depth != null) payload.max_depth = options.max_depth
+    return api.post('/harness/prompt', payload)
   },
   // 快速爬取
   quickCrawl(url, instruction = '') {
@@ -35,6 +39,10 @@ export const harnessApi = {
   // 获取会话对话历史
   getHistory(sessionId, limit = 50) {
     return api.get(`/harness/sessions/${sessionId}/entries`, { params: { limit } })
+  },
+  // 获取会话累计 token 用量（含缓存命中率与费用）
+  getUsage(sessionId) {
+    return api.get(`/harness/sessions/${sessionId}/usage`)
   },
   // 获取 lanes
   getLanes(sessionId) {
@@ -47,25 +55,6 @@ export const harnessApi = {
   // 删除会话
   deleteSession(sessionId) {
     return api.delete(`/harness/sessions/${sessionId}`)
-  },
-}
-
-// ===== 兼容旧 API =====
-export const agentApi = {
-  run(data) {
-    return api.post('/agent/run', data)
-  },
-  analyze(data) {
-    return api.post('/agent/analyze', data)
-  },
-  getStatus(jobId) {
-    return api.get(`/agent/status/${jobId}`)
-  },
-  listJobs(limit = 20) {
-    return api.get('/agent/jobs', { params: { limit } })
-  },
-  deleteJob(jobId) {
-    return api.delete(`/agent/jobs/${jobId}`)
   },
 }
 

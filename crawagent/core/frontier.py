@@ -296,7 +296,7 @@ class SQLiteFrontier:
                 parent_url=row[5],
                 priority=row[6],
                 status=row[7],
-                retry_count=row[7],  # 复用字段
+                retry_count=row[8],
                 last_error=row[9],
                 created_at=row[10],
                 updated_at=row[11],
@@ -361,6 +361,66 @@ class SQLiteFrontier:
         )
         await self._conn.commit()
         return cursor.rowcount
+
+    # ==================== 任务快照 / 断点续抓（P1-4） ====================
+
+    async def snapshot_job(self, job_id: str = "") -> Dict[str, int]:
+        """任务快照：统计各状态 URL 数量（断点续抓基础）。
+
+        Args:
+            job_id: 按任务过滤（URL 的 metadata 中含 job_id 时有效）；空则统计全部。
+
+        Returns:
+            {"pending": n, "fetching": n, "fetched": n, "failed": n}
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        statuses: Dict[str, int] = {}
+        for st in ("pending", "fetching", "fetched", "failed"):
+            if job_id:
+                cursor = await self._conn.execute(
+                    "SELECT COUNT(*) FROM urls WHERE status=? AND metadata LIKE ?",
+                    (st, f'%"{job_id}"%'),
+                )
+            else:
+                cursor = await self._conn.execute(
+                    "SELECT COUNT(*) FROM urls WHERE status=?", (st,)
+                )
+            statuses[st] = (await cursor.fetchone())[0]
+        return statuses
+
+    async def resume_job(self, max_retries: int = 3, job_id: str = "") -> int:
+        """断点续抓：把失败未超重试次数 + 卡在 fetching（上次中断遗留）的 URL 重新置为 pending。
+
+        Returns:
+            重新入队的 URL 数量（failed → pending 部分）。
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        now = time.time()
+        if job_id:
+            cur = await self._conn.execute(
+                """UPDATE urls
+                    SET status='pending', last_error='', updated_at=?
+                    WHERE status='failed' AND retry_count < ? AND metadata LIKE ?""",
+                (now, max_retries, f'%"{job_id}"%'),
+            )
+        else:
+            cur = await self._conn.execute(
+                """UPDATE urls
+                    SET status='pending', last_error='', updated_at=?
+                    WHERE status='failed' AND retry_count < ?""",
+                (now, max_retries),
+            )
+        # 中断遗留的 fetching → 重新排队（上次进程退出时未标记完成）
+        await self._conn.execute(
+            "UPDATE urls SET status='pending', updated_at=? WHERE status='fetching'",
+            (now,),
+        )
+        await self._conn.commit()
+        return cur.rowcount
 
     # ==================== 内容去重 ====================
 

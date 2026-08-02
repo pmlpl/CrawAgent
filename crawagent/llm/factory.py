@@ -38,7 +38,7 @@ class LLMFactory:
     def _load_from_settings(self) -> None:
         """从配置加载提供商"""
         settings = get_settings()
-        self._request_timeout = settings.request_timeout
+        self._request_timeout = settings.llm_request_timeout
         
         # Mock 模式优先
         if settings.mock_mode:

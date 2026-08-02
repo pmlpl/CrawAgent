@@ -88,19 +88,33 @@ class SecurityLane:
             f"耗时 {scan_result.duration_seconds:.1f}s"
         )
 
-        # 4. 生成修复补丁
+        # 4. 生成修复补丁（默认只自动处理低/中危；高危/严重仅报告，见 AutoFixer 白名单）
         patches: List[FixPatch] = []
         patch_files: List[str] = []
+        reported_only: List[Vulnerability] = []
         if generate_patches and scan_result.vulnerabilities:
-            patches = await self.fixer.generate_patches(
+            patches, reported_only = await self.fixer.generate_patches(
                 scan_result.vulnerabilities, scan_task_id=task.id
             )
+
+        # 5. 按等级分组报告（安全页按严重性分级展示）
+        report_by_severity: Dict[str, List[Dict[str, Any]]] = {}
+        for sev in ("critical", "high", "medium", "low", "info"):
+            group = [
+                v.model_dump()
+                for v in scan_result.vulnerabilities
+                if v.severity.value == sev
+            ]
+            if group:
+                report_by_severity[sev] = group
 
         return {
             "task": task,
             "scan_result": scan_result,
             "patches": patches,
             "patch_files": patch_files,
+            "reported_only": [v.model_dump() for v in reported_only],
+            "report_by_severity": report_by_severity,
         }
 
     async def run_task_once(self, task_id: str) -> Dict[str, Any]:

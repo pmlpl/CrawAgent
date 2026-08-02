@@ -14,6 +14,7 @@ ToolRegistry 负责管理工具定义与执行器的注册和查询。
 
 from __future__ import annotations
 
+import asyncio
 import csv as _csv
 import hashlib as _hashlib
 import json as _json
@@ -23,6 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Type
 
 from pydantic import BaseModel, Field, create_model, ConfigDict
+
+from loguru import logger
 
 from crawagent.harness.types import CrawlToolDef, ToolExecMode
 
@@ -137,7 +140,18 @@ SEARCH_TOOL = CrawlToolDef(
                 "default": "local",
                 "description": "搜索范围：local=本地已爬数据，web=互联网",
             },
-            "limit": {"type": "number", "default": 10, "description": "返回结果数"},
+            "limit": {"type": "number", "default": 10, "description": "返回结果数（多引擎时按顺序合并去重后的总数）"},
+            "engine": {
+                "type": "string",
+                "enum": ["duckduckgo", "bing"],
+                "default": "duckduckgo",
+                "description": "互联网搜索引擎（scope=web 时生效）",
+            },
+            "engines": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["duckduckgo", "bing"]},
+                "description": "多个搜索引擎并存，并行查询后合并去重（scope=web 时生效，优先于 engine）",
+            },
         },
         "required": ["query"],
     },
@@ -241,6 +255,7 @@ SUPERVISOR_TOOL = CrawlToolDef(
         "智能爬取调度器（推荐入口）：编排 crawl→analyze→extract→save 的闭环协作。"
         "当用户要求爬取并提取某个网页数据时，优先调用此工具。"
         "它自动处理页面指纹缓存、蓝图生成、置信度反馈、自适应格式存储。"
+        "当用户要求深度爬取/整站抓取/前 N 页时，自动切换到 deep_crawl 引擎。"
     ),
     parameters={
         "type": "object",
@@ -249,7 +264,79 @@ SUPERVISOR_TOOL = CrawlToolDef(
             "instruction": {
                 "type": "string",
                 "default": "",
-                "description": "用户指令（可选，例如: '提取所有文章标题和链接'）",
+                "description": "用户指令（可选，例如: '提取所有文章标题和链接'，含'深度爬取/整站/前 N 页'时自动深爬）",
+            },
+            "max_pages": {
+                "type": "integer",
+                "default": 0,
+                "description": "深爬页数上限（>1 时启用 deep_crawl 引擎；0 表示按指令意图判断）",
+            },
+            "max_depth": {
+                "type": "integer",
+                "default": 3,
+                "description": "深爬最大深度（层）",
+            },
+        },
+        "required": ["url"],
+    },
+    exec_mode=ToolExecMode.SEQUENTIAL,
+    replay_safe=False,
+)
+
+HARVEST_API_TOOL = CrawlToolDef(
+    name="harvest_api",
+    description=(
+        "浏览器 API 捕获工具（强风控/JS 签名站点专用）：在浏览器中打开页面，"
+        "拦截站点前端发出的所有 XHR/fetch 数据接口响应（签名参数由浏览器 JS 自动计算，"
+        "无需人工逆向签名算法）。滚动页面触发分页懒加载，自动从 JSON 响应中提取"
+        "结构化数据列表与媒体直链（视频/音频）。"
+        "当常规 crawl/extract 被风控拦截（验证码、签名参数、壳页）时使用。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "目标页面 URL"},
+            "api_patterns": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "额外的 API 路径特征（如 '/aweme/v1'、'feed'），可选",
+            },
+            "max_scrolls": {
+                "type": "integer",
+                "default": 5,
+                "description": "滚动轮数（触发分页/懒加载 API），0 表示不滚动",
+            },
+        },
+        "required": ["url"],
+    },
+    exec_mode=ToolExecMode.SEQUENTIAL,
+    replay_safe=True,
+)
+
+DEEP_CRAWL_TOOL = CrawlToolDef(
+    name="deep_crawl",
+    description=(
+        "深度爬取工具：对整站/多页进行 BFS/DFS/Best-First 遍历，收集指定页数内的页面产物并批量保存。"
+        "当用户要求'深度爬取/整站抓取/抓取前 N 页/批量抓取/深爬'时使用。"
+        "返回每页的 URL/标题/深度/状态码摘要，页面 Markdown 产物自动落盘到 output/deep_crawl/。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "目标种子 URL（起始页）"},
+            "strategy": {
+                "type": "string",
+                "enum": ["bfs", "dfs", "best_first"],
+                "default": "bfs",
+                "description": "遍历策略：bfs 广度优先 / dfs 深度优先 / best_first 按价值打分优先",
+            },
+            "max_pages": {"type": "integer", "default": 20, "description": "最多抓取页数"},
+            "max_depth": {"type": "integer", "default": 3, "description": "最大抓取深度（层）"},
+            "same_domain_only": {"type": "boolean", "default": True, "description": "是否仅抓取同域名页面"},
+            "instruction": {
+                "type": "string",
+                "default": "",
+                "description": "用户指令（可选，用于保存路径组织）",
             },
         },
         "required": ["url"],
@@ -485,6 +572,50 @@ async def extract_executor(args: Dict[str, Any]) -> Dict[str, Any]:
     url = args.get("url", "")
     schema_data = args.get("schema", {})
 
+    # 0. 图片专用快路径：method=images 直接走 extract_images（不依赖蓝图，规则驱动）
+    _method = (args.get("method") or "").lower()
+    if _method in ("images", "image", "imgs", "img"):
+        extractor = CompositeExtractor()
+        try:
+            imgs = extractor.extract_images(
+                url=url,
+                html=html,
+                min_width=int(args.get("min_width") or 50),
+                min_height=int(args.get("min_height") or 50),
+                max_images=int(args.get("max_images") or 500),
+            )
+        except Exception as e:
+            return {
+                "content": f"图片提取失败: {e}",
+                "error": True,
+                "status_code": STATUS_FAILED,
+            }
+        items = imgs
+        count = len(items)
+        # 置信度：有懒加载属性/meta/jsonld 命中 → 高，纯背景图 → 低
+        kinds = [i.get("kind", "") for i in items]
+        hi_ratio = sum(1 for k in kinds if k in ("lazy", "srcset", "og", "twitter", "jsonld")) / max(count, 1)
+        confidence = min(100.0, (30.0 + min(count * 5, 50) + int(hi_ratio * 20)))
+        if count == 0:
+            return {
+                "content": "未从页面中提取到图片",
+                "status_code": STATUS_NEED_REANALYSIS,
+                "confidence": 0.0,
+                "failed_fields": ["images"],
+                "items_count": 0,
+                "method": "images",
+                "hints": ["请尝试 use_browser=True 重新抓取（图片可能是 JS 懒加载）"],
+            }
+        return {
+            "content": f"提取 {count} 张图片（预览前 5 张）: "
+            + _json.dumps(items[:5], ensure_ascii=False, default=str)[:2000],
+            "status_code": STATUS_OK,
+            "confidence": confidence,
+            "count": count,
+            "method": "images",
+            "items": items,
+        }
+
     # 1. 优先从蓝图读取策略和选择器
     blueprint_data = args.get("blueprint")
     blueprint: Optional[ExtractionBlueprint] = None
@@ -527,11 +658,16 @@ async def extract_executor(args: Dict[str, Any]) -> Dict[str, Any]:
 
     extractor = CompositeExtractor()
     try:
+        # table 策略（analyze 表格检测推荐）走单策略提取；其余保持默认回退链
+        extract_kwargs = {}
+        if method == "table":
+            extract_kwargs["strategy"] = "table"
         results = extractor.extract(
             url=url,
             html=html,
             selectors=selectors,
             target_schema=target_schema,
+            **extract_kwargs,
         )
     except Exception as e:
         return {
@@ -634,6 +770,13 @@ async def analyze_executor(args: Dict[str, Any]) -> Dict[str, Any]:
             "graphql": "llm",
         }
         recommended = strategy_map.get(analysis.data_source.value, "css")
+
+        # 规则增强：表格结构检测（LLM 可能推荐 css，但 <table> 页面 css 提取只会取到碎片）
+        if html and "</table>" in html.lower():
+            from crawagent.core.extractor import CompositeExtractor
+            if CompositeExtractor._has_table(html):
+                recommended = "table"
+                logger.info("[Analyze] 检测到表格结构 → recommended_strategy=table")
 
         blueprint = ExtractionBlueprint(
             page_signature=page_signature,
@@ -814,6 +957,225 @@ async def save_executor(args: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+async def deep_crawl_executor(args: Dict[str, Any]) -> Dict[str, Any]:
+    """deep_crawl 工具执行器：整站/多页深度爬取
+
+    使用 DeepCrawler 引擎（BFS/DFS/Best-First）遍历指定页数内的页面，
+    每页自动生成干净 Markdown 并批量落盘到 output/deep_crawl/{domain}/{date}/，
+    返回统计 + 页面摘要（URL/标题/深度/状态码/本地文件路径）。
+
+    Args:
+        url: 目标种子 URL
+        strategy: bfs / dfs / best_first
+        max_pages: 最多抓取页数
+        max_depth: 最大抓取深度
+        same_domain_only: 是否仅抓同域名
+        instruction: 用户指令（用于保存路径组织）
+    """
+    from crawagent.core.deep_crawl import DeepCrawler, DeepCrawlStrategy
+    from crawagent.core.fetcher import Fetcher
+
+    url = (args.get("url") or "").strip()
+    if not url:
+        return {"content": "Error: missing 'url' argument", "error": True, "status_code": STATUS_FAILED}
+
+    strategy_name = str(args.get("strategy", "bfs")).lower()
+    strategy = {
+        "bfs": DeepCrawlStrategy.BFS,
+        "dfs": DeepCrawlStrategy.DFS,
+        "best_first": DeepCrawlStrategy.BEST_FIRST,
+    }.get(strategy_name, DeepCrawlStrategy.BFS)
+
+    max_pages = max(1, int(args.get("max_pages", 20)))
+    max_depth = max(1, int(args.get("max_depth", 3)))
+    same_domain_only = bool(args.get("same_domain_only", True))
+    instruction = str(args.get("instruction", "") or "")
+    output_dir = str(args.get("output_dir", "./output"))
+
+    # Fetcher 懒初始化客户端；DeepCrawler 内部调用 fetcher.fetch(url)
+    fetcher = Fetcher()
+    crawler = DeepCrawler(
+        fetcher=fetcher,
+        strategy=strategy,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        same_domain_only=same_domain_only,
+    )
+
+    try:
+        result = await crawler.crawl(url)
+    except Exception as e:
+        logger.exception(f"[DeepCrawl] 执行异常: {e}")
+        return {"content": f"深爬执行失败: {e}", "error": True, "status_code": STATUS_FAILED}
+    finally:
+        try:
+            await fetcher.close()
+        except Exception:
+            pass
+
+    # ---- 批量保存页面产物（Markdown 落盘）----
+    from pathlib import Path
+    from urllib.parse import urlparse
+    from datetime import date
+
+    from crawagent.core.content_filter import PruningContentFilter
+    from crawagent.core.markdown_generator import MarkdownGenerator
+
+    domain = (urlparse(url).netloc or "site").replace("www.", "")
+    out_root = Path(output_dir) / "deep_crawl" / domain
+    date_str = date.today().isoformat()
+    saved: List[Dict[str, Any]] = []
+    _ILLEGAL = '\\/:*?"<>|'
+
+    for idx, page in enumerate(result.pages[:max_pages]):
+        entry: Dict[str, Any] = {
+            "url": page.url,
+            "title": page.title,
+            "status_code": page.status_code,
+            "depth": page.depth,
+            "error": page.error or "",
+            "parent_url": page.parent_url,
+        }
+        if page.html and 200 <= page.status_code < 300:
+            try:
+                clean_html = PruningContentFilter().filter_content(page.html)
+                md = MarkdownGenerator(max_length=200_000).generate(
+                    clean_html, url=page.url, title=page.title, clean=False
+                )
+                safe_title = "".join(c for c in (page.title or "").strip()[:60] if c not in _ILLEGAL).strip()
+                safe_title = safe_title or f"page_{idx + 1}"
+                file_path = out_root / date_str / f"{idx + 1:03d}_{safe_title}.md"
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(md, encoding="utf-8")
+                entry["file"] = str(file_path)
+            except Exception as e:
+                entry["error"] = f"markdown 生成失败: {e}"
+        saved.append(entry)
+
+    stats = result.stats
+    summary_lines = [
+        result.to_summary(),
+        f"已保存 {len(saved)} 个页面产物 → {out_root}",
+        "",
+        "页面列表（前 20 条）：",
+    ]
+    for p in saved[:20]:
+        summary_lines.append(
+            f"  [{p['status_code']}] d{p['depth']} {p['title'] or '(无标题)'} {p['url']}"
+        )
+    if len(saved) > 20:
+        summary_lines.append(f"  ... 共 {len(saved)} 页")
+
+    # 失败页面 URL 写入 frontier 重试队列（P1-4：断点续抓 / 失败重试），
+    # 调用方可后续通过 /api/agent/resume 恢复
+    retry_queue: List[str] = []
+    try:
+        from crawagent.core.frontier import SQLiteFrontier
+        frontier = SQLiteFrontier()
+        await frontier.initialize()
+        failed_pages = [
+            p for p in result.pages
+            if p.error or not (200 <= p.status_code < 400)
+        ]
+        for p in failed_pages[:50]:  # 限制入队数量
+            added = await frontier.add_url(
+                url=p.url, depth=p.depth, parent_url=p.parent_url, priority=0
+            )
+            if added:
+                retry_queue.append(p.url)
+        await frontier.close()
+        if retry_queue:
+            summary_lines.append(f"已写入重试队列 {len(retry_queue)} 个失败 URL（可 /api/agent/resume 恢复）")
+    except Exception as e:
+        logger.debug(f"[DeepCrawl] 失败 URL 入队失败: {e}")
+
+    return {
+        "content": "\n".join(summary_lines),
+        "status_code": STATUS_OK,
+        "stats": {
+            "strategy": strategy.value,
+            "pages_crawled": stats.pages_crawled,
+            "urls_enqueued": stats.urls_enqueued,
+            "urls_filtered": stats.urls_filtered,
+            "urls_deduped": stats.urls_deduped,
+            "errors": stats.errors,
+            "max_depth_reached": stats.max_depth_reached,
+            "duration_seconds": round(stats.duration_seconds, 2),
+        },
+        "pages": saved,
+        "saved_count": len(saved),
+        "output_dir": str(out_root),
+        "retry_queue": retry_queue,
+        "retry_queue_count": len(retry_queue),
+    }
+
+
+async def harvest_api_executor(args: Dict[str, Any]) -> Dict[str, Any]:
+    """harvest_api 工具执行器：浏览器拦截站点 API 响应（强风控/JS 签名站点）
+
+    签名参数由浏览器 JS 自动计算，无需人工逆向；滚动触发分页；
+    自动提取结构化列表与媒体直链。
+    """
+    from crawagent.core.api_harvester import BrowserAPIHarvester
+
+    url = args.get("url", "")
+    if not url:
+        return {"content": "Error: missing 'url' argument", "error": True, "status_code": STATUS_FAILED}
+
+    api_patterns = args.get("api_patterns") or []
+    if isinstance(api_patterns, str):
+        api_patterns = [p.strip() for p in api_patterns.split(",") if p.strip()]
+    max_scrolls = int(args.get("max_scrolls", 5) or 5)
+
+    try:
+        harvester = BrowserAPIHarvester()
+        result = await harvester.harvest(
+            url,
+            api_patterns=api_patterns,
+            max_scrolls=max_scrolls,
+        )
+    except Exception as e:
+        logger.exception(f"[HarvestAPI] 执行失败: {e}")
+        return {
+            "content": f"harvest_api 执行失败: {e}",
+            "error": True,
+            "status_code": STATUS_FAILED,
+            "url": url,
+        }
+
+    lines = [
+        f"API 捕获完成: {url}",
+        f"  API 响应: {len(result.api_calls)} 条",
+        f"  结构化数据: {len(result.items)} 条",
+        f"  媒体直链: {len(result.media_urls)} 条",
+        f"  风控特征: {'检测到' if result.risk_detected else '无'}",
+    ]
+    if result.media_urls:
+        lines.append("  媒体直链（前 10 条）:")
+        for m in result.media_urls[:10]:
+            lines.append(f"    [{m['key']}] {m['url'][:120]}")
+    if result.items:
+        lines.append("  数据样例（前 3 条）:")
+        import json as _json
+        for it in result.items[:3]:
+            lines.append("    " + _json.dumps(it, ensure_ascii=False)[:200])
+
+    return {
+        "content": "\n".join(lines),
+        "status_code": STATUS_OK if result.success else STATUS_FAILED,
+        "url": url,
+        "api_calls": [
+            {"url": c.url, "status": c.status} for c in result.api_calls[:50]
+        ],
+        "items": result.items[:200],
+        "media_urls": result.media_urls[:100],
+        "items_count": len(result.items),
+        "media_count": len(result.media_urls),
+        "risk_detected": result.risk_detected,
+        "error": result.error,
+    }
+
+
 def _infer_format(data: Any) -> str:
     """根据数据 Schema 推断存储格式
 
@@ -914,10 +1276,13 @@ def _record_hash(rec: Dict) -> str:
 # 图片字段命名约定（大小写不敏感匹配），兼容主流提取器输出
 _IMAGE_LIST_FIELDS = (
     "images", "image_urls", "thumbnails", "imgs", "photos", "pictures", "pics",
+    "srcs",
 )
 _IMAGE_SINGLE_FIELDS = (
     "image", "image_url", "img", "img_url",
     "thumbnail", "thumbnail_url", "cover", "logo", "avatar",
+    "src",  # extract_images() 标准输出主字段
+    "data_src", "data-src", "image_src", "href",
 )
 
 
@@ -971,20 +1336,27 @@ async def _maybe_download_images(
     failed = 0
     paths: List[str] = []
     for rec, url, hint in download_tasks:
-        try:
-            result = await dl.download(url, title=hint)
-            if result.get("success"):
-                downloaded += 1
-                paths.append(result["path"])
-                # 回填相对路径（便于跨机器使用）
-                rel_path = os.path.relpath(result["path"], base_dir)
-                rec.setdefault("local_images", []).append(rel_path)
-            else:
-                failed += 1
-                logger.debug(f"图片下载失败 {url}: {result.get('error')}")
-        except Exception as e:
+        # 失败重试机制（P1-4）：每张图最多尝试 3 次（1 次 + 2 次重试），
+        # 短暂退避后重试，容忍瞬时网络抖动/限流
+        result: Dict[str, Any] = {"success": False, "error": "not attempted"}
+        for attempt in range(3):
+            try:
+                result = await dl.download(url, title=hint)
+                if result.get("success"):
+                    break
+            except Exception as e:
+                result = {"success": False, "error": str(e)}
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (attempt + 1))
+        if result.get("success"):
+            downloaded += 1
+            paths.append(result["path"])
+            # 回填相对路径（便于跨机器使用）
+            rel_path = os.path.relpath(result["path"], base_dir)
+            rec.setdefault("local_images", []).append(rel_path)
+        else:
             failed += 1
-            logger.debug(f"图片下载异常 {url}: {e}")
+            logger.debug(f"图片下载失败（已重试） {url}: {result.get('error')}")
 
     return {
         "downloaded": downloaded,
@@ -1033,17 +1405,22 @@ class CrawlSupervisor:
         self,
         blueprint_cache: Optional[ExtractionBlueprintCache] = None,
         output_dir: str = "./output",
+        profile_store: Optional["SiteProfileStore"] = None,  # noqa: F821
     ) -> None:
         self.blueprint_cache = blueprint_cache or ExtractionBlueprintCache()
         self.output_dir = output_dir
+        self._profile_store = profile_store
 
-    async def run(self, url: str, instruction: str = "", use_browser: bool = False) -> Dict[str, Any]:
+    async def run(self, url: str, instruction: str = "", use_browser: bool = False,
+                  max_pages: int = 0, max_depth: int = 3) -> Dict[str, Any]:
         """主调度入口
 
         Args:
             url: 目标 URL
             instruction: 用户指令（可选，用于决定输出文件名）
             use_browser: 强制启用浏览器模式（AntiBot hook 注入时为 True）
+            max_pages: 深爬页数上限（>1 时启用 deep_crawl 引擎；0 表示按指令意图判断）
+            max_depth: 深爬最大深度（层）
 
         Returns:
             Dict 包含各阶段结果和最终状态
@@ -1055,6 +1432,56 @@ class CrawlSupervisor:
             "instruction": instruction,
             "stages": {},
         }
+
+        # 智能意图识别：用户指令中明确提到"图/图片/壁纸/截图/海报/封面/背景图/image/wallpaper"时
+        # 默认启用浏览器模式 + 专用图片提取方法（避免懒加载图拿不到）
+        _instr_lower = (instruction or "").lower()
+        IMAGE_KEYWORDS = (
+            "图片", "图像", "壁纸", "图 ", "截图", "海报", "封面", "背景图", "插图", "相片", "照片",
+            "image", "images", "img", "picture", "pic", "photo", "wallpaper", "thumbnail",
+        )
+        is_image_intent = any(k in _instr_lower for k in IMAGE_KEYWORDS)
+        preferred_extract_method: Optional[str] = None
+        if is_image_intent:
+            use_browser = True
+            preferred_extract_method = "images"
+            logger.info("[Supervisor] 意图: 图片抓取 → 强制 use_browser=True, method=images")
+
+        # ========== 0. 深爬意图识别（deep_crawl 引擎，P0-2） ==========
+        DEEP_CRAWL_KEYWORDS = (
+            "深度爬取", "深爬", "整站", "全站", "全站抓取", "批量抓取",
+            "所有页面", "全部页面", "deep_crawl", "deep crawl", "多页",
+        )
+        want_deep = max_pages > 1
+        # 指令中显式提到"前 N 页"
+        import re as _re
+        _m = _re.search(r"前\s*(\d+)\s*(个)?页", instruction or "")
+        if _m:
+            max_pages = int(_m.group(1))
+            want_deep = True
+        if not want_deep:
+            want_deep = any(k in _instr_lower for k in DEEP_CRAWL_KEYWORDS)
+        if want_deep:
+            logger.info(f"[Supervisor] 深爬意图: url={url}, max_pages={max_pages or 20}, depth={max_depth}")
+            deep_args: Dict[str, Any] = {
+                "url": url,
+                "max_pages": max_pages or 20,
+                "max_depth": max_depth or 3,
+                "instruction": instruction,
+                "output_dir": self.output_dir,
+            }
+            deep_result = await deep_crawl_executor(deep_args)
+            result["stages"]["deep_crawl"] = _summarize(
+                deep_result, ["stats", "saved_count", "output_dir"]
+            )
+            if deep_result.get("status_code") == STATUS_OK:
+                result["status_code"] = STATUS_OK
+                result["content"] = deep_result.get("content", "")
+                result["items"] = deep_result.get("pages", [])
+                result["deep_crawl"] = deep_result
+                return result
+            # 深爬失败 → 降级走单页流程
+            logger.warning(f"[Supervisor] 深爬失败，降级单页流程: {deep_result.get('content')}")
 
         # ========== 1. crawl ==========
         logger.info(f"[Supervisor] 1/5 crawl: {url} (use_browser={use_browser})")
@@ -1114,9 +1541,10 @@ class CrawlSupervisor:
             else:
                 result["stages"]["blueprint"] = {"status": "failed", "error": analyze_result.get("content", "")}
 
-        # ========== 4. extract（带 NEED_REANALYSIS 重试） ==========
+        # ========== 4. extract（带 NEED_REANALYSIS 重试 + 浏览器兜底） ==========
         retry_count = 0
         extract_result: Dict[str, Any] = {}
+        browser_upgraded = False  # 是否已完成 HTTP→浏览器 升级兜底
         while retry_count <= self.MAX_REANALYSIS_RETRIES:
             logger.info(f"[Supervisor] 4/5 extract (attempt {retry_count + 1})")
             extract_args = {
@@ -1124,6 +1552,9 @@ class CrawlSupervisor:
                 "url": url,
                 "blueprint": blueprint.to_dict() if blueprint else None,
             }
+            # 注入用户意图驱动的提取方法（例如图片站强制 images）
+            if preferred_extract_method:
+                extract_args["method"] = preferred_extract_method
             extract_result = await extract_executor(extract_args)
             status = extract_result.get("status_code")
 
@@ -1162,11 +1593,76 @@ class CrawlSupervisor:
                 continue
 
             # 重试次数耗尽或非 NEED_REANALYSIS 错误
+            # —— 新增兜底：当前是 HTTP 抓取且疑似需要 JS 渲染/懒加载 → 自动 use_browser=True 重跑
+            if not browser_upgraded and not use_browser:
+                _hints = [str(extract_result.get("hints") or "")]
+                _html_len = len(html or "")
+                # 用 clean 后 markdown 长度判断正文稀疏度：原始 HTML 的 text_content()
+                # 会混入导航/页脚/内嵌 JSON 等噪声（SPA 壳页剔除 script 后仍可能上千字符），
+                # 导致 looks_spa 误判为 False，浏览器自动升级兜底失效
+                _body_len = len(markdown or "")
+                _looks_spa = (
+                    _html_len > 0 and _body_len < 800
+                ) or any("browser" in h.lower() or "懒加载" in h for h in _hints)
+                _looks_images_empty = preferred_extract_method == "images" and extract_result.get(
+                    "count", 0) == 0
+                # 提取条数过少（<5）+ 页面疑似列表/表格页（含 <table> 或链接密集）
+                # → 判定提取不完整，自动升级浏览器重抓（LLM 兜底常从壳页提取 1 条垃圾数据）
+                _count = extract_result.get("count", 0) or 0
+                _looks_list_page = (
+                    ("<table" in (html or "").lower())
+                    or (crawl_result.get("links_count", 0) or 0) >= 20
+                )
+                _count_too_low = _looks_list_page and 0 < _count < 5
+                if _looks_spa or _looks_images_empty or is_image_intent or _count_too_low:
+                    logger.warning(
+                        f"[Supervisor] HTTP 提取失败（looks_spa={_looks_spa}, "
+                        f"images_empty={_looks_images_empty}, count_too_low={_count_too_low}）"
+                        f"→ 自动升级 use_browser=True 重抓"
+                    )
+                    browser_upgraded = True
+                    result["stages"].setdefault("upgrade", {})["reason"] = (
+                        "lazy-load/spa detected, upgrading to Playwright browser"
+                    )
+                    try:
+                        crawl2 = await crawl_executor({"url": url, "use_browser": True})
+                    except Exception as e:
+                        logger.warning(f"[Supervisor] 升级浏览器抓取异常: {e}")
+                        crawl2 = {}
+                    if crawl2.get("status_code") == STATUS_OK:
+                        html2 = crawl2.get("html", crawl2.get("content", ""))
+                        if html2 and len(html2) > _html_len:
+                            html = html2
+                            page_signature2 = crawl2.get("page_signature", "")
+                            if page_signature2:
+                                page_signature = page_signature2
+                            # 重新 clean
+                            clean_html = PruningContentFilter().filter_content(html)
+                            markdown = MarkdownGenerator(max_length=200_000).generate(
+                                clean_html, url=url, title=crawl2.get("title", ""), clean=False
+                            )
+                            result["clean_html"] = clean_html
+                            result["markdown"] = markdown
+                            result["stages"]["crawl2"] = _summarize(
+                                crawl2, ["status", "strategy", "page_signature", "title"]
+                            )
+                            # 图片意图 → 图片专用方法；否则也强制 images 若 images 字段失败
+                            if not preferred_extract_method and "images" in (
+                                extract_result.get("failed_fields") or []
+                            ):
+                                preferred_extract_method = "images"
+                            # 升级后重置 retry 从 0 开始走一次新的 analyze + extract
+                            retry_count = 0
+                            blueprint = None  # 新 HTML 结构可能不同，让 analyze 重新生成蓝图
+                            continue
+
             result["stages"]["extract"] = _summarize(
                 extract_result, ["confidence", "failed_fields"]
             )
             result["status_code"] = status or STATUS_FAILED
             result["content"] = extract_result.get("content", "提取失败")
+            result["items"] = extract_result.get("items", []) if isinstance(extract_result.get("items"), list) else []
+            result["count"] = len(result["items"])
             return result
 
         # ========== 5. save ==========
@@ -1175,17 +1671,44 @@ class CrawlSupervisor:
         # 保存 Markdown 内容（若有）
         markdown_content = result.get("markdown", "")
         title = crawl_result.get("title", "") or ""
-        # 推断输出路径：用 FileOrganizer 模板引擎（按 domain/date/title 组织）
-        output_path = self._decide_output_path(url, title=title, ext="md")
-        save_args = {
+
+        # 判断是否为图片提取结果（extract_images/method=images 产物），用 JSON 保存便于后续解析
+        _extract_method = str(extract_result.get("method") or "")
+        _first = items[0] if items and isinstance(items, list) else None
+        _is_images = (
+            _extract_method in ("images", "image", "imgs", "img")
+            or (isinstance(_first, dict) and "src" in _first and "kind" in _first)
+        )
+        if _is_images:
+            # 图片条目：用 JSON 保存到 images/{domain}/{date}/{title}.json
+            # （同级 images/ 子目录就是实际下载图片的位置，路径组织清晰）
+            try:
+                from crawagent.output.organizer import FileOrganizer
+                org = FileOrganizer(base_dir=self.output_dir)
+                safe_title = title or "images"
+                output_path = org.render(
+                    "images/{domain}/{date}/{title}.json",
+                    url=url,
+                    title=safe_title,
+                    ext="json",
+                )
+            except Exception as e:
+                logger.debug(f"FileOrganizer 渲染失败，回退原逻辑: {e}")
+                output_path = self._decide_output_path(url, title=title or "images", ext="json")
+            save_fmt = "json"
+        else:
+            output_path = self._decide_output_path(url, title=title, ext="md")
+            save_fmt = "markdown"
+
+        save_args: Dict[str, Any] = {
             "data": items,
             "path": output_path,
             "url": url,
             "title": title,
-            "format": "markdown",
+            "format": save_fmt,
         }
-        # 若有 Markdown 内容且 items 为空，用 content 模式保存
-        if markdown_content and not items:
+        # 若有 Markdown 内容且 items 为空，用 content 模式保存（非图片模式）
+        if markdown_content and not items and not _is_images:
             save_args = {
                 "content": markdown_content,
                 "path": output_path,
@@ -1195,11 +1718,72 @@ class CrawlSupervisor:
             }
         save_result = await save_executor(save_args)
         result["stages"]["save"] = _summarize(
-            save_result, ["path", "format", "written", "skipped"]
+            save_result,
+            ["path", "format", "written", "skipped",
+             "images_downloaded", "images_failed", "images_dir"],
         )
+        # 回填结构化数据：save 成功后 items 供 API/前端直接消费
+        result["items"] = items if isinstance(items, list) else []
+        result["count"] = len(items) if isinstance(items, list) else 0
         result["status_code"] = save_result.get("status_code", STATUS_OK)
         result["content"] = save_result.get("content", "")
         result["output_path"] = save_result.get("path", "")
+        if save_result.get("images_downloaded") or save_result.get("images_dir"):
+            result["images_dir"] = save_result.get("images_dir", "")
+            result["images_downloaded"] = save_result.get("images_downloaded", 0)
+            result["images_failed"] = save_result.get("images_failed", 0)
+
+        # 图片抓取意图完成后，给 LLM 一个明确的中文总结，避免反复 search/supervisor 死循环
+        if result["status_code"] == STATUS_OK and (is_image_intent or _is_images):
+            cnt = len(items) if isinstance(items, list) else 0
+            dl = result.get("images_downloaded", 0) or 0
+            dl_dir = result.get("images_dir", "") or save_result.get("images_dir", "") or ""
+            out_path = result.get("output_path", "")
+            previews = []
+            for it in (items if isinstance(items, list) else [])[:3]:
+                if isinstance(it, dict) and it.get("src"):
+                    previews.append(f"- {it.get('alt') or it.get('title') or '（无标题）'}: {str(it.get('src'))[:80]}")
+            preview_block = "\n".join(previews) if previews else "(无预览)"
+            summary_lines = [
+                f"✅ 图片抓取完成（{cnt} 条记录，已下载 {dl} 张到本地）。",
+                f"数据 JSON：{out_path}",
+            ]
+            if dl_dir:
+                summary_lines.append(f"图片目录：{dl_dir}")
+            summary_lines.append("预览样例：")
+            summary_lines.append(preview_block)
+            summary_lines.append("\n（如需爬取更多分页，可指定具体分类/列表页 URL。当前页面已完成抓取）")
+            result["content"] = "\n".join(summary_lines)
+            result.setdefault("data", {})
+            if isinstance(result["data"], dict):
+                result["data"]["summary"] = result["content"]
+                result["data"]["items_count"] = cnt
+                result["data"]["images_downloaded"] = dl
+                result["data"]["output_path"] = out_path
+                result["data"]["images_dir"] = dl_dir
+
+        # ========== 6. 网站画像自动发现（静默进行，不阻塞主流程） ==========
+        try:
+            from crawagent.core.site_profile import SiteProfile, get_profile_store
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc.lower().replace("www.", "")
+            store = self._profile_store or get_profile_store()
+            profile = await store.async_get_or_discover(domain, url=url, html=html)
+            # 更新已知路由
+            if crawl_result.get("page_signature"):
+                path = urlparse(url).path or "/"
+                store.add_route(domain, path)
+            result["site_profile"] = {
+                "domain": profile.domain,
+                "spa_type": profile.spa_type,
+                "image_loading": profile.image_loading,
+                "anti_bot_level": profile.anti_bot_level,
+                "nav_links_count": len(profile.nav_links),
+                "known_routes": profile.known_routes,
+            }
+        except Exception:
+            pass
+
         return result
 
     def _decide_output_path(self, url: str, title: str = "", ext: str = "md") -> str:
@@ -1244,6 +1828,7 @@ def _summarize(result: Dict, keys: List[str]) -> Dict[str, Any]:
 # （危险调用由 SecurityHook 拦截/确认）
 LLM_CALLABLE_TOOLS = {
     "supervisor",
+    "deep_crawl",
     "search",
     "monitor",
     "check_change",
@@ -1299,8 +1884,12 @@ def to_langchain_tools(tool_defs: List[CrawlToolDef]) -> List[Any]:
     """
     from langchain_core.tools import StructuredTool
 
+    # 工具 schema 顺序规范化（对齐 Reasonix normalizeToolSchemas）：
+    # provider 可见的工具顺序影响 prompt-cache shape，按 name 排序保证稳定。
+    sorted_defs = sorted(tool_defs, key=lambda td: td.name)
+
     tools: List[Any] = []
-    for td in tool_defs:
+    for td in sorted_defs:
         if td.name not in LLM_CALLABLE_TOOLS:
             continue
         args_schema = _build_args_schema(td)
@@ -1319,6 +1908,174 @@ def to_langchain_tools(tool_defs: List[CrawlToolDef]) -> List[Any]:
     return tools
 
 
+# ==================== 互联网搜索 ====================
+
+_WEB_SEARCH_ENDPOINTS = {
+    "duckduckgo": "https://html.duckduckgo.com/html/",
+    "bing": "https://www.bing.com/search",
+}
+
+_WEB_SEARCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
+def _parse_search_results(html: str, engine: str, limit: int) -> List[Dict[str, Any]]:
+    """解析搜索引擎 HTML 结果页 → 结构化结果列表（纯函数，便于单测）。
+
+    - duckduckgo: `a.result__a` 标题链接 + `a.result__snippet` 摘要；
+      结果链接为 uddg 跳转包装，自动还原真实 URL。
+    - bing: `li.b_algo h2 a` 标题链接 + `.b_caption p` 摘要。
+    """
+    from bs4 import BeautifulSoup
+    from urllib.parse import parse_qs, urlparse
+
+    soup = BeautifulSoup(html, "lxml")
+    results: List[Dict[str, Any]] = []
+
+    if engine == "duckduckgo":
+        for a in soup.select("a.result__a"):
+            if len(results) >= limit:
+                break
+            url = a.get("href", "")
+            if "uddg=" in url:  # DDG 跳转包装，取真实目标 URL
+                qs = parse_qs(urlparse(url).query)
+                real = qs.get("uddg", [""])[0]
+                if real:
+                    url = real
+            snippet = ""
+            parent = a.find_parent("div", class_="result")
+            if parent:
+                sn = parent.select_one("a.result__snippet")
+                snippet = sn.get_text(" ", strip=True) if sn else ""
+            results.append({
+                "title": a.get_text(" ", strip=True),
+                "url": url,
+                "snippet": snippet,
+            })
+    elif engine == "bing":
+        for li in soup.select("li.b_algo"):
+            if len(results) >= limit:
+                break
+            h2 = li.select_one("h2 a")
+            if not h2:
+                continue
+            cap = li.select_one(".b_caption p")
+            snippet = cap.get_text(" ", strip=True) if cap else ""
+            results.append({
+                "title": h2.get_text(" ", strip=True),
+                "url": h2.get("href", ""),
+                "snippet": snippet,
+            })
+    return results
+
+
+async def _web_search(
+    query: str,
+    engine: str = "duckduckgo",
+    limit: int = 10,
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    """执行单个搜索引擎查询（禁用系统代理，按项目约定 trust_env=False）。"""
+    import httpx
+
+    if engine not in _WEB_SEARCH_ENDPOINTS:
+        return {"ok": False, "error": f"未知搜索引擎: {engine}", "results": []}
+
+    params: Dict[str, str] = {"q": query}
+    if engine == "duckduckgo":
+        params["kl"] = "cn-zh"
+
+    try:
+        async with httpx.AsyncClient(
+            trust_env=False,
+            timeout=timeout,
+            follow_redirects=True,
+            headers=_WEB_SEARCH_HEADERS,
+        ) as client:
+            resp = await client.get(_WEB_SEARCH_ENDPOINTS[engine], params=params)
+            resp.raise_for_status()
+        results = _parse_search_results(resp.text, engine, limit)
+        return {"ok": True, "engine": engine, "query": query, "results": results}
+    except Exception as e:
+        logger.warning(f"互联网搜索失败 ({engine}, query={query[:50]}): {e}")
+        return {"ok": False, "engine": engine, "query": query, "error": str(e), "results": []}
+
+
+def _normalize_url_for_dedup(url: str) -> str:
+    """URL 归一化用于跨引擎去重：小写主机 + 去 www 前缀 + 去尾部斜杠。"""
+    from urllib.parse import urlparse
+
+    try:
+        p = urlparse(url)
+        host = (p.netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        path = p.path.rstrip("/")
+        return f"{p.scheme}://{host}{path}"
+    except Exception:
+        return url.strip().lower().rstrip("/")
+
+
+async def _web_search_multi(
+    query: str,
+    engines: List[str],
+    limit: int = 10,
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    """多个搜索引擎并存：并行查询 → 按引擎顺序合并 → URL 去重 → 截断到 limit。
+
+    任一引擎成功即视为整体成功；失败引擎降级忽略（结果带 engine 标记便于溯源）。
+    """
+    engines = [e for e in engines if e in _WEB_SEARCH_ENDPOINTS]
+    if not engines:
+        return {"ok": False, "query": query, "engines": [], "error": "未指定有效的搜索引擎", "results": []}
+
+    raw_results = await asyncio.gather(
+        *[_web_search(query, e, limit=limit, timeout=timeout) for e in engines]
+    )
+
+    merged: List[Dict[str, Any]] = []
+    seen: set = set()
+    failed: List[str] = []
+    ok_any = False
+
+    for engine, res in zip(engines, raw_results):
+        if not res["ok"]:
+            failed.append(engine)
+            continue
+        ok_any = True
+        for r in res["results"]:
+            key = _normalize_url_for_dedup(r.get("url", ""))
+            if key and key in seen:
+                continue
+            seen.add(key)
+            merged.append({**r, "engine": engine})
+            if len(merged) >= limit:
+                break
+        if len(merged) >= limit:
+            break
+
+    if not ok_any:
+        detail = "; ".join(failed) or "全部搜索引擎失败"
+        return {
+            "ok": False, "query": query, "engines": engines,
+            "error": detail, "results": [],
+        }
+
+    return {
+        "ok": True,
+        "query": query,
+        "engines": engines,
+        "failed": failed,
+        "results": merged,
+    }
+
+
 # ==================== 默认工具注册表 ====================
 
 def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
@@ -1334,18 +2091,29 @@ def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
     registry.register(EXTRACT_TOOL, executor=extract_executor)
     registry.register(ANALYZE_TOOL, executor=analyze_executor)
     registry.register(SAVE_TOOL, executor=save_executor)
+    # 深爬引擎工具（P0-2：暴露给 LLM，supervisor 内部也会调用）
+    registry.register(DEEP_CRAWL_TOOL, executor=deep_crawl_executor)
+    # 浏览器 API 捕获工具（P9：强风控 / JS 签名站点，签名由浏览器自动计算）
+    registry.register(HARVEST_API_TOOL, executor=harvest_api_executor)
 
     # 注册 Supervisor（外部唯一入口，暴露给 LLM）
-    supervisor = CrawlSupervisor(output_dir=output_dir)
+    from crawagent.core.site_profile import get_profile_store
+    _profile_store = get_profile_store()
+    supervisor = CrawlSupervisor(output_dir=output_dir, profile_store=_profile_store)
 
     async def supervisor_executor(args: Dict[str, Any]) -> Dict[str, Any]:
         """Supervisor 执行器：调用 CrawlSupervisor.run"""
         url = args.get("url", "")
         instruction = args.get("instruction", "")
         use_browser = bool(args.get("use_browser", False))
+        max_pages = int(args.get("max_pages", 0) or 0)
+        max_depth = int(args.get("max_depth", 3) or 3)
         if not url:
             return {"content": "Error: missing 'url' argument", "error": True, "status_code": STATUS_FAILED}
-        return await supervisor.run(url=url, instruction=instruction, use_browser=use_browser)
+        return await supervisor.run(
+            url=url, instruction=instruction, use_browser=use_browser,
+            max_pages=max_pages, max_depth=max_depth,
+        )
 
     registry.register(SUPERVISOR_TOOL, executor=supervisor_executor)
 
@@ -1359,12 +2127,40 @@ def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
             return {"content": "Error: missing 'query' argument", "error": True, "status_code": STATUS_FAILED}
 
         if scope == "web":
+            # 多引擎并存：优先 engines 数组；兼容单值 engine 与逗号分隔字符串
+            engines = args.get("engines") or [args.get("engine", "duckduckgo")]
+            if isinstance(engines, str):
+                engines = [e.strip() for e in engines.split(",") if e.strip()]
+            elif not isinstance(engines, list):
+                engines = [engines]
+            search_res = await _web_search_multi(query, engines, limit=limit)
+            if not search_res["ok"]:
+                return {
+                    "content": f"互联网搜索失败: {search_res.get('error', '未知错误')}",
+                    "status_code": STATUS_FAILED,
+                    "query": query,
+                    "scope": "web",
+                    "engines": search_res["engines"],
+                    "results": [],
+                }
+            results = search_res["results"]
+            engine_label = "+".join(search_res["engines"])
+            lines = [f"互联网搜索 '{query}'（{engine_label}）：找到 {len(results)} 条结果", ""]
+            multi = len(search_res["engines"]) > 1
+            for i, r in enumerate(results, 1):
+                tag = f"[{r.get('engine', '')}] " if multi else ""
+                lines.append(f"{i}. {tag}{r['title']}")
+                lines.append(f"   {r['url']}")
+                if r.get("snippet"):
+                    lines.append(f"   {r['snippet']}")
             return {
-                "content": "互联网搜索暂未实现（计划在 P2 阶段接入）。",
+                "content": "\n".join(lines),
                 "status_code": STATUS_OK,
                 "query": query,
                 "scope": "web",
-                "results": [],
+                "engines": search_res["engines"],
+                "failed": search_res.get("failed", []),
+                "results": results,
             }
 
         # 本地搜索：扫描 output_dir 下所有数据文件
@@ -1439,6 +2235,7 @@ def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
         store.create_task(task)
 
         # 立即触发首次检查（建立基线）
+        result = None
         try:
             from crawagent.monitor import MonitorScheduler
             scheduler = MonitorScheduler(store=store)
@@ -1455,7 +2252,7 @@ def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
             "name": name,
             "url": url,
             "interval_minutes": interval_minutes,
-            "first_check": result if 'result' in dir() else None,
+            "first_check": result,
         }
 
     # check_change 执行器：立即检查变化（P4-6）
@@ -1614,9 +2411,9 @@ def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
                 "patches_generated": 0,
             }
 
-        # 生成补丁
+        # 生成补丁（按等级白名单：高危/严重仅报告，默认只自动处理低/中危）
         fixer = AutoFixer()
-        patches = await fixer.generate_patches(vulns, scan_task_id=scan_task_id)
+        patches, reported_only = await fixer.generate_patches(vulns, scan_task_id=scan_task_id)
 
         # 保存到文件
         patch_files = await fixer.save_patches(patches, output_dir=output_dir)
@@ -1624,13 +2421,20 @@ def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
         # 生成摘要
         summary_lines = [
             f"已生成 {len(patches)} 个修复补丁",
-            f"覆盖 {len(vulns)} 个漏洞",
+            f"覆盖 {len(vulns) - len(reported_only)} 个白名单内漏洞（自动处理）",
             f"保存目录：{output_dir}",
             "",
             "补丁列表：",
         ]
         for p in patches:
             summary_lines.append(f"  - {p.to_summary()}")
+        if reported_only:
+            summary_lines.append("")
+            summary_lines.append(
+                f"⚠️ {len(reported_only)} 个高危/严重漏洞仅报告（需人工审阅，未自动 patch）："
+            )
+            for v in reported_only[:10]:
+                summary_lines.append(f"  - {v.to_summary()}")
         summary_lines.append("")
         summary_lines.append("应用补丁：git apply <patch_file>")
 
@@ -1639,6 +2443,8 @@ def create_default_tools(output_dir: str = "./output") -> ToolRegistry:
             "status_code": STATUS_OK,
             "patches_generated": len(patches),
             "patch_files": patch_files,
+            "reported_only_count": len(reported_only),
+            "reported_only": [v.model_dump() for v in reported_only],
             "patches": [
                 {
                     "id": p.id,

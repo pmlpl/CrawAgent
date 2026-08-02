@@ -353,29 +353,6 @@ class CrawlSession:
 
     # --- 操作日志 ---
 
-    async def start_operation(
-        self, lane_name: str, op_type: OperationType
-    ) -> str:
-        """开始操作，返回 operation id。"""
-        op_id = uuid.uuid4().hex
-        now = time.time()
-        model = OperationLogModel(
-            id=op_id,
-            session_id=self.session_id,
-            lane_name=lane_name,
-            op_type=op_type.value,
-            started_at=now,
-            finished_at=None,
-            entries_json="[]",
-            error=None,
-        )
-        async with AsyncSession(self._engine) as session:
-            session.add(model)
-            await session.commit()
-        # 同步标记 lane 有 open operation
-        await self.set_lane_open_operation(lane_name, True)
-        return op_id
-
     async def finish_operation(
         self, op_id: str, error: Optional[str] = None
     ) -> None:

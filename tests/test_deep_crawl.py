@@ -16,6 +16,45 @@ def _await(coro):
     return asyncio.run(coro)
 
 
+def test_frontier_snapshot_and_resume(tmp_path):
+    """frontier 任务快照 + 断点续抓：失败 URL 重入队，fetching 遗留恢复。"""
+    from crawagent.core.frontier import SQLiteFrontier
+
+    frontier = SQLiteFrontier(db_path=str(tmp_path / "frontier.db"))
+
+    async def _run():
+        await frontier.initialize()
+        await frontier.add_url("https://ok.example.com/a", metadata={"job_id": "job1"})
+        await frontier.add_url("https://bad.example.com/b", metadata={"job_id": "job1"})
+        await frontier.add_url("https://other.example.com/c")  # 无 job_id
+
+        # 模拟：a 成功、b 失败、c 卡在 fetching（中断遗留）
+        await frontier.mark_done("https://ok.example.com/a", True)
+        await frontier.mark_done("https://bad.example.com/b", False, "timeout")
+        await frontier._conn.execute(
+            "UPDATE urls SET status='fetching' WHERE url='https://other.example.com/c'"
+        )
+        await frontier._conn.commit()
+
+        snap = await frontier.snapshot_job("job1")
+        assert snap["fetched"] == 1 and snap["failed"] == 1
+
+        # 断点续抓：b 重新入队（failed→pending），c（fetching→pending）
+        restored = await frontier.resume_job(max_retries=3, job_id="job1")
+        assert restored == 1  # 只有 job1 的 b
+        snap2 = await frontier.snapshot_job("job1")
+        assert snap2["pending"] == 1 and snap2["failed"] == 0
+
+        # 全部恢复时，fetching 遗留的 c 也被置回 pending
+        restored_all = await frontier.resume_job()
+        snap3 = await frontier.snapshot_job()
+        assert snap3["fetching"] == 0
+        assert snap3["pending"] >= 1
+        await frontier.close()
+
+    _await(_run())
+
+
 def _build_site(tmp_path):
     (tmp_path / "index.html").write_text(
         """<html><body><h1>首页</h1>

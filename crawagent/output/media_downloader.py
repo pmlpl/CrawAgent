@@ -99,6 +99,10 @@ class MediaDownloader:
         is_video_site = self._is_video_site(url)
         use_yt_dlp = prefer_yt_dlp and is_video_site
 
+        # 风控视频站（抖音等）无 cookie 时自动获取匿名 cookie（无需登录）
+        if use_yt_dlp and not cookies_file and self._needs_anonymous_cookie(url):
+            cookies_file = await self._auto_anonymous_cookies(url)
+
         if use_yt_dlp:
             result = await self._download_yt_dlp(url, title, ext, cookies_file)
             if result.get("success"):
@@ -117,6 +121,30 @@ class MediaDownloader:
         )
         domain = extract_domain(url).lower()
         return any(d in domain for d in video_domains)
+
+    # 需要匿名 cookie 才能提取的风控视频站（yt-dlp 会报 "Fresh cookies needed"）
+    _COOKIE_REQUIRED_DOMAINS = ("douyin.com",)
+
+    def _needs_anonymous_cookie(self, url: str) -> bool:
+        domain = extract_domain(url).lower()
+        return any(d in domain for d in self._COOKIE_REQUIRED_DOMAINS)
+
+    async def _auto_anonymous_cookies(self, url: str) -> str:
+        """用 Playwright 访问站点自动收集匿名 cookie（无需登录）
+
+        Returns:
+            cookies.txt 路径；失败返回 ""（调用方静默降级）
+        """
+        try:
+            from crawagent.sessions.profile_manager import ProfileManager
+            pm = ProfileManager()
+            result = await pm.grab_anonymous_cookies(url, wait_ms=6000)
+            if result.get("success") and result.get("cookies_file"):
+                logger.info(f"[MediaDownloader] 已自动获取匿名 cookie: {result['cookies_file']}")
+                return result["cookies_file"]
+        except Exception as e:
+            logger.debug(f"[MediaDownloader] 匿名 cookie 获取失败（降级不带 cookie）: {e}")
+        return ""
 
     async def _download_yt_dlp(
         self,

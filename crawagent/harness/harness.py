@@ -17,12 +17,26 @@ from typing import Any, Dict, List, Optional
 
 from crawagent.harness.types import (
     Phase, HookEvent, CrawlMessage, TurnSnapshot, RunResult,
-    OperationType, LaneInfo, CrawlToolDef,
+    OperationType, LaneInfo, CrawlToolDef, TokenUsage,
 )
 from crawagent.harness.session import CrawlSession, SessionManager
 from crawagent.harness.hooks import CrawlHooks
 from crawagent.harness.loop import CrawlLoop
 from crawagent.config.settings import get_settings
+
+
+def _usage_to_dict(u: TokenUsage) -> Dict[str, Any]:
+    """TokenUsage → dict（含命中率与费用，供 API/前端展示）。"""
+    return {
+        "prompt_tokens": u.prompt_tokens,
+        "completion_tokens": u.completion_tokens,
+        "total_tokens": u.total_tokens,
+        "cache_hit_tokens": u.cache_hit_tokens,
+        "cache_miss_tokens": u.cache_miss_tokens,
+        "hit_rate": u.hit_rate,
+        "cost_yuan": u.cost_yuan(),
+        "model": u.model,
+    }
 
 
 class CrawlHarness:
@@ -52,6 +66,7 @@ class CrawlHarness:
         self._tool_executors: Dict[str, Any] = tool_executors or {}
         self._sessions: Dict[str, CrawlSession] = {}  # session_id → session
         self._loops: Dict[str, CrawlLoop] = {}  # session_id → active loop
+        self._session_usage: Dict[str, TokenUsage] = {}  # session_id → 累计 token 用量
         self._phase: Phase = Phase.IDLE
     
     # ---- Session 管理 ----
@@ -114,36 +129,68 @@ class CrawlHarness:
         session_id: str,
         message: str,
         lane_name: str = "main",
+        max_turns: int | None = None,
+        task_notes: str = "",
     ) -> RunResult:
         """用户输入 → Agent Loop 运行 → 返回结果
-        
+
         这是主要交互入口。
+
+        Args:
+            session_id: 会话 ID
+            message: 用户消息
+            lane_name: lane 名称，默认 main
+            max_turns: 本次 prompt 允许的最大 LLM turn 数，None 则取 settings 默认
+            task_notes: 任务备注（如 max_pages/max_depth 预算），注入系统提示词
         """
         session = await self.get_session(session_id)
         if not session:
             return RunResult.from_error(f"Session not found: {session_id}")
-        
+
         self._phase = Phase.TURN
-        
+
         # 创建 loop
         settings = get_settings()
         loop = CrawlLoop(
             session=session,
             hooks=self.hooks,
             tools=self._tools,
-            max_turns=settings.harness_max_turns,
+            max_turns=max_turns if max_turns is not None else settings.harness_max_turns,
             compaction_threshold=settings.harness_compaction_threshold,
             tool_executors=self._tool_executors,
+            task_notes=task_notes,
         )
         self._loops[session_id] = loop
         
         try:
             result = await loop.run(message, lane_name)
             self._phase = Phase.IDLE
+
+            # 记录本次与累计 token 用量到 result.data（前端展示 token/命中率/费用）
+            loop_usage = loop.token_usage
+            if result.data is None:
+                result.data = {}
+            result.data["usage"] = _usage_to_dict(loop_usage)
+            # 会话累计（内存；多次 prompt 同一 session 时累加）
+            prev = self._session_usage.get(session_id)
+            if prev is None:
+                prev = TokenUsage()
+                self._session_usage[session_id] = prev
+            prev.prompt_tokens += loop_usage.prompt_tokens
+            prev.completion_tokens += loop_usage.completion_tokens
+            prev.total_tokens += loop_usage.total_tokens
+            prev.cache_hit_tokens += loop_usage.cache_hit_tokens
+            prev.cache_miss_tokens += loop_usage.cache_miss_tokens
+            prev.model = loop_usage.model or prev.model
+            result.data["usage_total"] = _usage_to_dict(prev)
             return result
         except Exception as e:
             self._phase = Phase.IDLE
             return RunResult.from_error(str(e))
+
+    def get_session_usage(self, session_id: str) -> TokenUsage:
+        """获取某 session 的累计 token 用量（含缓存字段）。"""
+        return self._session_usage.get(session_id, TokenUsage())
     
     async def stop(self, session_id: str) -> None:
         """停止指定 session 的 loop"""

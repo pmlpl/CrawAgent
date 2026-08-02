@@ -172,11 +172,15 @@ class PruningContentFilter(RelevantContentFilter):
                     el.decompose()
 
         # 2. 低内容节点：无文本、无图片/表格/代码的叶子容器
+        #    注意：img/picture 等媒体节点自身是内容（无文本但含 src），绝不能删
+        MEDIA_TAGS = {"img", "picture", "source", "video", "audio", "table", "pre", "code", "canvas"}
         for el in soup.find_all(True):
             if getattr(el, "attrs", None) is None:
                 continue
             if el.name in ("html", "body"):
                 continue
+            if el.name in MEDIA_TAGS:
+                continue  # 媒体/内容节点本体保留
             text = el.get_text("", strip=True)
             meaningful = el.find(["img", "table", "pre", "code", "video", "audio"])
             if not text and not meaningful:

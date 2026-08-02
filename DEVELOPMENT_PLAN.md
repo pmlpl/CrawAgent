@@ -1,7 +1,7 @@
 # CrawAgent 开发计划
 
-> 版本：v2.2 | 更新：2026-08-01
-> 变更：P1-P7 全部完成并通过验收；P4 真实监控 e2e 补验通过（含告警通知状态持久化修复）
+> 版本：v2.2 | 更新：2026-08-02
+> 变更：P1-P7 全部完成并通过验收；P4 真实监控 e2e 补验通过（含告警通知状态持久化修复）；P2+ 图片抓取优化完成（图片专用提取器 + SPA 客户端路由 + 网站画像系统 + LLM 工具调用完整性自愈）
 
 ---
 
@@ -280,6 +280,26 @@ CrawAgent 的 `CrawlHarness` 采用 pi 模式：**LLM 在 loop 中自主选工�
 | P7-4 | output/media_downloader.py | yt-dlp 集成（cookie 透传） |
 | P7-5 | 新建专用后处理器 | youtube / bilibili / zhihu |
 
+### 阶段 P2+：图片抓取优化 + 网站画像（持续迭代，2026-08-02 完成首轮）
+
+**目标**：针对不同网站做图片抓取针对性优化，不断训练爬虫智能体。
+
+| 任务 | 文件 | 说明 |
+|---|---|---|
+| P2+-1 | core/extractor.py | `CompositeExtractor.extract_images()` 图片专用提取器（img 懒加载/meta og/JSON-LD/背景图多源提取 + 去重分类排序） |
+| P2+-2 | core/fetcher.py | SPA 客户端路由处理：Nuxt/Vue/React/Next 4xx + 框架检测 → 等待路由渲染 → 改写 200 |
+| P2+-3 | core/fetcher.py | Playwright 滚动触发懒加载：逐步滚动到底部，触发 data-src/data-original |
+| P2+-4 | 新建 `core/site_profile.py` | 网站画像系统：自动发现技术栈/图片加载/反爬等级/导航结构，`./profiles/{domain}.json` 存储 |
+| P2+-5 | harness/tools.py | Supervisor 图片意图识别（"图片/壁纸/图库"关键词 → use_browser + method=images）+ 自动浏览器升级 + 图片抓取中文总结 |
+| P2+-6 | harness/loop.py | LLM 工具调用完整性自愈（`_fix_tool_call_pairing`）+ 消息内容兜底 |
+| P2+-7 | frontend/views/Chat.vue | 刷新页面后恢复 AI 工作输出（tool_calls 数据解析修复 + 消息正序 + 空内容兜底显示） |
+
+**验收记录（2026-08-02）**：
+- haowallpaper.com 首页图片抓取：滚动触发懒加载后图片数从 1 张提升至完整列表 ✅
+- haowallpaper.com 子分类页（/wallpaper、/fengjing）：Nuxt 客户端路由 404 → SPA 路由改写 200，图片正常提取 ✅
+- LLM 工具调用完整性：`_fix_tool_call_pairing` 消除 OpenAI 400 BadRequestError ✅
+- 前端刷新恢复：Chat.vue 历史消息加载 + 工具消息兜底显示 ✅
+
 ### 阶段 P8：Docker + Nginx + 开源准备（1 周）
 
 | 任务 | 文件 | 说明 |
@@ -297,7 +317,8 @@ CrawAgent 的 `CrawlHarness` 采用 pi 模式：**LLM 在 loop 中自主选工�
 ```
 P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → P2（清洗+提取）✅
     → P3（文件整理）✅ → P4（监控+lanes）✅ → P5（安全扫描）✅
-    → P6（压缩+持久化+深爬）✅ → P7（影视内容）✅ → P8（Docker部署，本地可选）
+    → P6（压缩+持久化+深爬）✅ → P7（影视内容）✅ → P2+（图片抓取优化+网站画像）✅
+    → P8（Docker部署，本地可选）
 ```
 
 **理由**：
@@ -307,6 +328,7 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - P4+P5 是垂直场景（依赖 lanes 机制，P0 已搭建）✅
 - P6 是长任务/稳定性增强 ✅
 - P7 是影视场景 ✅
+- P2+ 是持续优化阶段：针对不同网站的图片抓取针对性优化，网站画像系统不断累积爬取经验，持续训练爬虫智能体 ✅
 - P8 Docker 部署：本地使用不需要，仅在部署到服务器时需要
 
 ---
@@ -383,6 +405,16 @@ P0（bug修+MySQL+Harness骨架）✅ → P1（反爬+引擎链+hooks）✅ → 
 - [ ] YouTube 视频页元数据提取 + yt-dlp 下载（**网络不可达**：本机连接 YouTube 超时，MediaDownloader.extract_info 代码路径已验证——30s 超时保护返回 success=False + 明确错误，待可达网络环境实测）
 - [x] Bilibili 带 cookie 下载（2026-08-01 补验通过：Playwright 登录导出 cookie → yt-dlp extract_info 提取元数据成功[标题/UP主/时长/播放量/11种格式] → download 下载 77.6MB MP4 文件成功；不带 cookie 时 412 反爬拦截已由错误处理覆盖）
 - [x] **脏数据**：已下架视频友好报错（2026-08-01 补验：Bilibili 不存在视频 BVZZZZZZZZ 返回 404 + "信息提取失败" 友好错误；YouTube 不存在视频因网络不可达 60s 超时返回明确错误，不崩溃）
+
+### P2+ 验收（图片抓取优化 + 网站画像，2026-08-02）
+- [x] 图片专用提取器：img 懒加载（src/data-src/data-srcset）+ meta og + JSON-LD + 背景图多源提取，去重分类排序（单测通过）
+- [x] SPA 客户端路由：Nuxt/Vue/React/Next 4xx 状态码 + 框架检测 → 等待路由渲染 → 内容有效时改写 200（haowallpaper.com /wallpaper、/fengjing 子分类页实测通过）
+- [x] 懒加载触发：Playwright 滚动到底部触发 data-src/data-original，图片数从 1 张提升至完整列表（haowallpaper.com 首页实测）
+- [x] 网站画像系统：SiteProfile 自动发现 + SiteProfileStore CRUD，Supervisor 爬取后自动保存画像（`./profiles/{domain}.json`）
+- [x] LLM 工具调用完整性：`_fix_tool_call_pairing` 消除 OpenAI 400 BadRequestError（`An assistant message with 'tool_calls' must be followed by tool messages`）
+- [x] Supervisor 图片意图识别：指令含"图片/壁纸/图库"关键词 → 自动启用浏览器模式 + 图片提取；HTTP 提取为空自动升级浏览器
+- [x] 图片抓取总结：save_executor 返回明确中文总结（条数/下载量/路径/预览），避免 LLM 反复调用 search/supervisor 死循环
+- [x] 前端刷新恢复：Chat.vue 历史消息加载 + tool_calls 数据解析修复 + 消息正序 + 空内容/tool 消息兜底显示
 
 ### P8 验收
 - [ ] 全新机器 `docker-compose up` 5 分钟内可用

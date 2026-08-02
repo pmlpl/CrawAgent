@@ -80,13 +80,15 @@ async function loadSessions() {
 }
 
 function goChat(sessionId) {
-  router.push('/chat')
+  router.push({ path: '/chat', query: { session_id: sessionId } })
 }
 
 function formatTime(ts) {
   if (!ts) return ''
   try {
-    const d = new Date(ts)
+    // 后端 created_at 为 epoch 秒，转毫秒后再解析
+    const t = typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts
+    const d = new Date(t)
     return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
   } catch {
     return ''

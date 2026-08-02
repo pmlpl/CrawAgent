@@ -109,3 +109,21 @@ def test_create_content_filter_factory():
     assert isinstance(create_content_filter("bm25"), BM25ContentFilter)
     with pytest.raises(ValueError):
         create_content_filter("unknown")
+
+
+def test_prune_keeps_media_nodes():
+    """回归：img/picture/video 等媒体节点无文本也不得被当作低内容节点删除
+    （图片站 clean 后 img 丢失会导致 extract_images 提取不到壁纸）。"""
+    html = """
+    <html><body>
+      <div class="wallpaper-grid">
+        <a href="/w/1"><img src="/img/1.jpg" alt="4k壁纸"></a>
+        <a href="/w/2"><img src="/img/2.jpg" alt="5k壁纸"></a>
+      </div>
+      <p>说明文字</p>
+    </body></html>
+    """
+    result = PruningContentFilter().filter_content(html)
+    assert "img/1.jpg" in result
+    assert "img/2.jpg" in result
+    assert "4k壁纸" in result

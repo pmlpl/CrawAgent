@@ -90,6 +90,9 @@ class VideoExtractor:
         soup = BeautifulSoup(html, "html.parser")
         result = VideoExtractionResult()
 
+        # 0. <meta og:video> / og:video:url（视频站标准声明，如 B站 player.html 播放页）
+        self._extract_og_meta(soup, base_url, result)
+
         # 1. <video> 标签
         self._extract_video_tags(soup, base_url, result)
 
@@ -110,6 +113,41 @@ class VideoExtractor:
         result.raw_mp4_urls = list(set(result.raw_mp4_urls))
 
         return result
+
+    def _extract_og_meta(self, soup: BeautifulSoup, base_url: str, result: VideoExtractionResult) -> None:
+        """提取 <meta> 中的 og:video / og:video:url / og:image / og:title。
+
+        视频站（B站/YouTube 等）常以 og:video 声明可播放地址或播放器页，
+        og:image 为封面图，og:title 为视频标题 —— 用于生成可点击打开的 md 文档。
+        """
+        og_video = og_image = og_title = ""
+        for meta in soup.find_all("meta"):
+            prop = str(meta.get("property") or meta.get("name") or "").lower()
+            content = str(meta.get("content") or "").strip()
+            if not content:
+                continue
+            if prop in ("og:video", "og:video:url", "og:video:secure_url"):
+                if not og_video:
+                    og_video = content
+            elif prop == "og:image":
+                if not og_image:
+                    og_image = content
+            elif prop in ("og:title", "twitter:title"):
+                if not og_title:
+                    og_title = content
+
+        if og_video:
+            video = VideoInfo(
+                url=urljoin(base_url, og_video),
+                source_tag="og:video",
+                poster=urljoin(base_url, og_image) if og_image else "",
+                title=og_title,
+            )
+            video.video_type = self._infer_type(video.url)
+            # player.html 等播放器页标记为 iframe_embed 类型（可点击打开播放）
+            if not video.video_type or video.video_type == "unknown":
+                video.video_type = "iframe_embed"
+            result.videos.append(video)
 
     def _extract_video_tags(self, soup: BeautifulSoup, base_url: str, result: VideoExtractionResult) -> None:
         """提取 <video> 标签"""
@@ -133,7 +171,10 @@ class VideoExtractor:
                 video.url = urljoin(base_url, data_src)
                 video.video_type = self._infer_type(video.url)
 
+            # blob: 为浏览器内存流（如 B站 SPA 播放器），无法直接访问/下载 → 丢弃
             if video.url:
+                if video.url.lower().startswith("blob:"):
+                    continue
                 result.videos.append(video)
 
     def _extract_source_tags(self, soup: BeautifulSoup, base_url: str, result: VideoExtractionResult) -> None:
@@ -160,7 +201,11 @@ class VideoExtractor:
             result.videos.append(video)
 
     def _extract_iframes(self, soup: BeautifulSoup, base_url: str, result: VideoExtractionResult) -> None:
-        """提取 <iframe> 嵌入视频"""
+        """提取 <iframe> 嵌入视频
+
+        只保留已知视频平台（YouTube/B站/Vimeo 等）或 URL 含 video/player 关键词的嵌入，
+        过滤验证码（rmc-nocaptcha）、存储、统计等非视频 iframe。
+        """
         for iframe in soup.find_all("iframe"):
             src = iframe.get("src") or iframe.get("data-src")
             if not src:
@@ -174,6 +219,12 @@ class VideoExtractor:
                 if pattern.search(abs_url):
                     platform = name
                     break
+
+            # 非已知平台时，要求 URL 含视频特征（player/video/embed）才保留
+            if platform == "unknown":
+                low = abs_url.lower()
+                if not any(k in low for k in ("/player", "/video", "/embed", "/share/video")):
+                    continue  # 验证码/存储/统计 iframe 全部过滤
 
             video = VideoInfo(
                 url=abs_url,

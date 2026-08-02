@@ -20,6 +20,34 @@ class FieldChange:
     old_value: Any
     new_value: Any
     change_type: str  # "changed" / "added" / "removed"
+    # 数值变化幅度（仅当新旧值都可解析为数字时有效）
+    delta: Optional[float] = None        # 新值 - 旧值
+    percent_change: Optional[float] = None  # 百分比变化（%），如 -15.0 表示下降 15%
+
+    def _num(self, v: Any) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip().replace(",", "").replace("¥", "").replace("$", "").replace("￥", "").replace("%", "")
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return None
+
+    def __post_init__(self) -> None:
+        """自动计算数值变化幅度（新旧值均可解析为数字时）。"""
+        if self.delta is None or self.percent_change is None:
+            old_n = self._num(self.old_value)
+            new_n = self._num(self.new_value)
+            if old_n is not None and new_n is not None:
+                if self.delta is None:
+                    self.delta = round(new_n - old_n, 4)
+                if self.percent_change is None:
+                    if old_n == 0:
+                        self.percent_change = None if new_n == 0 else 100.0
+                    else:
+                        self.percent_change = round((new_n - old_n) / abs(old_n) * 100, 2)
 
 
 @dataclass
@@ -40,11 +68,19 @@ class DiffResult:
                     "old_value": str(c.old_value),
                     "new_value": str(c.new_value),
                     "change_type": c.change_type,
+                    "delta": c.delta,
+                    "percent_change": c.percent_change,
                 }
                 for c in self.field_changes
             ],
             "summary": self.summary,
         }
+
+    @property
+    def max_change_percent(self) -> Optional[float]:
+        """所有字段变化的百分比绝对值最大值（用于阈值过滤）。"""
+        pcts = [abs(c.percent_change) for c in self.field_changes if c.percent_change is not None]
+        return max(pcts) if pcts else None
 
 
 class DiffDetector:

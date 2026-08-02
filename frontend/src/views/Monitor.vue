@@ -4,6 +4,20 @@
       <h2 class="font-display">监控</h2>
     </header>
 
+    <div class="help-banner" v-if="showHelp">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+      </svg>
+      <span>
+        <b>使用流程：</b>
+        1) 填写 URL 和监控间隔（分钟），点击"创建任务"立即执行首次检查
+        2) 创建后系统会按设定间隔自动检查，也可手动点"检查"立即触发
+        3) 在"监控字段"填写如 <code>price,stock</code> 可精确监控特定字段变化
+        4) 变化时如需通知，在 Webhook URL 填入飞书/钉钉等 webhook 地址
+      </span>
+      <button class="help-close" @click="showHelp = false">×</button>
+    </div>
+
     <div class="settings-content">
       <!-- 创建监控任务 -->
       <div class="settings-section">
@@ -112,6 +126,8 @@ import { ref, onMounted } from 'vue'
 import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api', timeout: 120000 })
+
+const showHelp = ref(true)
 
 const form = ref({
   name: '',
@@ -253,8 +269,14 @@ function formatDate(ts) {
 
 <style scoped>
 .monitor-page { padding: 24px 32px; max-width: 900px; margin: 0 auto; }
-.page-header { margin-bottom: 24px; }
+.page-header { margin-bottom: 16px; }
 .page-header h2 { font-size: 24px; margin: 0; }
+.help-banner { display: flex; align-items: flex-start; gap: 10px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 20px; font-size: 13px; line-height: 1.6; }
+.help-banner svg { flex-shrink: 0; margin-top: 2px; color: var(--accent); }
+.help-banner b { color: var(--text); }
+.help-banner code { background: var(--bg); padding: 1px 6px; border-radius: 4px; font-family: monospace; font-size: 12px; }
+.help-close { margin-left: auto; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 18px; line-height: 1; padding: 0 4px; }
+.help-close:hover { color: var(--text); }
 .settings-content { display: flex; flex-direction: column; gap: 24px; }
 .settings-section { background: var(--surface); border-radius: 12px; padding: 20px 24px; border: 1px solid var(--border); }
 .section-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }

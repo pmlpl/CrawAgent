@@ -70,6 +70,32 @@ def test_diff_detector_compare():
     assert r3.field_changes[0].change_type == "removed"
 
 
+def test_diff_detector_numeric_magnitude():
+    """数值字段变化幅度量化：delta + percent_change + max_change_percent。"""
+    detector = DiffDetector()
+    # 价格 100 → 85：降幅 15%
+    r = detector.compare("a", "b", {"price": "100"}, {"price": "85"})
+    change = r.field_changes[0]
+    assert change.delta == -15.0
+    assert change.percent_change == -15.0
+    assert r.max_change_percent == 15.0
+
+    # 货币符号 + 千分位也能解析
+    r2 = detector.compare("a", "b", {"price": "¥1,299"}, {"price": "$1,099"})
+    c2 = r2.field_changes[0]
+    assert c2.delta == -200.0
+    assert c2.percent_change is not None and round(c2.percent_change, 1) == -15.4
+
+    # 非数值字段 → 无幅度
+    r3 = detector.compare("a", "b", {"title": "A"}, {"title": "B"})
+    assert r3.field_changes[0].percent_change is None
+    assert r3.max_change_percent is None
+
+    # to_dict 包含幅度字段
+    d = r.to_dict()["field_changes"][0]
+    assert d["delta"] == -15.0 and d["percent_change"] == -15.0
+
+
 def test_diff_compare_with_baseline_first_run(tmp_path):
     store = _store(tmp_path)
     baseline = BaselineStore(store=store)

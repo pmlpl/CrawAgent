@@ -149,11 +149,34 @@ def test_auto_fixer_generates_patch(tmp_path):
         url="https://example.com",
         remediation="在响应头中添加 X-Frame-Options: DENY",
     )
-    patches = _await(fixer.generate_patches([vuln]))
+    patches, reported_only = _await(fixer.generate_patches([vuln]))
     assert len(patches) >= 1
+    assert len(reported_only) == 0  # MEDIUM 在白名单内，自动生成补丁
     patch = patches[0]
     assert patch.target_file
     assert "diff" in patch.diff or patch.diff
 
     files = _await(fixer.save_patches(patches, str(tmp_path)))
     assert files and __import__("os").path.isfile(files[0])
+
+
+def test_auto_fixer_high_severity_reports_only(tmp_path):
+    """高危漏洞默认只报告，不自动生成补丁（等级白名单）。"""
+    fixer = AutoFixer()
+    vuln = Vulnerability(
+        category=VulnCategory.A03_INJECTION,
+        severity=Severity.HIGH,
+        title="SQL 注入",
+        url="https://example.com/item?id=1",
+    )
+    patches, reported_only = _await(fixer.generate_patches([vuln]))
+    assert len(patches) == 0          # 高危不自动 patch
+    assert len(reported_only) == 1    # 仅报告
+
+    # 显式允许高危 → 生成补丁
+    from crawagent.security.models import Severity as Sev
+    patches2, reported2 = _await(fixer.generate_patches(
+        [vuln], allowed_severities=[Sev.LOW, Sev.MEDIUM, Sev.HIGH]
+    ))
+    assert len(patches2) >= 1
+    assert len(reported2) == 0

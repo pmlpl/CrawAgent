@@ -27,6 +27,12 @@ CORE_SYSTEM_PROMPT = """你是 CrawAgent，一个专业的 AI 爬虫助手。你
 你有以下工具可以使用：
 {tool_descriptions}
 
+【重要】工具使用规则：
+- 当用户要求爬取、抓取、搜索、分析网站内容时，你必须直接调用工具（如 supervisor、search），而不是用文字描述你打算做什么
+- 不要先输出"我来帮你..."这类开场白文字，直接调用工具执行任务
+- 工具调用完成后，再用文字总结结果
+- 如果用户消息包含 URL、网站名、"爬取"、"抓取"、"图片"、"搜索"等关键词，必须使用工具
+
 工作原则：
 - 优先使用低成本策略（HTTP 优先于浏览器）
 - 遇到反爬时自动升级策略
@@ -116,8 +122,11 @@ class SystemPromptAssembler:
         # Core（含工具描述）
         tool_descriptions = ""
         if tools:
+            # 按 name 排序：保证工具描述顺序稳定，跨进程/跨环境字节一致
+            # （对齐 Reasonix normalizeToolSchemas，缓存命中依赖前缀字节不变）
+            _sorted = sorted(tools, key=lambda t: t.name)
             tool_descriptions = "\n".join(
-                f"- {t.name}: {t.description}" for t in tools
+                f"- {t.name}: {t.description}" for t in _sorted
             )
         parts.append(self._core.format(tool_descriptions=tool_descriptions))
         

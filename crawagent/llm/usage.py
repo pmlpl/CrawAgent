@@ -13,24 +13,66 @@ from crawagent.harness.types import TokenUsage
 
 
 def _extract_usage_from_response(response: Any) -> Dict[str, int]:
-    """从 LangChain AIMessage 响应中提取 token 用量（兼容多种格式）。"""
+    """从 LangChain AIMessage 响应中提取 token 用量（兼容多种格式）。
+
+    缓存字段兼容两种 provider 形态：
+    - DeepSeek 顶层：prompt_cache_hit_tokens / prompt_cache_miss_tokens
+    - OpenAI 标准：prompt_tokens_details.cached_tokens（cached=命中，miss=prompt-cached）
+    """
     usage_metadata = getattr(response, "usage_metadata", None)
     if isinstance(usage_metadata, dict) and usage_metadata:
-        return {
+        out = {
             "prompt_tokens": usage_metadata.get("input_tokens", 0),
             "completion_tokens": usage_metadata.get("output_tokens", 0),
             "total_tokens": usage_metadata.get("total_tokens", 0),
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 0,
         }
+        # usage_metadata 通常不含缓存字段，回退到原始 response_metadata.token_usage
+        raw = _raw_token_usage(response)
+        if raw:
+            out.update(_extract_cache_fields(raw))
+        return out
 
     response_metadata = getattr(response, "response_metadata", None) or {}
     token_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
     if isinstance(token_usage, dict):
-        return {
+        out = {
             "prompt_tokens": token_usage.get("prompt_tokens", 0),
             "completion_tokens": token_usage.get("completion_tokens", 0),
             "total_tokens": token_usage.get("total_tokens", 0),
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 0,
         }
+        out.update(_extract_cache_fields(token_usage))
+        return out
     return {}
+
+
+def _raw_token_usage(response: Any) -> Dict[str, Any]:
+    """从 response 提取原始 token_usage dict（缓存字段所在处）。"""
+    response_metadata = getattr(response, "response_metadata", None) or {}
+    if not isinstance(response_metadata, dict):
+        return {}
+    token_usage = response_metadata.get("token_usage") or response_metadata.get("usage")
+    return token_usage if isinstance(token_usage, dict) else {}
+
+
+def _extract_cache_fields(raw: Dict[str, Any]) -> Dict[str, int]:
+    """从原始 usage dict 提取缓存命中/未命中 token 数。"""
+    hit = raw.get("prompt_cache_hit_tokens", 0)
+    miss = raw.get("prompt_cache_miss_tokens", 0)
+    if not hit and not miss:
+        details = raw.get("prompt_tokens_details") or {}
+        if isinstance(details, dict):
+            cached = details.get("cached_tokens", 0)
+            prompt = raw.get("prompt_tokens", 0)
+            hit = cached
+            miss = max(0, prompt - cached)
+    return {
+        "cache_hit_tokens": int(hit or 0),
+        "cache_miss_tokens": int(miss or 0),
+    }
 
 
 def _extract_model_name(response: Any, fallback: str = "") -> str:
@@ -49,6 +91,8 @@ class TokenUsageTracker:
         model: str = "",
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        cache_hit_tokens: int = 0,
+        cache_miss_tokens: int = 0,
     ) -> None:
         model = model or "unknown"
         current = self._usage.setdefault(
@@ -57,6 +101,8 @@ class TokenUsageTracker:
         current.prompt_tokens += int(prompt_tokens or 0)
         current.completion_tokens += int(completion_tokens or 0)
         current.total_tokens += int(prompt_tokens or 0) + int(completion_tokens or 0)
+        current.cache_hit_tokens += int(cache_hit_tokens or 0)
+        current.cache_miss_tokens += int(cache_miss_tokens or 0)
 
     def record_response(self, response: Any, model: str = "") -> None:
         """从 LLM 响应提取并记录用量。"""
@@ -67,6 +113,8 @@ class TokenUsageTracker:
             model=_extract_model_name(response, model),
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
+            cache_hit_tokens=usage.get("cache_hit_tokens", 0),
+            cache_miss_tokens=usage.get("cache_miss_tokens", 0),
         )
 
     def wrap(self, llm: Any, model: str = "") -> Any:
@@ -102,6 +150,8 @@ class TokenUsageTracker:
                 "prompt_tokens": u.prompt_tokens,
                 "completion_tokens": u.completion_tokens,
                 "total_tokens": u.total_tokens,
+                "cache_hit_tokens": u.cache_hit_tokens,
+                "cache_miss_tokens": u.cache_miss_tokens,
             }
             for model, u in sorted(self._usage.items())
         }

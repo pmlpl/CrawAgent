@@ -50,17 +50,40 @@ class AutoFixer:
             # 用户审阅后：git apply patch.diff
     """
 
+    # 等级白名单：只有这些等级的漏洞会自动生成补丁
+    # 高危/严重默认只报告，不自动 patch（避免误操作，需人工审阅）
+    DEFAULT_ALLOWED_SEVERITIES = (Severity.LOW, Severity.MEDIUM)
+
     async def generate_patches(
         self,
         vulnerabilities: List[Vulnerability],
         scan_task_id: str = "",
-    ) -> List[FixPatch]:
-        """根据漏洞列表生成修复补丁"""
+        allowed_severities: Optional[List[Severity]] = None,
+    ) -> tuple:
+        """根据漏洞列表生成修复补丁（按严重性白名单过滤）
+
+        Args:
+            vulnerabilities: 漏洞列表
+            scan_task_id: 扫描任务 ID
+            allowed_severities: 允许自动生成补丁的等级白名单；
+                不在白名单内的漏洞只报告（reported_only），不生成补丁。
+
+        Returns:
+            (patches: List[FixPatch], reported_only: List[Vulnerability])
+        """
+        allowed = set(allowed_severities or self.DEFAULT_ALLOWED_SEVERITIES)
+
+        # 按等级分流：白名单内 → 自动补丁；白名单外（高危/严重）→ 仅报告
+        auto_vulns: List[Vulnerability] = []
+        reported_only: List[Vulnerability] = []
+        for v in vulnerabilities:
+            (auto_vulns if v.severity in allowed else reported_only).append(v)
+
         patches: List[FixPatch] = []
 
-        # 按类别分组生成补丁
+        # 按类别分组生成补丁（仅白名单内漏洞）
         by_category: Dict[VulnCategory, List[Vulnerability]] = {}
-        for v in vulnerabilities:
+        for v in auto_vulns:
             by_category.setdefault(v.category, []).append(v)
 
         for category, vulns in by_category.items():
@@ -68,8 +91,11 @@ class AutoFixer:
             if patch:
                 patches.append(patch)
 
-        logger.info(f"[AutoFixer] 生成 {len(patches)} 个补丁（覆盖 {len(vulnerabilities)} 个漏洞）")
-        return patches
+        logger.info(
+            f"[AutoFixer] 生成 {len(patches)} 个补丁（覆盖 {len(auto_vulns)} 个白名单内漏洞），"
+            f"{len(reported_only)} 个高危/严重漏洞仅报告"
+        )
+        return patches, reported_only
 
     async def _fix_category(
         self,

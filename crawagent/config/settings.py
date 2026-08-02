@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     default_model: str = "gpt-4o-mini"
     default_temperature: float = 0.1
     max_tokens: int = 4096
-    request_timeout: float = 60.0
+    llm_request_timeout: float = 60.0
     mock_mode: bool = False
 
     # Ollama 本地（可选）

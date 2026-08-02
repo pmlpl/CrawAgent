@@ -60,6 +60,7 @@ class MonitorTask(BaseModel):
     alert_cooldown: int = 3600      # 告警冷却（秒），同 URL 冷却内不重复告警
     alert_on_status: bool = True     # HTTP 状态码非 200 也告警
     alert_on_missing: bool = True    # 字段消失也告警
+    alert_threshold: float = 0.0     # 字段变化幅度阈值（%）：仅当数值字段变化绝对值 ≥ 该值时告警；0 表示不过滤
     # 元数据
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
@@ -127,6 +128,7 @@ class MonitorStore:
                     alert_cooldown INTEGER DEFAULT 3600,
                     alert_on_status INTEGER DEFAULT 1,
                     alert_on_missing INTEGER DEFAULT 1,
+                    alert_threshold REAL DEFAULT 0,
                     created_at REAL,
                     updated_at REAL,
                     last_run_at REAL,
@@ -164,6 +166,10 @@ class MonitorStore:
                 CREATE INDEX IF NOT EXISTS idx_alerts_created ON monitor_alerts(created_at);
                 CREATE INDEX IF NOT EXISTS idx_baselines_task ON monitor_baselines(task_id);
             """)
+            # 兼容旧库：monitor_tasks 缺 alert_threshold 列时补列
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(monitor_tasks)").fetchall()]
+            if "alert_threshold" not in cols:
+                conn.execute("ALTER TABLE monitor_tasks ADD COLUMN alert_threshold REAL DEFAULT 0")
 
     # ---- 任务 CRUD ----
 
@@ -173,17 +179,17 @@ class MonitorStore:
                 INSERT INTO monitor_tasks
                 (id, name, url, schedule_type, interval_seconds, cron_expr, enabled,
                  watch_fields, css_selector, alert_webhook, alert_cooldown,
-                 alert_on_status, alert_on_missing, created_at, updated_at,
+                 alert_on_status, alert_on_missing, alert_threshold, created_at, updated_at,
                  last_run_at, consecutive_failures, last_alert_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 task.id, task.name, task.url, task.schedule_type.value,
                 task.interval_seconds, task.cron_expr, int(task.enabled),
                 json.dumps(task.watch_fields, ensure_ascii=False),
                 task.css_selector, task.alert_webhook, task.alert_cooldown,
                 int(task.alert_on_status), int(task.alert_on_missing),
-                task.created_at, task.updated_at, task.last_run_at,
-                task.consecutive_failures, task.last_alert_at,
+                task.alert_threshold, task.created_at, task.updated_at,
+                task.last_run_at, task.consecutive_failures, task.last_alert_at,
             ))
             conn.commit()
         return task
@@ -215,7 +221,7 @@ class MonitorStore:
                     name = ?, url = ?, schedule_type = ?, interval_seconds = ?,
                     cron_expr = ?, enabled = ?, watch_fields = ?, css_selector = ?,
                     alert_webhook = ?, alert_cooldown = ?, alert_on_status = ?,
-                    alert_on_missing = ?, updated_at = ?, last_run_at = ?,
+                    alert_on_missing = ?, alert_threshold = ?, updated_at = ?, last_run_at = ?,
                     consecutive_failures = ?, last_alert_at = ?
                 WHERE id = ?
             """, (
@@ -224,7 +230,7 @@ class MonitorStore:
                 json.dumps(task.watch_fields, ensure_ascii=False),
                 task.css_selector, task.alert_webhook, task.alert_cooldown,
                 int(task.alert_on_status), int(task.alert_on_missing),
-                task.updated_at, task.last_run_at,
+                task.alert_threshold, task.updated_at, task.last_run_at,
                 task.consecutive_failures, task.last_alert_at, task.id,
             ))
             conn.commit()
@@ -239,6 +245,10 @@ class MonitorStore:
             return cur.rowcount > 0
 
     def _row_to_task(self, row: sqlite3.Row) -> MonitorTask:
+        try:
+            threshold = row["alert_threshold"]
+        except (IndexError, KeyError):
+            threshold = 0.0
         return MonitorTask(
             id=row["id"],
             name=row["name"],
@@ -253,6 +263,7 @@ class MonitorStore:
             alert_cooldown=row["alert_cooldown"],
             alert_on_status=bool(row["alert_on_status"]),
             alert_on_missing=bool(row["alert_on_missing"]),
+            alert_threshold=float(threshold or 0.0),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             last_run_at=row["last_run_at"],

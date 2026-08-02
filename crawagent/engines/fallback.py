@@ -133,10 +133,17 @@ class FallbackChain:
         import time
         start = time.monotonic()
 
-        # use_browser=True 时直接使用最后一个引擎（Playwright）
+        # use_browser=True 时直接使用 Playwright 引擎
         if use_browser:
             playwright_engines = [e for e in self.engines if e.name == "playwright"]
-            engines_to_try = playwright_engines or self.engines
+            if not playwright_engines:
+                # 强制浏览器模式但引擎缺失时明确报错，避免静默退化成 httpx 优先
+                raise EngineError(
+                    engine_name="playwright",
+                    message="强制浏览器模式但 Playwright 引擎不可用"
+                            "（请安装 playwright 并执行 playwright install chromium）",
+                )
+            engines_to_try = playwright_engines
         else:
             engines_to_try = self.engines
 

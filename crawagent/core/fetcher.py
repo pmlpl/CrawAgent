@@ -449,14 +449,70 @@ class Fetcher:
                 result.status_code = response.status if response else 0
                 result.headers = dict(response.headers) if response else {}
 
+                # === SPA 客户端路由处理 ===
+                # 对于 Nuxt/Vue/React SPA，服务器端 404 不代表页面不可用，
+                # 客户端路由会接管并渲染实际内容。
+                # 需要先检查 SPA 标记，再决定是否将 4xx 视为致命错误。
                 if 400 <= result.status_code < 600:
-                    result.error = f"Playwright HTTP {result.status_code}"
-                    result.success = False
-                    if result.status_code in (429, 500, 502, 503, 504):
-                        raise RetryableError(
-                            f"Playwright HTTP {result.status_code}"
+                    _html = await page.content()
+                    _is_spa = any(
+                        marker in _html
+                        for marker in [
+                            "__NUXT__",
+                            "__NEXT_DATA__",
+                            "data-n-head",
+                            "vue-router",
+                            "react-router",
+                            "vuex",
+                        ]
+                    ) or "_nuxt" in _html
+                    if _is_spa and result.status_code in (400, 403, 404):
+                        logger.info(
+                            f"[Fetcher] SPA framework detected (HTTP {result.status_code}), "
+                            "waiting for client-side routing..."
                         )
-                    return result
+                        try:
+                            await page.wait_for_load_state(
+                                "networkidle", timeout=8000
+                            )
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2)  # 给路由渲染额外时间
+                        # 重新检查渲染后的内容
+                        result.html = await page.content()
+                        result.title = await page.title()
+                        new_body_len = await page.evaluate(
+                            "() => document.body ? document.body.innerText.length : 0"
+                        )
+                        if new_body_len > 500 and "404" not in (
+                            result.title or ""
+                        )[:30]:
+                            logger.info(
+                                f"[Fetcher] SPA client routing succeeded: "
+                                f"body_text={new_body_len}, override status=200"
+                            )
+                            result.status_code = 200
+                            result.success = True
+                            result.strategy = "playwright"
+                            # 不 return，继续执行后续的 SPA 检测和滚动逻辑
+                        else:
+                            logger.warning(
+                                f"[Fetcher] SPA routing failed: "
+                                f"body_text={new_body_len}, title={result.title}"
+                            )
+                            result.error = (
+                                f"SPA page failed to render: HTTP {result.status_code}"
+                            )
+                            result.success = False
+                            return result
+                    else:
+                        result.error = f"Playwright HTTP {result.status_code}"
+                        result.success = False
+                        if result.status_code in (429, 500, 502, 503, 504):
+                            raise RetryableError(
+                                f"Playwright HTTP {result.status_code}"
+                            )
+                        return result
 
                 result.html = await page.content()
                 result.title = await page.title()
@@ -479,6 +535,42 @@ class Fetcher:
                             body_text = new_text
                         if body_text >= 500:
                             break
+                # 懒加载图片触发：逐步滚动到页面底部，触发 data-src / data-original / 滚动加载
+                try:
+                    scroll_js = """
+                    async () => {
+                        const delay = ms => new Promise(r => setTimeout(r, ms));
+                        let height = 0;
+                        let stableCount = 0;
+                        for (let step = 0; step < 12; step++) {  // 最多 12 次滚动
+                            window.scrollBy(0, Math.max(600, window.innerHeight * 0.8));
+                            await delay(400);
+                            const h = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+                            const top = window.scrollY || window.pageYOffset || 0;
+                            if (h === height && top + window.innerHeight >= h - 10) {
+                                stableCount += 1;
+                                if (stableCount >= 2) break;  // 连续两次底部不动就停
+                            } else {
+                                stableCount = 0;
+                            }
+                            height = h;
+                        }
+                        window.scrollTo(0, 0);
+                        await delay(120);
+                    }
+                    """
+                    await page.evaluate(scroll_js)
+                    # 等 1-2 秒让懒加载请求发出并返回
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=4000)
+                    except Exception:
+                        await asyncio.sleep(1.5)
+                except Exception:
+                    pass
+                # 滚动后重新读取 html（可能新增大量 img/data-src）
+                result.html = await page.content()
+                result.title = await page.title()
+
                 result.success = True
                 result.strategy = "playwright"
 

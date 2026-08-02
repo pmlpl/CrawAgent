@@ -26,6 +26,12 @@
 | **上下文压缩** | 长任务 token 超限自动压缩 + 崩溃恢复 | ✅ |
 | **登录态持久化** | Playwright persistent_context，跨会话复用 cookie | ✅ |
 | **代理轮换** | HTTP/SOCKS5 代理池 + 健康检查 + 冷却恢复 | ✅ |
+| **图片专用提取** | img 懒加载/meta og/JSON-LD/背景图多源提取 + 去重分类 | ✅ |
+| **SPA 客户端路由** | Nuxt/Vue/React/Next 4xx 自动等待路由渲染并改写 200 | ✅ |
+| **懒加载触发** | Playwright 滚动到底部，触发 data-src/data-original 加载 | ✅ |
+| **网站画像系统** | 自动发现技术栈/图片加载/反爬等级/导航结构，支持针对性优化 | ✅ |
+| **工具调用完整性** | tool_calls/tool_response 配对自愈，避免 OpenAI 400 错误 | ✅ |
+| **API 签名捕获** | 浏览器拦截 XHR/fetch 签名 API（无需逆向算法），滚动分页 + 媒体直链提取 | ✅ |
 
 ## 架构总览
 
@@ -82,6 +88,8 @@ DEFAULT_MODEL=deepseek-chat
 docker-compose up -d mysql redis
 ```
 
+> 完整容器化部署（后端 + 前端 + MySQL + Redis 一键拉起）见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+
 ### 3. 运行
 
 ```bash
@@ -129,6 +137,7 @@ CrawAgent/
 │   │   └── ad_remover.py       # DOM 广告移除
 │   ├── core/                    # 核心组件
 │   │   ├── fetcher.py / frontier.py / extractor.py
+│   │   ├── site_profile.py     # 网站画像系统（针对性优化）
 │   │   ├── proxy.py            # 代理轮换池
 │   │   ├── deep_crawl.py       # BFS/DFS/Best-First
 │   │   ├── adaptive.py         # 饱和度感知
@@ -141,7 +150,9 @@ CrawAgent/
 │   ├── api/server.py           # FastAPI 服务
 │   └── cli/main.py             # CLI
 ├── frontend/                   # Vue 3 前端
-├── docker-compose.yml          # MySQL + Redis
+├── docker/                     # 部署资产（Dockerfile / nginx.conf / mysql init）
+├── docker-compose.yml          # 一键编排（mysql + redis + backend + frontend）
+├── docs/DEPLOYMENT.md          # 部署与运维指南
 └── .env.example                # 环境变量模板
 ```
 
@@ -157,6 +168,7 @@ CrawAgent/
 | P5 | vibe coding 安全检查 | ✅ |
 | P6 | Compaction + Durability + 深度爬取 | ✅ |
 | P7 | 视频下载 + 广告移除 | ✅ |
+| P2+ | 图片专用提取 + SPA 路由 + 网站画像 + LLM 完整性修复 | ✅ |
 | P8 | Docker 部署 | 本地可选 |
 
 详见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。

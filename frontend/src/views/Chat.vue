@@ -7,6 +7,29 @@
         <span class="session-id" v-if="sessionId">#{{ sessionId.slice(0, 8) }}</span>
       </div>
       <div class="header-right">
+        <!-- Token 用量统计徽章（本会话累计，含缓存命中率与费用） -->
+        <div class="usage-stats" v-if="hasUsage">
+          <span class="usage-badge" title="输入 + 输出 token 总量">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="4" width="18" height="16" rx="2"/>
+              <path d="M3 10h18M9 4v6"/>
+            </svg>
+            {{ usageTotal.total_tokens }} tokens
+          </span>
+          <span class="usage-badge" :class="{ 'rate-good': hitRate >= 0.9, 'rate-bad': hitRate > 0 && hitRate < 0.9 }" title="缓存命中率 = 命中 / (命中 + 未命中)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/>
+            </svg>
+            缓存 {{ (hitRate * 100).toFixed(1) }}%
+          </span>
+          <span class="usage-badge" title="按 DeepSeek 官方价估算（命中 0.02/未命中 1/输出 2 元每百万）">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 6v12M15 9.5c0-1.5-1.34-2.5-3-2.5s-3 1-3 2.5 1.5 2 3 2.5 3 1 3 2.5-1.34 2.5-3 2.5-3-1-3-2.5"/>
+            </svg>
+            ¥{{ usageTotal.cost_yuan }}
+          </span>
+        </div>
         <button class="ghost-btn" @click="newSession" title="新建对话">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 5v14M5 12h14"/>
@@ -40,14 +63,17 @@
             </template>
           </div>
           <div class="msg-content">
-            <div class="msg-role">{{ msg.role === 'user' ? '你' : '助手' }}</div>
-            <div class="msg-text" v-html="renderContent(msg.content)"></div>
+            <div class="msg-role">{{ msg.role === 'user' ? '你' : msg.role === 'tool' ? '工具' : '助手' }}</div>
+            <div class="msg-text" v-if="msg.content && msg.content.trim()" :class="{ 'msg-text-tool': msg.role === 'tool' }" v-html="renderContent(msg.content)"></div>
+            <div class="msg-text msg-text-empty" v-else-if="msg.toolCalls && msg.toolCalls.length">（已调用工具，见下方工具标签）</div>
+            <div class="msg-text msg-text-empty" v-else-if="msg.role === 'tool'">工具执行完成</div>
+            <div class="msg-text msg-text-empty" v-else>（无内容）</div>
             <div class="msg-tools" v-if="msg.toolCalls && msg.toolCalls.length">
               <div class="tool-chip" v-for="(tc, j) in msg.toolCalls" :key="j">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
                 </svg>
-                {{ tc.name || tc.tool_name }}
+                {{ getToolName(tc) }}
               </div>
             </div>
           </div>
@@ -110,8 +136,13 @@
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { harnessApi } from '../api'
+
+const route = useRoute()
+const LS_SESSION_KEY = 'crawagent:last_session_id'
+const LS_SESSION_NAME_KEY = 'crawagent:last_session_name'
 
 const messages = ref([])
 const inputText = ref('')
@@ -120,6 +151,11 @@ const sessionId = ref('')
 const currentSessionName = ref('新对话')
 const messagesWrap = ref(null)
 const inputRef = ref(null)
+
+// 会话累计 token 用量（含缓存命中率与费用）
+const usageTotal = ref(null)
+const hitRate = ref(0)
+const hasUsage = computed(() => !!usageTotal.value && (usageTotal.value.total_tokens > 0))
 
 const examples = [
   { icon: '📰', text: '爬取 Hacker News 首页标题' },
@@ -131,7 +167,42 @@ const examples = [
 const inputPlaceholder = '想爬取什么？用大白话说就行…'
 
 onMounted(async () => {
-  // 尝试恢复已有会话
+  // 1. 优先从 URL query 取 session_id（Tasks 页跳转过来带的参数）
+  const urlSessionId = route.query.session_id
+  if (urlSessionId && typeof urlSessionId === 'string') {
+    sessionId.value = urlSessionId
+    try {
+      const hres = await harnessApi.listSessions(200)
+      const list = hres.sessions || []
+      const found = list.find(s => (s.id || s.session_id) === urlSessionId)
+      if (found) {
+        currentSessionName.value = found.name || '已有对话'
+        await loadHistory()
+        saveSessionToLocal()
+        return
+      }
+    } catch (e) {
+      console.warn('根据 URL session_id 查找失败:', e)
+    }
+  }
+
+  // 2. 其次从 localStorage 恢复上次的会话
+  let restoredFromLocal = false
+  try {
+    const lastSid = localStorage.getItem(LS_SESSION_KEY)
+    const lastSname = localStorage.getItem(LS_SESSION_NAME_KEY)
+    if (lastSid) {
+      sessionId.value = lastSid
+      currentSessionName.value = lastSname || '已有对话'
+      await loadHistory()
+      restoredFromLocal = true
+    }
+  } catch (e) {
+    console.warn('从 localStorage 恢复会话失败:', e)
+  }
+  if (restoredFromLocal) return
+
+  // 3. 最后尝试取最新的一个会话
   try {
     const res = await harnessApi.listSessions(1)
     const list = res.sessions || []
@@ -139,14 +210,45 @@ onMounted(async () => {
       sessionId.value = list[0].id || list[0].session_id
       currentSessionName.value = list[0].name || '已有对话'
       await loadHistory()
+      saveSessionToLocal()
       return
     }
   } catch (e) {
     console.warn('获取会话列表失败:', e)
   }
-  // 没有会话则新建
+  // 4. 完全没有会话则新建
   await newSession()
 })
+
+// 保存当前会话到 localStorage，刷新后可恢复
+function saveSessionToLocal() {
+  try {
+    if (sessionId.value) localStorage.setItem(LS_SESSION_KEY, sessionId.value)
+    if (currentSessionName.value) localStorage.setItem(LS_SESSION_NAME_KEY, currentSessionName.value)
+  } catch { /* ignore */ }
+}
+
+// 加载会话累计 token 用量（刷新后恢复显示）
+async function loadUsage() {
+  if (!sessionId.value) return
+  try {
+    const res = await harnessApi.getUsage(sessionId.value)
+    const u = res?.usage
+    if (u) {
+      usageTotal.value = u
+      hitRate.value = u.hit_rate || 0
+    }
+  } catch (e) {
+    console.warn('加载 token 用量失败:', e)
+  }
+}
+
+// sessionId 变化时自动保存 + 加载累计用量
+watch(sessionId, () => {
+  saveSessionToLocal()
+  loadUsage()
+})
+watch(currentSessionName, () => saveSessionToLocal())
 
 async function newSession() {
   try {
@@ -166,17 +268,65 @@ async function loadHistory() {
   try {
     const res = await harnessApi.getHistory(sessionId.value, 50)
     const entries = res.entries || []
+    console.log('[Chat] loadHistory entries:', entries.length, 'sessionId:', sessionId.value)
     if (entries.length > 0) {
-      messages.value = entries.map(e => ({
-        role: e.role,
-        content: e.content || '',
-        toolCalls: e.tool_calls || [],
+      const sorted = [...entries].sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+      messages.value = sorted.map(e => ({
+        role: e.role || 'assistant',
+        content: (e.content || '').trim(),
+        toolCalls: normalizeToolCalls(e.tool_calls || []),
+        toolCallId: e.tool_call_id || '',
       }))
+      console.log('[Chat] messages loaded:', messages.value.length)
+    } else {
+      console.log('[Chat] no entries found for session')
     }
     await scrollToBottom()
   } catch (e) {
     console.warn('加载历史失败:', e)
   }
+}
+
+// 兼容不同版本的 tool_calls 格式
+function normalizeToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls)) return []
+  return toolCalls.map(tc => {
+    // 格式 1: {function: {name: "xxx", arguments: {...}}, id: "xxx", type: "function"}
+    if (tc.function && tc.function.name) {
+      return {
+        id: tc.id || '',
+        name: tc.function.name,
+        arguments: tc.function.arguments || {},
+        type: tc.type || 'function',
+      }
+    }
+    // 格式 2: {name: "xxx", args: {...}} (LangChain 格式)
+    if (tc.name) {
+      return {
+        id: tc.id || '',
+        name: tc.name,
+        arguments: tc.args || tc.arguments || {},
+        type: tc.type || 'function',
+      }
+    }
+    // 格式 3: {tool_name: "xxx"} (旧格式)
+    if (tc.tool_name) {
+      return {
+        id: tc.id || '',
+        name: tc.tool_name,
+        arguments: tc.arguments || {},
+        type: tc.type || 'function',
+      }
+    }
+    // 未知格式，返回原始数据
+    return tc
+  })
+}
+
+function getToolName(tc) {
+  if (!tc) return '工具'
+  // 兼容多种格式
+  return tc.name || tc.function?.name || tc.tool_name || '未知工具'
 }
 
 async function send() {
@@ -207,6 +357,13 @@ async function send() {
     } else if (res.kind === 'completed') {
       // 重新加载历史获取助手回复
       await loadHistory()
+      // 更新 token 用量徽章（累计值，兼容旧后端无 usage 字段）
+      if (res.usage_total) {
+        usageTotal.value = res.usage_total
+        hitRate.value = res.usage_total.hit_rate || 0
+      } else {
+        await loadUsage()
+      }
     } else {
       messages.value.push({
         role: 'assistant',
@@ -244,18 +401,25 @@ function autoResize() {
 }
 
 function renderContent(content) {
-  if (!content) return ''
+  if (!content || !content.trim()) return ''
   // 简单转义 HTML
   let html = content
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-  // 代码块
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre class="code-block"><code>$2</code></pre>')
+  // 代码块（先用占位符保护，避免后续 \n→<br> 替换污染 pre 内部导致双行距）
+  const codeBlocks = []
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+    const key = `__CRAWAGENT_CODE_${codeBlocks.length}__`
+    codeBlocks.push(code)
+    return `<pre class="code-block"><code>${key}</code></pre>`
+  })
   // 行内代码
   html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
-  // 换行
+  // 换行（代码块内容已替换为占位符，不会受影响）
   html = html.replace(/\n/g, '<br>')
+  // 恢复代码块内容（内容已在上方转义，直接插入是安全的）
+  html = html.replace(/__CRAWAGENT_CODE_(\d+)__/g, (m, i) => codeBlocks[+i])
   return html
 }
 </script>
@@ -315,6 +479,49 @@ function renderContent(content) {
   border-color: var(--terracotta);
   color: var(--terracotta);
   background: var(--paper-warm);
+}
+
+/* Token 用量统计徽章 */
+.usage-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 8px;
+}
+
+.usage-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--paper-warm);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.usage-badge svg {
+  flex-shrink: 0;
+}
+
+.usage-badge.rate-good {
+  border-color: #34d399;
+  color: #059669;
+  background: #ecfdf5;
+}
+
+.usage-badge.rate-bad {
+  border-color: #fbbf24;
+  color: #b45309;
+  background: #fffbeb;
+}
+
+@media (max-width: 720px) {
+  .usage-stats {
+    display: none; /* 窄屏隐藏徽章，避免挤压标题 */
+  }
 }
 
 /* 消息区 */
@@ -378,6 +585,23 @@ function renderContent(content) {
   line-height: 1.7;
   color: var(--ink);
   word-wrap: break-word;
+}
+
+.msg-text-empty {
+  font-size: 13px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.msg-text-tool {
+  background: var(--paper-warm);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  font-size: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  word-break: break-all;
 }
 
 .msg-tools {

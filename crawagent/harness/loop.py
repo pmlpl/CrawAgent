@@ -48,12 +48,14 @@ class CrawlLoop:
         max_turns: int = 50,
         compaction_threshold: int = 80000,
         tool_executors: Optional[Dict[str, Callable]] = None,
+        task_notes: str = "",
     ):
         self.session = session
         self.hooks = hooks
         self.tools = tools
         self.max_turns = max_turns
         self.compaction_threshold = compaction_threshold
+        self._task_notes = task_notes
 
         self._tool_map: Dict[str, CrawlToolDef] = {t.name: t for t in tools}
         self._tool_executors: Dict[str, Callable] = {}  # name → async callable
@@ -70,6 +72,13 @@ class CrawlLoop:
         self._should_stop: bool = False
         self._compaction_threshold = compaction_threshold
         self._lane_name: str = "main"
+        self._compaction: Optional[Any] = None  # 复用实例，保留压缩间隔状态
+
+        # 缓存稳定前缀（对齐 Reasonix cache-stable prefix）：
+        # system prompt 构造一次，全生命周期字节级复用；动态内容（task_notes）
+        # 走 transient turn-injection 放消息尾部，永不触碰此前缀。
+        from crawagent.harness.system_prompt import SystemPromptAssembler
+        self._system_prompt = SystemPromptAssembler().assemble(tools=self.tools)
 
     def register_tool_executor(self, tool_name: str, executor: Callable) -> None:
         """注册工具执行器（async callable）"""
@@ -91,6 +100,20 @@ class CrawlLoop:
         op_id = await self.session.start_operation(lane_name, OperationType.RUN)
 
         try:
+            # F9: 崩溃恢复 — 清理上一次崩溃遗留的 open operation（孤儿 tool_calls 等）
+            try:
+                recovery_plan = await self.session.build_recovery_plan(hooks=self.hooks)
+                if recovery_plan.operations or recovery_plan.open_lanes:
+                    from loguru import logger
+                    logger.warning(
+                        f"[Loop] 检测到 {len(recovery_plan.operations)} 个遗留 open operation，"
+                        f"执行崩溃恢复: {[r.action.value for r in recovery_plan.operations]}"
+                    )
+                    await self.session.apply_recovery_plan(recovery_plan)
+            except Exception:
+                # 恢复失败不阻断主流程（当前 run 会新建 operation）
+                pass
+
             # 添加用户消息
             user_entry = CrawlMessage(
                 id=uuid.uuid4().hex[:24],
@@ -139,11 +162,14 @@ class CrawlLoop:
 
                     # 添加工具结果到 session
                     for result in tool_results:
+                        tool_content = result.get("content", "")
+                        if not tool_content or not str(tool_content).strip():
+                            tool_content = result.get("error", "") or "工具执行完成（无返回内容）"
                         tool_entry = CrawlMessage(
                             id=uuid.uuid4().hex[:24],
                             parent_id=assistant_msg.id,
                             role="tool",
-                            content=result.get("content", ""),
+                            content=tool_content,
                             tool_call_id=result.get("tool_call_id"),
                         )
                         await self.session.append_entry(tool_entry)
@@ -181,24 +207,52 @@ class CrawlLoop:
         """请求停止循环"""
         self._should_stop = True
 
+    @property
+    def token_usage(self) -> TokenUsage:
+        """当前 loop 累计的 token 用量（含缓存字段）。"""
+        return self._token_usage
+
+    def _record_usage(self, response: Any, llm: Any) -> None:
+        """累计记录一次 LLM 响应的 token 用量（含缓存命中/未命中）。
+
+        从 usage.py 提取（兼容 DeepSeek 顶层 prompt_cache_* 与 OpenAI cached_tokens），
+        对 self._token_usage 做累加而不是覆盖。
+        """
+        try:
+            from crawagent.llm.usage import _extract_usage_from_response
+            u = _extract_usage_from_response(response)
+            if not u:
+                return
+            self._token_usage.prompt_tokens += int(u.get("prompt_tokens", 0) or 0)
+            self._token_usage.completion_tokens += int(u.get("completion_tokens", 0) or 0)
+            self._token_usage.total_tokens += int(u.get("total_tokens", 0) or 0)
+            self._token_usage.cache_hit_tokens += int(u.get("cache_hit_tokens", 0) or 0)
+            self._token_usage.cache_miss_tokens += int(u.get("cache_miss_tokens", 0) or 0)
+            self._token_usage.model = getattr(llm, "model_name", "") or self._token_usage.model or ""
+        except Exception:
+            pass
+
     # ---- 内部方法 ----
 
     async def _checkpoint(self) -> None:
         """创建 checkpoint：刷新写入 + 创建新 TurnSnapshot + 触发 Compaction"""
         self._phase = Phase.TURN
 
-        entries = await self.session.get_entries(limit=200)
+        # 全量读取（不截断）：长度由 compaction 阈值控制，避免截断切断缓存前缀
+        entries = await self.session.get_entries(limit=100000)
         tool_names = list(self._tool_map.keys())
 
-        # F6: Compaction 接入 — token 超阈值时压缩早期消息
+        # F6: Compaction 接入 — token 超阈值时压缩早期消息（复用实例保留压缩间隔状态）
         try:
-            from crawagent.harness.compaction import Compaction
-            compaction = Compaction(
-                session=self.session,
-                hooks=self.hooks,
-                threshold=self._compaction_threshold,
-                keep_recent=10,
-            )
+            if self._compaction is None:
+                from crawagent.harness.compaction import Compaction
+                self._compaction = Compaction(
+                    session=self.session,
+                    hooks=self.hooks,
+                    threshold=self._compaction_threshold,
+                    keep_recent=10,
+                )
+            compaction = self._compaction
             if await compaction.should_compact(entries):
                 from loguru import logger
                 logger.info(
@@ -206,8 +260,8 @@ class CrawlLoop:
                 )
                 summary = await compaction.compact(entries, lane_name=self._lane_name)
                 if summary is not None:
-                    # 重新读取：summary + 最近消息
-                    entries = await self.session.get_entries(limit=200)
+                    # 重新读取：summary + 最近消息（全量，不截断）
+                    entries = await self.session.get_entries(limit=100000)
         except Exception as e:
             from loguru import logger
             logger.debug(f"[Compaction] 跳过（{type(e).__name__}: {e}）")
@@ -231,13 +285,17 @@ class CrawlLoop:
         4. 解析响应
         5. 追加助手消息到 session
         """
-        # 获取上下文（默认 asc 正序：老→新，保证 tool 消息紧跟其 tool_calls）
-        entries = await self.session.get_entries(limit=100)
+        # 获取上下文（默认 asc 正序：老→新，保证 tool 消息紧跟其 tool_calls；
+        # 全量读取不截断，长度由 compaction 控制，避免截断切断缓存前缀）
+        entries = await self.session.get_entries(limit=100000)
 
-        # 组装系统提示词（F2 修复：真正调用 assemble）
-        from crawagent.harness.system_prompt import SystemPromptAssembler
-        prompt_assembler = SystemPromptAssembler()
-        system_prompt = prompt_assembler.assemble(tools=self.tools)
+        # 修复 tool_calls / tool response 配对不完整问题：
+        # 如果截取导致最后一条 assistant 有 tool_calls 但缺少对应的 tool response，
+        # 去掉该 assistant 消息（否则 OpenAI API 会报 400 错误）
+        entries = self._fix_tool_call_pairing(entries)
+
+        # 系统提示词使用构造期缓存的稳定前缀（对齐 Reasonix cache-stable prefix）
+        system_prompt = self._system_prompt
 
         # 将 CrawlMessage 转换为 LangChain Message 对象（含 tool_calls/tool_call_id）
         from langchain_core.messages import (
@@ -278,15 +336,21 @@ class CrawlLoop:
                                 "id": tc.get("id", e.tool_call_id or ""),
                                 "type": "tool_call",
                             })
-                messages.append(AIMessage(
-                    content=e.content,
-                    tool_calls=tcs if tcs else None,
-                ))
+                msg_kwargs: Dict[str, Any] = {"content": e.content}
+                if tcs:
+                    msg_kwargs["tool_calls"] = tcs
+                messages.append(AIMessage(**msg_kwargs))
             elif e.role == "tool":
                 messages.append(ToolMessage(
                     content=e.content,
                     tool_call_id=e.tool_call_id or "",
                 ))
+
+        # transient turn-injection（对齐 Reasonix boot.go：mid-session changes never
+        # touch the cache-stable prefix）：task_notes 作为追加的 system 消息放在列表
+        # 末尾，而不是合并进首条 system，保证前缀字节不变。
+        if self._task_notes:
+            messages.append(SystemMessage(content=self._task_notes))
 
         # 获取 LLM（延迟导入避免循环引用）
         from crawagent.llm.factory import get_llm
@@ -308,9 +372,8 @@ class CrawlLoop:
             logger.error(f"LLM 调用失败: {type(e).__name__}: {e}")
             return None
 
-        # fire AFTER_RESPONSE hook
-        resp_context: Dict[str, Any] = {"response": response, "lane": self._lane_name}
-        resp_context = await self.hooks.fire(HookEvent.AFTER_RESPONSE, resp_context)
+        # 回填 token 统计（累计 + 缓存字段，此前 TokenUsage 从未回填且是覆盖式）
+        self._record_usage(response, llm)
 
         # 解析响应
         content = response.content if hasattr(response, 'content') else str(response)
@@ -327,6 +390,41 @@ class CrawlLoop:
                 }
                 for tc in response.tool_calls
             ]
+
+        # ====== 兜底：LLM 无 tool_calls 但用户明确需要工具时，强制重试一次 ======
+        if not tool_calls and self._needs_tools(entries):
+            from loguru import logger
+            logger.warning(
+                f"[Loop] LLM 返回纯文本但无 tool_calls，检测到用户需要工具，强制重试..."
+            )
+            retry_content, retry_tool_calls = await self._force_tool_retry(
+                messages, entries, content
+            )
+            if retry_tool_calls:
+                content = retry_content
+                tool_calls = retry_tool_calls
+                logger.info(f"[Loop] 强制重试成功：{len(tool_calls)} 个 tool_calls")
+
+        # ====== 补充描述：如果 LLM 调用工具但没有文字内容，自动添加描述 ======
+        if tool_calls and (not content or not content.strip()):
+            tool_names = [
+                tc.get("function", {}).get("name", "unknown")
+                if isinstance(tc, dict) and "function" in tc
+                else tc.get("name", "unknown") if isinstance(tc, dict) else "unknown"
+                for tc in tool_calls
+            ]
+            tool_display = "、".join(tool_names[:3])
+            if len(tool_names) > 3:
+                tool_display += f" 等 {len(tool_names)} 个"
+            content = f"正在调用工具：{tool_display}..."
+
+        # ====== 兜底：如果最终消息既无工具也无内容，添加默认文本 ======
+        if not tool_calls and (not content or not content.strip()):
+            content = "任务已完成。"
+
+        # fire AFTER_RESPONSE hook
+        resp_context: Dict[str, Any] = {"response": response, "lane": self._lane_name}
+        resp_context = await self.hooks.fire(HookEvent.AFTER_RESPONSE, resp_context)
 
         # 追加助手消息
         parent_id = await self._get_parent_id()
@@ -428,12 +526,172 @@ class CrawlLoop:
         # Phase 3: Finalize
         if isinstance(result, dict):
             result["tool_call_id"] = tool_call_id
+            if not result.get("content"):
+                result["content"] = result.get("error") or f"工具 {tool_name} 执行完成"
             return result
         else:
             return {
                 "tool_call_id": tool_call_id,
-                "content": str(result),
+                "content": str(result) if result else f"工具 {tool_name} 执行完成",
             }
+
+    def _fix_tool_call_pairing(self, entries: List[CrawlMessage]) -> List[CrawlMessage]:
+        """修复 tool_calls / tool response 配对不完整问题。
+
+        当消息列表被截取（limit 或 compaction）时，可能出现：
+        - assistant 消息有 tool_calls=[A, B]，但后续缺少 A 或 B 的 tool response
+        - OpenAI API 要求每个 tool_call_id 都必须有对应的 tool 消息
+
+        修复策略：
+        1. 扫描所有 assistant(tool_calls) 消息，收集 tool_call_id
+        2. 扫描所有 tool 消息，收集已响应的 tool_call_id
+        3. 对于缺少 tool response 的 assistant(tool_calls)，
+           如果在消息末尾（正在执行中），去掉该 assistant 消息
+           如果在中间，补充一个占位 tool response
+        """
+        if not entries:
+            return entries
+
+        # 收集所有已有的 tool_call_id（来自 tool 消息）
+        answered_ids: set = set()
+        for e in entries:
+            if e.role == "tool" and e.tool_call_id:
+                answered_ids.add(e.tool_call_id)
+
+        # 检查每条 assistant(tool_calls) 是否都有对应的 tool response
+        result: List[CrawlMessage] = []
+        for i, e in enumerate(entries):
+            if e.role == "assistant" and e.tool_calls:
+                # 提取这条 assistant 消息中所有 tool_call_id
+                tc_ids = []
+                for tc in e.tool_calls:
+                    if isinstance(tc, dict):
+                        tc_id = tc.get("id", "")
+                        if tc_id:
+                            tc_ids.append(tc_id)
+
+                if tc_ids:
+                    # 检查后续消息中是否有对应的 tool response
+                    missing_ids = [
+                        tid for tid in tc_ids
+                        if tid not in answered_ids
+                    ]
+                    if missing_ids:
+                        # 是最后一条 assistant（tool 正在执行中，还没来得及生成 response）
+                        is_last = (i == len(entries) - 1)
+                        if is_last:
+                            # 去掉这条 assistant（下一轮会重新调用）
+                            from loguru import logger
+                            logger.warning(
+                                f"[Loop] 丢弃末尾未配对的 assistant(tool_calls): "
+                                f"missing {len(missing_ids)} tool responses"
+                            )
+                            continue
+                        else:
+                            # 中间的缺失：补充占位 tool response
+                            for mid in missing_ids:
+                                placeholder = CrawlMessage(
+                                    id=uuid.uuid4().hex[:24],
+                                    parent_id=e.id,
+                                    role="tool",
+                                    content="(工具执行结果缺失，已被截断)",
+                                    tool_call_id=mid,
+                                )
+                                result.append(placeholder)
+            result.append(e)
+
+        return result
+
+    def _needs_tools(self, entries: List[CrawlMessage]) -> bool:
+        """检查用户是否明显需要使用工具
+
+        判断标准：
+        1. 最新的 user 消息包含 URL、爬取/抓取/图片/搜索/分析等关键词
+        2. 或者历史中已经有 tool_calls 但没有完成
+        """
+        # 找最新的 user 消息
+        last_user_content = ""
+        for e in reversed(entries):
+            if e.role == "user":
+                last_user_content = (e.content or "").lower()
+                break
+
+        if not last_user_content:
+            return False
+
+        # 关键词检测
+        tool_keywords = [
+            # 中文
+            "http://", "https://", "www.", ".com", ".cn", ".net",
+            "爬取", "抓取", "抓取", "提取", "采集", "扫描",
+            "图片", "壁纸", "图像", "照片",
+            "搜索", "查找", "检索",
+            "分析", "监控", "检测",
+            # 英文
+            "crawl", "scrape", "extract", "fetch", "download",
+            "image", "wallpaper", "picture", "photo",
+            "search", "find", "lookup",
+            "analyze", "monitor", "check",
+        ]
+        return any(kw in last_user_content for kw in tool_keywords)
+
+    async def _force_tool_retry(
+        self,
+        messages: List[Any],
+        entries: List[CrawlMessage],
+        prev_content: str,
+    ) -> tuple:
+        """强制工具调用重试
+
+        在系统提示中追加"必须使用工具"的指令，并重新调用 LLM。
+        返回 (content, tool_calls) 元组。
+        """
+        from crawagent.llm.factory import get_llm
+        from crawagent.harness.tools import to_langchain_tools
+        from langchain_core.messages import SystemMessage
+
+        # 构建强化系统提示：追加独立 SystemMessage 到末尾（不合并进首条 system，
+        # 保证缓存稳定前缀字节不变，避免触发 OpenAI 兼容 API 400 与缓存失效）
+        force_text = (
+            "你必须使用工具来完成用户的任务。"
+            "用户请求涉及网站操作（爬取、抓取、搜索等），"
+            "你必须调用 supervisor 或 search 工具，而不是返回文字描述。"
+            f"上一轮你返回了文字：'{prev_content[:100]}'，但没有调用任何工具。"
+            "这一次，请直接调用工具。"
+        )
+        retry_messages = list(messages)
+        retry_messages.append(SystemMessage(content=force_text))
+
+        llm_tools = to_langchain_tools(self.tools)
+        llm = get_llm(tools=llm_tools) if llm_tools else get_llm()
+
+        try:
+            response = await llm.ainvoke(retry_messages)
+        except Exception as e:
+            from loguru import logger
+            logger.error(f"[Loop] 强制重试失败: {e}")
+            return (prev_content, [])
+
+        # 强制重试的 LLM 调用同样计入 token 累计
+        self._record_usage(response, llm)
+
+        # 解析响应
+        content = response.content if hasattr(response, 'content') else str(response)
+        tool_calls: List[Dict[str, Any]] = []
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            tool_calls = [
+                {
+                    "id": tc.get("id", uuid.uuid4().hex[:24]) if isinstance(tc, dict) else uuid.uuid4().hex[:24],
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", ""),
+                        "arguments": tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {}),
+                    },
+                }
+                for tc in response.tool_calls
+            ]
+
+        return (content, tool_calls)
 
     def _extract_follow_up(self, msg: CrawlMessage) -> Optional[str]:
         """从助手消息中提取 followUp 指令

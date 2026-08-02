@@ -161,20 +161,15 @@ class SQLiteFTS5Retriever(BaseRetriever):
             self._conn = None
 
 
-# 向量检索器占位（后续可替换）
-class VectorRetriever(BaseRetriever):
-    """向量检索器占位（未来扩展）"""
-
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-        raise NotImplementedError("Vector retriever not implemented yet. Use SQLiteFTS5Retriever.")
-
-
 # 工厂
 def create_retriever(backend: str = "sqlite_fts5", **kwargs) -> BaseRetriever:
-    backends = {
-        "sqlite_fts5": SQLiteFTS5Retriever,
-        "vector": VectorRetriever,
-    }
-    if backend not in backends:
-        raise ValueError(f"Unknown retriever backend: {backend}")
-    return backends[backend](**kwargs)
+    """创建检索器实例。
+
+    当前仅支持 sqlite_fts5（零依赖全文检索）。如未来引入向量检索，
+    在此注册新 backend 即可。
+    """
+    if backend != "sqlite_fts5":
+        raise ValueError(
+            f"不支持的检索后端: {backend}（当前仅支持 'sqlite_fts5'）"
+        )
+    return SQLiteFTS5Retriever(**kwargs)

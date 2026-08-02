@@ -24,7 +24,7 @@ from crawagent.core.chunking import (
     RecursiveChunking, create_chunker,
 )
 from crawagent.core.markdown_generator import MarkdownGenerator, html_to_clean_markdown
-from crawagent.core.retriever import BaseRetriever, SQLiteFTS5Retriever, VectorRetriever, create_retriever, SearchResult
+from crawagent.core.retriever import BaseRetriever, SQLiteFTS5Retriever, create_retriever, SearchResult
 from crawagent.core.executor import CrawlExecutor, get_executor
 
 __all__ = [
@@ -50,7 +50,7 @@ __all__ = [
     # Markdown（P2）
     "MarkdownGenerator", "html_to_clean_markdown",
     # Retriever
-    "BaseRetriever", "SQLiteFTS5Retriever", "VectorRetriever", "create_retriever", "SearchResult",
+    "BaseRetriever", "SQLiteFTS5Retriever", "create_retriever", "SearchResult",
     # Executor
     "CrawlExecutor", "get_executor",
 ]

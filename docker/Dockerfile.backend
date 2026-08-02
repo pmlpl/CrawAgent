@@ -1,0 +1,40 @@
+# ============================================================
+# CrawAgent 后端镜像
+# 构建：docker build -f docker/Dockerfile.backend -t crawagent-backend .
+# ============================================================
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# 系统依赖（lxml 编译所需 + 基础工具）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libxml2-dev \
+    libxslt1-dev \
+    libssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 先拷贝依赖清单，利用 Docker 层缓存
+COPY pyproject.toml README.md ./
+COPY crawagent ./crawagent
+COPY main.py ./
+
+# 安装项目依赖（含 browser/stealth/data 扩展）
+RUN pip install --upgrade pip \
+    && pip install -e ".[all]"
+
+# 可选：浏览器爬取支持（构建体积显著增大，需要时取消注释）
+# RUN python -m playwright install --with-deps chromium
+
+# 数据与日志目录（由 compose 挂载持久卷）
+RUN mkdir -p /app/data /app/logs
+
+EXPOSE 8000
+
+CMD ["python", "main.py", "serve", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,7 +1,9 @@
 # CrawAgent 架构设计文档
 
-> 版本：v2.1 | 更新：2026-08-01
-> 变更：新增引擎抽象层（engines/）、视频提取/广告移除（extractors/）、登录态持久化（sessions/）、反爬Hook（antibot_hook/escalation_hook）、深度爬取/饱和度感知/URL过滤器、代理轮换
+> 版本：v2.2 | 更新：2026-08-02
+> 变更：
+> - v2.2（2026-08-02）：新增网站画像系统（core/site_profile.py）、图片专用提取器（CompositeExtractor.extract_images）、SPA 客户端路由处理（fetcher.py 4xx+框架检测）、Playwright 滚动触发懒加载、LLM 工具调用完整性自愈（loop._fix_tool_call_pairing）、Supervisor 图片意图识别与自动浏览器升级
+> - v2.1（2026-08-01）：引擎抽象层、视频提取/广告移除、登录态持久化、反爬Hook、深度爬取/饱和度感知/URL过滤器、代理轮换
 
 ---
 
@@ -76,6 +78,18 @@
 │   ┌──────────────┐ ┌────────────┐                                      │
 │   │VideoExtractor│ │ AdRemover  │                                      │
 │   └──────────────┘ └────────────┘                                      │
+│                                                                         │
+│   网站画像层（core/site_profile.py）：                                  │
+│   ┌────────────────────────────────────────────────────────────────┐  │
+│   │  SiteProfileStore (./profiles/{domain}.json)                   │  │
+│   │  ┌──────────────┐  discover()  ┌────────────────────────────┐  │  │
+│   │  │ SiteProfile  │ ←────────── │ 自动检测 SPA 框架/图片加载  │  │  │
+│   │  │ - spa_type   │              │ /反爬等级/导航结构          │  │  │
+│   │  │ - known_routes│             └────────────────────────────┘  │  │
+│   │  │ - nav_links  │  人工 notes 不断积累爬取经验                 │  │
+│   │  │ - notes      │                                              │  │
+│   │  └──────────────┘                                              │  │
+│   └────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
 │   旧模块（兼容保留）：                                                   │
 │   Fetcher / Frontier / Extractor / SiteAnalyzer / AntiBot              │
@@ -283,11 +297,124 @@ class RunResult:
 
 | 模块 | 文件 | 简要说明 |
 |------|------|----------|
-| Fetcher | `core/fetcher.py` | httpx + curl_cffi 双引擎抓取，指数退避重试，域名级限速 |
+| Fetcher | `core/fetcher.py` | httpx + curl_cffi 双引擎抓取，指数退避重试，域名级限速，SPA 客户端路由处理 |
 | Frontier | `core/frontier.py` | URL 队列管理（优先级 + 去重），待迁移至 MySQL |
-| Extractor | `core/extractor.py` | 三级回退提取（selectolax → lxml → LLM） |
+| Extractor | `core/extractor.py` | 三级回退提取（selectolax → lxml → LLM）+ 图片专用提取器 |
 | SiteAnalyzer | `graph/site_analyzer.py` | Playwright + LLM 逆向站点接口 |
 | AntiBot | `graph/anti_bot.py` | 策略升级链（httpx → curl_cffi → Playwright → 验证码 → 人工） |
+
+---
+
+### 2.11 SiteProfile（网站画像系统）✨ 新增 v2.2
+
+**文件**：`crawagent/core/site_profile.py`
+
+**职责**：记录每个网站的特征，支持针对性优化与持续训练。每次爬取后 Supervisor 自动调用 `async_get_or_discover()`，将网站画像保存到 `./profiles/{domain}.json`。
+
+**核心数据结构**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `domain` | str | 域名（如 `haowallpaper.com`） |
+| `spa_type` | str | SPA 框架类型：`nuxt`/`vue`/`react`/`next`/`angular`/"" |
+| `site_framework` | str | 完整框架名（如 `Nuxt`、`Next.js`） |
+| `known_routes` | List[str] | 已知有效路由列表 |
+| `image_loading` | str | 图片加载方式：`static`/`lazy`/`dynamic` |
+| `anti_bot_level` | str | 反爬等级：`none`/`low`/`medium`/`high` |
+| `uses_client_routing` | bool | 是否使用客户端路由 |
+| `nav_links` | List[Dict] | 导航链接 `[{text, href, group}]`（最多 50 条） |
+| `notes` | str | 人工备注（由用户提供针对性优化建议） |
+| `crawl_count` | int | 累计爬取次数 |
+
+**自动发现机制**（`SiteProfile.discover()`）：
+1. **SPA 框架检测**：检查 `__NUXT__`/`__NEXT_DATA__`/`data-n-head`/`vue-router`/`react-router`/`ng-version` 等标记
+2. **图片加载方式**：扫描所有 `<img>` 标签的 `data-src`/`data-original`/`data-lazy`/`data-srcset`/`loading=lazy` 属性，按比例判定
+3. **反爬等级检测**：识别 Cloudflare/CAPTCHA/`webdriver`/`rate limit`/`fingerprint` 等信号
+4. **导航链接提取**：优先从 `<nav>`/`<header>`/`<menu>` 中提取，兜底扫描所有 `<a>` 标签
+
+**存储 API**：
+- `get_profile_store()` - 全局单例（懒加载）
+- `SiteProfileStore.get(domain)` / `save(profile)` / `delete(domain)` / `list_all()` / `search_by_note(keyword)`
+- `async_get_or_discover(domain, url, html)` - 异步获取或自动发现
+- `update_notes(domain, notes)` - 更新人工备注
+- `add_route(domain, route)` / `add_route_batch(domain, routes)` - 添加已知有效路由
+
+**Supervisor 集成**：每次爬取完成后调用 `async_get_or_discover`，画像自动累积，并通过 `notes` 字段支持人工标注以持续训练爬虫智能体。
+
+---
+
+### 2.12 图片专用提取器（extract_images）✨ 新增 v2.2
+
+**文件**：`crawagent/core/extractor.py` → `CompositeExtractor.extract_images()`
+
+**职责**：批量抽取页面所有图片来源，支持懒加载属性、meta 标签、JSON-LD 和背景图，自动去重、分类与排序。
+
+**提取来源**：
+
+| 来源 | 属性/标签 | 说明 |
+|------|-----------|------|
+| img 标签 | `src`/`data-src`/`data-original`/`data-lazy`/`data-srcset`/`srcset` | 含懒加载属性优先取 data-* |
+| meta | `og:image`/`twitter:image` | Open Graph / Twitter Card |
+| JSON-LD | `image`/`images` 字段 | 结构化数据 |
+| 背景图 | `style="background-image: url(...)"` | inline 背景图 |
+
+**输出结构**：每张图片返回 `{src, alt, title, width, height, kind, source}` 字典，`kind` 标识来源（img/og/json_ld/background）。
+
+**过滤策略**：
+- 按最小宽高过滤（默认 50×50，过滤图标/占位图）
+- 按 URL 去重（含 query string 归一化）
+- 按来源分类（meta 优先级最高）
+- 限制最大数量（默认 500）
+
+**Supervisor 集成**：识别"图片"/"壁纸"/"图库"等关键词后，自动启用 `use_browser=True` + `method=images`，并调用此提取器。
+
+---
+
+### 2.13 SPA 客户端路由处理 ✨ 新增 v2.2
+
+**文件**：`crawagent/core/fetcher.py`（Playwright 抓取分支）
+
+**职责**：对于 Nuxt/Vue/React/Next/Angular 等 SPA，服务器端 4xx 状态码不代表页面不可用，客户端路由会接管并渲染实际内容。
+
+**处理流程**：
+1. Playwright 收到 4xx 状态码时，检查 HTML 是否包含 SPA 框架标记
+2. 若检测到 SPA 框架（`__NUXT__`/`__NEXT_DATA__`/`data-n-head`/`vue-router`/`react-router`/`vuex`/`_nuxt`），等待 `networkidle` + 额外 2s 渲染时间
+3. 重新读取页面内容，若 body 文本 >500 字符且 title 不含 "404"，则将状态码改写为 200
+4. 否则视为真正的渲染失败，返回错误
+
+**触发条件**：仅当状态码为 400/403/404 且检测到 SPA 框架时触发；其他 4xx/5xx 仍按原逻辑处理。
+
+---
+
+### 2.14 Playwright 滚动触发懒加载 ✨ 新增 v2.2
+
+**文件**：`crawagent/core/fetcher.py`
+
+**职责**：图片懒加载站点（如 haowallpaper.com）首次 Playwright 加载只能获取少量图片，需要模拟用户滚动以触发 `data-src`/`data-original`/滚动加载。
+
+**滚动逻辑**：
+- 逐步滚动（每次 600px 或视口高度的 80%）
+- 每次滚动后等待 400ms 让懒加载请求发出
+- 连续两次滚动到底部且页面高度不变时停止
+- 最多滚动 12 次
+- 滚动完成后等待 `networkidle`（4s 超时）或额外 1.5s
+
+**触发后**：重新读取 `page.content()` 和 `page.title()`，确保提取器拿到完整 HTML（含新增的 img/data-src）。
+
+---
+
+### 2.15 LLM 工具调用完整性自愈 ✨ 新增 v2.2
+
+**文件**：`crawagent/harness/loop.py` → `CrawlLoop._fix_tool_call_pairing()`
+
+**职责**：当消息列表被截取（limit 或 compaction）时，可能出现 assistant 消息有 `tool_calls` 但缺少对应 `tool` 响应消息，导致 OpenAI API 报 400 错误（`An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'`）。
+
+**修复策略**：在每次组装上下文发送 LLM 前扫描消息序列，对每个带 `tool_calls` 的 assistant 消息检查后续是否紧跟对应数量的 tool 消息；若缺失则移除该 assistant 消息（保留更早的完整对话）。
+
+**配套兜底**：
+- LLM 最终消息无 `tool_calls` 且 `content` 为空时，自动填充 `"任务已完成。"`
+- 工具执行结果 `content` 为空时，自动填充 `"工具执行完成（无返回内容）"` 或错误信息
+- save_executor 图片抓取完成后，返回明确中文总结（条数/下载量/路径/预览），避免 LLM 反复调用 search/supervisor 死循环
 
 ---
 
@@ -433,6 +560,8 @@ services:
 | v1.0 | 2026-07-12 | 初始版本：LangGraph 状态机架构，5 阶段实现 |
 | v2.0 | 2026-07-31 | pi Agent Harness 重构：CrawlHarness/CrawlLoop/CrawlSession/CrawlHooks/Compaction 等新模块，MySQL 持久化，8 种 hook 事件，7 个内置工具 |
 | v2.1 | 2026-08-01 | P1 引擎抽象层（engines/三引擎fallback）、P6 深度爬取+URL过滤器+饱和度感知、P7 视频提取+广告移除+yt-dlp播放列表、代理轮换、登录态持久化、反爬Hook（antibot/escalation） |
+| v2.2 | 2026-08-02 | 图片专用提取器（extract_images 多源提取）、SPA 客户端路由处理（4xx+框架检测改写 200）、Playwright 滚动触发懒加载、网站画像系统（site_profile.py）、LLM 工具调用完整性自愈（_fix_tool_call_pairing）、Supervisor 图片意图识别+自动浏览器升级、前端消息兜底显示 |
+| v2.3 | 2026-08-02 | P8 登录态 API（login_interactive 手动登录 + grab_anonymous_cookies 匿名 cookie 自动获取 + cookies.txt 导出）、MediaDownloader 抖音自动兜底匿名 cookie、P9 浏览器 API 捕获器（api_harvester.py：拦截签名 API/滚动分页/启发式提取媒体直链，无需逆向签名算法）、harvest_api 工具、haowallpaper 分页+视频、快手/抖音视频下载验证 |
 
 ---
 
@@ -454,6 +583,8 @@ crawagent/
 │   ├── proxy.py                # 代理配置 + 轮换代理池（P1-7）
 │   ├── deep_crawl.py           # BFS/DFS/Best-First 深度爬取（P6-3）
 │   ├── adaptive.py             # 饱和度感知爬取（P6-4）
+│   ├── site_profile.py         # 网站画像系统：SiteProfile + SiteProfileStore（v2.2）
+│   ├── api_harvester.py        # 浏览器 API 捕获器：拦截签名 API + 启发式提取（v2.3/P9）
 │   └── filters.py              # URLFilter + FilterChain（P6-5）
 ├── engines/                    # 引擎抽象层（P1-4/P1-5）
 │   ├── __init__.py             # 统一导出

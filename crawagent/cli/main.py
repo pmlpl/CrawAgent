@@ -10,7 +10,6 @@ import click
 from loguru import logger
 
 from crawagent.config.settings import get_settings
-from crawagent.graph.agent_workflow import AgentRunner
 from crawagent.graph.site_analyzer import analyze_site
 from crawagent.core.executor import CrawlExecutor
 from crawagent.core.fetcher import Fetcher
@@ -41,26 +40,73 @@ def cli(ctx, verbose):
 @click.option("--max-pages", "-p", default=50, help="最大爬取页数")
 @click.option("--thread-id", "-t", help="会话 ID（用于断点续爬）")
 def run(instruction: str, url: List[str], max_pages: int, thread_id: str):
-    """运行 Agent 爬取任务"""
+    """运行 Agent 爬取任务（Harness 执行路径）"""
     async def _run():
-        runner = AgentRunner()
-        result = await runner.run(
-            user_input=instruction,
-            seed_urls=list(url) if url else None,
-            thread_id=thread_id,
+        from crawagent.harness import (
+            CrawlHarness, SessionManager, CrawlHooks,
+            create_default_tools, create_antibot_hooks,
         )
-        
-        items = result.get("extracted_items", [])
-        click.echo(f"\n✅ 任务完成: {len(items)} 条数据")
-        click.echo(f"Job ID: {result.get('job', {}).id if result.get('job') else 'N/A'}")
-        
-        # 显示前几条
-        for item in items[:5]:
-            click.echo(f"  - {item.get('title', 'N/A')} | {item.get('url', 'N/A')}")
-        
-        if len(items) > 5:
-            click.echo(f"  ... 共 {len(items)} 条")
-    
+        settings = get_settings()
+        session_manager = SessionManager(settings.mysql_dsn)
+        await session_manager.initialize()
+        hooks = CrawlHooks()
+        create_antibot_hooks(hooks)
+        registry = create_default_tools()
+        harness = CrawlHarness(
+            session_manager=session_manager,
+            hooks=hooks,
+            tools=registry.list_tools(),
+            tool_executors=registry.get_all_executors(),
+        )
+        try:
+            # thread_id 兼容：复用为 harness session；不存在则创建
+            session = await harness.get_session(thread_id) if thread_id else None
+            if session is None:
+                session = await harness.create_session(name=f"cli:{instruction[:30]}")
+            message = instruction
+            if url:
+                message += "\n\n目标URL:\n" + "\n".join(url)
+            task_notes = (
+                "本次爬取任务的资源预算（严格遵守）：\n"
+                f"- 最多抓取 {max_pages} 个页面（不要超过）"
+            )
+            result = await harness.prompt(session.session_id, message, task_notes=task_notes)
+
+            if result.error:
+                click.echo(f"❌ 任务失败: {result.error}")
+                return
+
+            # 从会话消息树提取 items（extract/save 工具返回 JSON 中的 items 数组）
+            items = []
+            try:
+                entries = await session.get_entries(limit=1000, order="asc")
+            except Exception:
+                entries = []
+            for e in entries:
+                if e.role == "tool" and e.content:
+                    try:
+                        payload = json.loads(e.content)
+                        got = payload.get("items") if isinstance(payload, dict) else None
+                        if isinstance(got, list):
+                            items.extend(got)
+                    except Exception:
+                        pass
+
+            click.echo(f"\n✅ 任务完成: {len(items)} 条数据")
+            click.echo(f"Session ID: {session.session_id}")
+
+            # 显示前几条
+            for item in items[:5]:
+                if isinstance(item, dict):
+                    click.echo(f"  - {item.get('title', 'N/A')} | {item.get('url', 'N/A')}")
+                else:
+                    click.echo(f"  - {item}")
+
+            if len(items) > 5:
+                click.echo(f"  ... 共 {len(items)} 条")
+        finally:
+            await harness.close()
+
     asyncio.run(_run())
 
 
@@ -219,8 +265,34 @@ def serve(host: str, port: int, reload: bool):
 @cli.command()
 @click.argument("job_id")
 def status(job_id: str):
-    """查看任务状态"""
-    click.echo(f"任务 {job_id} 状态查询暂未实现")
+    """查看任务状态（JobStore 持久化任务）"""
+    import time
+
+    from crawagent.core.job_store import get_job_store
+
+    async def _status():
+        job = await get_job_store().get_job(job_id)
+        if not job:
+            click.echo(f"任务 {job_id} 不存在")
+            return
+
+        def _fmt(ts: float) -> str:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else "N/A"
+
+        click.echo(f"任务 {job_id}")
+        click.echo(f"  指令: {job.get('instruction') or 'N/A'}")
+        seed_urls = job.get("seed_urls") or []
+        click.echo(f"  种子 URL: {', '.join(seed_urls) if seed_urls else 'N/A'}")
+        click.echo(f"  状态: {job.get('status')}")
+        progress = job.get("progress") or {}
+        click.echo(f"  进度: {progress if progress else '{}'}")
+        click.echo(f"  结果数: {job.get('items_count') or 0}")
+        if job.get("error"):
+            click.echo(f"  错误: {job['error']}")
+        click.echo(f"  创建: {_fmt(job.get('created_at') or 0)}")
+        click.echo(f"  更新: {_fmt(job.get('updated_at') or 0)}")
+
+    asyncio.run(_status())
 
 
 @cli.command()

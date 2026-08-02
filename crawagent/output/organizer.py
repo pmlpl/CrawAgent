@@ -222,16 +222,17 @@ class FileOrganizer:
         limit: int = 200,
     ) -> list:
         """列出 base_dir 下（或 subdir 下）的文件。"""
-        search_dir = os.path.join(self.base_dir, subdir) if subdir else self.base_dir
-        if not os.path.isdir(search_dir):
+        abs_base = Path(self.base_dir).resolve()
+        search_dir = abs_base / subdir if subdir else abs_base
+        if not search_dir.is_dir():
             return []
         results = []
-        for p in Path(search_dir).glob(pattern):
+        for p in search_dir.glob(pattern):
             if p.is_file():
                 stat = p.stat()
                 results.append({
-                    "path": str(p),
-                    "relative_path": str(p.relative_to(self.base_dir)),
+                    "path": str(p.resolve()),
+                    "relative_path": str(p.relative_to(abs_base)),
                     "name": p.name,
                     "size": stat.st_size,
                     "modified": stat.st_mtime,

@@ -13,7 +13,6 @@ from loguru import logger
 
 from crawagent.config.settings import get_settings
 from crawagent.cli.main import cli
-from crawagent.graph.agent_workflow import AgentRunner
 
 
 @click.group(invoke_without_command=True)
@@ -39,35 +38,79 @@ def main(ctx, debug):
 @click.option("--thread", "-t", help="会话 ID（用于断点续爬）")
 @click.option("--output", "-o", type=click.Path(), help="结果输出文件（JSON）")
 def run(instruction, url, max_pages, thread, output):
-    """交互式运行 Agent"""
+    """交互式运行 Agent（Harness 执行路径）"""
     instruction_text = " ".join(instruction)
     
     async def _run():
-        runner = AgentRunner()
-        result = await runner.run(
-            user_input=instruction_text,
-            seed_urls=list(url) if url else None,
-            thread_id=thread,
+        from crawagent.harness import (
+            CrawlHarness, SessionManager, CrawlHooks,
+            create_default_tools, create_antibot_hooks,
         )
-        
-        items = result.get("items", [])
-        click.echo(f"\n✅ 完成: {len(items)} 条数据")
-        
-        if output:
-            import json
-            Path(output).write_text(
-                json.dumps([item.model_dump() if hasattr(item, "model_dump") else item for item in items], 
-                          ensure_ascii=False, indent=2)
+        settings = get_settings()
+        session_manager = SessionManager(settings.mysql_dsn)
+        await session_manager.initialize()
+        hooks = CrawlHooks()
+        create_antibot_hooks(hooks)
+        registry = create_default_tools()
+        harness = CrawlHarness(
+            session_manager=session_manager,
+            hooks=hooks,
+            tools=registry.list_tools(),
+            tool_executors=registry.get_all_executors(),
+        )
+        try:
+            # thread 兼容：复用为 harness session；不存在则创建
+            session = await harness.get_session(thread) if thread else None
+            if session is None:
+                session = await harness.create_session(name=f"main:{instruction_text[:30]}")
+            message = instruction_text
+            if url:
+                message += "\n\n目标URL:\n" + "\n".join(url)
+            task_notes = (
+                "本次爬取任务的资源预算（严格遵守）：\n"
+                f"- 最多抓取 {max_pages} 个页面（不要超过）"
             )
-            click.echo(f"📄 结果已保存到: {output}")
-        
-        for i, item in enumerate(items[:5]):
-            if hasattr(item, "model_dump"):
-                item = item.model_dump()
-            click.echo(f"  {i+1}. {item.get('title', 'N/A')} - {item.get('url', 'N/A')}")
-        
-        if len(items) > 5:
-            click.echo(f"  ... 共 {len(items)} 条")
+            result = await harness.prompt(session.session_id, message, task_notes=task_notes)
+
+            if result.error:
+                click.echo(f"❌ 任务失败: {result.error}")
+                return
+
+            # 从会话消息树提取 items（extract/save 工具返回 JSON 中的 items 数组）
+            items = []
+            try:
+                entries = await session.get_entries(limit=1000, order="asc")
+            except Exception:
+                entries = []
+            for e in entries:
+                if e.role == "tool" and e.content:
+                    try:
+                        import json as _json
+                        payload = _json.loads(e.content)
+                        got = payload.get("items") if isinstance(payload, dict) else None
+                        if isinstance(got, list):
+                            items.extend(got)
+                    except Exception:
+                        pass
+
+            click.echo(f"\n✅ 完成: {len(items)} 条数据")
+
+            if output:
+                import json
+                Path(output).write_text(
+                    json.dumps(items, ensure_ascii=False, indent=2)
+                )
+                click.echo(f"📄 结果已保存到: {output}")
+
+            for i, item in enumerate(items[:5]):
+                if not isinstance(item, dict):
+                    item = getattr(item, "model_dump", lambda: item)()
+                click.echo(f"  {i+1}. {item.get('title', 'N/A')} - {item.get('url', 'N/A')}")
+
+            if len(items) > 5:
+                click.echo(f"  ... 共 {len(items)} 条")
+        finally:
+            await harness.close()
     
     import asyncio
     asyncio.run(_run())
@@ -160,7 +203,8 @@ def crawl(urls, selector, max_pages, output):
                                 base_url=result.url,
                             )
                         else:
-                            # ponytail: 无选择器时只保存基础元信息，不走不存在的 _fallback_generic
+                            # 无选择器时只保存基础元信息（_fallback_generic 存在于 extractor.py，
+                            # 但深爬场景直接走轻量元信息路径更高效）
                             items = [{"url": result.url, "title": result.title or "", "status": result.status_code}]
 
                         all_items.extend([item.model_dump() if hasattr(item, "model_dump") else item for item in items])

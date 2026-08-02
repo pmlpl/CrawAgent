@@ -1,6 +1,6 @@
 # CrawAgent - 项目记忆文档
 
-> 最后更新：2026-08-01
+> 最后更新：2026-08-02
 
 ---
 
@@ -302,11 +302,35 @@
 
 **当前测试：80 个全部通过**（补验未引入回归）
 
+### 17. P2+ 图片抓取优化 + 网站画像系统（2026-08-02）
+
+**背景**：用户提出"针对不同网站针对性优化，不断训练爬虫智能体"，以 haowallpaper.com 为第一个目标站点。
+
+**核心功能实现：**
+- `core/extractor.py` → `CompositeExtractor.extract_images()`：图片专用提取器，批量抽取 img（src/data-src/data-original/data-lazy/data-srcset/srcset）、meta（og:image/twitter:image）、JSON-LD、背景图（style background-image），按最小宽高过滤 + URL 去重 + 来源分类（img/og/json_ld/background）+ 排序，默认最多 500 张
+- `core/fetcher.py` → SPA 客户端路由处理：Playwright 收到 4xx 时检测 `__NUXT__`/`__NEXT_DATA__`/`data-n-head`/`vue-router`/`react-router`/`vuex`/`_nuxt` 标记，若为 SPA 且状态码 400/403/404，等待 networkidle + 2s 渲染后重新检查，body >500 字符且 title 不含 "404" 则改写状态码为 200
+- `core/fetcher.py` → Playwright 滚动触发懒加载：最多 12 次滚动（每次 600px 或视口 80%），每次滚动后等 400ms，连续两次到底不动停止，滚动后重新读取 html
+- `core/site_profile.py`（新建）：SiteProfile 数据类（domain/spa_type/site_framework/known_routes/image_loading/anti_bot_level/uses_client_routing/nav_links/notes/crawl_count/last_updated）+ `discover()` 自动发现（SPA 框架/图片加载方式/反爬等级/导航链接）+ SiteProfileStore（JSON 文件存储，CRUD + search_by_note + update_notes + add_route）+ `get_profile_store()` 全局单例
+- `harness/tools.py` → Supervisor 图片意图识别：指令含"图片/壁纸/图库"关键词 → 自动 use_browser=True + method=images；HTTP 提取为空或疑似 SPA 时自动升级浏览器重抓；图片抓取完成后返回明确中文总结（条数/下载量/JSON 路径/图片目录/预览样例），避免 LLM 反复调用 search/supervisor 死循环
+- `harness/tools.py` → Supervisor 爬取后自动调用 `async_get_or_discover()` 保存网站画像，画像文件存入 `./profiles/{domain}.json`
+- `harness/loop.py` → `_fix_tool_call_pairing()`：消息截取/压缩后 assistant 有 tool_calls 但缺 tool 响应时移除该消息，消除 OpenAI 400 错误；最终消息无 tool_calls 且 content 空时兜底填充 "任务已完成。"
+
+**问题修复：**
+1. **haowallpaper.com 首页只爬到 1 张图**：懒加载未触发 → fetcher 加滚动逻辑 → 完整列表
+2. **子分类页（/wallpaper、/fengjing）404**：Nuxt 客户端路由，服务器端返回 404 → SPA 路由处理改写 200 → 图片正常提取
+3. **LLM 死循环搜索**：save_executor 返回中文总结，明确告知任务完成
+4. **LLM BadRequestError（tool_calls 无对应 tool 响应）**：`_fix_tool_call_pairing` 配对自愈
+5. **刷新页面看不见 AI 工作输出**：`frontend/src/views/Chat.vue` 修复 tool_calls 数据解析（normalizeToolCalls/getToolName 兼容多种格式）、消息按时间正序、空内容/tool 角色消息兜底显示、tool 消息样式优化（msg-text-tool）
+
+**当前画像库（./profiles/）：** `haowallpaper_com.json`（Nuxt SPA + lazy 图片加载）、`ruanyifeng_com.json`
+
+**验证：** haowallpaper 首页与子分类页图片抓取通过；LLM 400 错误消除；前端刷新恢复正常
+
 ---
 
 ## 当前状态
 
-**P0-P7 全部完成 ✅，剩余验收补跑完成 ✅（Bilibili 全面通过；知乎/HN/YouTube 受本机网络限制待可达网络实测）**
+**P0-P7 全部完成 ✅，P2+ 图片抓取优化完成 ✅（Bilibili 全面通过；知乎/HN/YouTube 受本机网络限制待可达网络实测）**
 
 - P0：CrawlHarness 骨架可运行（真实 LLM 端到端跑通）
 - P1：引擎回退链 + AntiBot hooks + 时间精度修复完成（403/429 触发升级链已验证）
@@ -316,6 +340,7 @@
 - P5：安全扫描完成，Juice Shop 6 漏洞/5 类别实测通过
 - P6：压缩/持久化/深爬完成，**100 页 compaction + 崩溃恢复 e2e 补验通过**
 - P7：影视内容 **Bilibili 全面通过**（P2 清洗 + P7 元数据/下载/404 友好报错）；YouTube 网络不可达（代码路径已验证）
+- P2+：图片抓取优化完成（图片专用提取器 + SPA 客户端路由 + 懒加载滚动触发 + 网站画像系统），haowallpaper 首页与子分类页实测通过；LLM 工具调用完整性自愈 + 前端刷新恢复
 - 真实 LLM 需要更换 API key（当前 DeepSeek key 已失效）
 - 服务运行在 http://localhost:8000
 
@@ -340,6 +365,12 @@ docker-compose up -d           # 启动数据库容器
 ---
 
 ## 下一步
+
+### P2+ 持续优化（图片抓取针对性训练）
+1. **更多网站针对性优化** - 用户提供不同网站，逐个画像并针对性优化（画像存 `./profiles/`，可 `update_notes` 标注经验）
+2. **GAP-004** - SPA 检测结果写入网站画像，同域名二次爬取直接复用（无需重复框架检测）
+3. **GAP-005** - 图片下载失败重试 + 防盗链 Referer 头处理
+4. **GAP-006** - 图片提取过滤导航/装饰性小图（nav/header/footer 容器 + logo/icon 类）
 
 ### 待可达网络环境补验（本机网络限制，非代码缺陷）
 1. **知乎验收** - 抓取 zhihu.com/question 出干净 Markdown（Playwright 完整浏览器仍 403，IP 级封禁，换网络/带 cookie 可试）
@@ -397,9 +428,10 @@ CrawAgent/
 │   ├── config/
 │   │   └── settings.py        # Pydantic Settings（MySQL/Redis/Harness 配置 + mysql_dsn）
 │   ├── core/
-│   │   ├── fetcher.py         # httpx (trust_env=False)
+│   │   ├── fetcher.py         # httpx (trust_env=False) + SPA 客户端路由 + 懒加载滚动
 │   │   ├── frontier.py        # SQLite 队列（待迁移 MySQL）
-│   │   ├── extractor.py       # 三级回退 + 图片提取增强
+│   │   ├── extractor.py       # 三级回退 + 图片专用提取（extract_images）
+│   │   ├── site_profile.py    # 网站画像系统（SiteProfile + SiteProfileStore）
 │   │   ├── retriever.py
 │   │   ├── models.py
 │   │   ├── executor.py

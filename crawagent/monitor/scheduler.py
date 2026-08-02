@@ -209,11 +209,24 @@ class MonitorScheduler:
 
         # 4. 若有变化 → 告警
         if diff_result.has_changed and not diff_result.summary.startswith("首次运行"):
-            # 字段级变化详情
+            # 字段级变化详情（支持按变化幅度阈值过滤：alert_threshold > 0 时
+            # 仅当数值字段变化百分比绝对值 ≥ 阈值才告警，如价格降幅 > 5%）
+            threshold = float(task.alert_threshold or 0.0)
             for change in diff_result.field_changes:
                 level = AlertLevel.INFO
                 if change.change_type == "removed" and task.alert_on_missing:
                     level = AlertLevel.WARN
+                # 阈值过滤：可量化数值变化且未达阈值 → 跳过该字段告警
+                if threshold > 0 and change.percent_change is not None:
+                    if abs(change.percent_change) < threshold:
+                        logger.debug(
+                            f"[Monitor] 字段 {change.field} 变化幅度 "
+                            f"{change.percent_change}% 低于阈值 {threshold}%，跳过告警"
+                        )
+                        continue
+                    # 大幅波动（≥ 3 倍阈值）升级为 WARN
+                    if abs(change.percent_change) >= threshold * 3:
+                        level = AlertLevel.WARN
                 await self._maybe_alert(
                     task=task,
                     level=level,

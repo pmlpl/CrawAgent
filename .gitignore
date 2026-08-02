@@ -23,6 +23,10 @@ models.json
 cookies.txt
 youku_cookies.txt
 
+# 登录态 profile 数据（含 cookie，严禁提交）
+profiles/
+profiles_test/
+
 # IDE
 .idea/
 .vscode/
@@ -63,3 +67,12 @@ frontend/dist/
 
 # 临时验证脚本
 _test_*.py
+_probe.py
+_browser_probe.py
+_super_browser.py
+
+# IDE / 本地配置
+.trae/
+
+# 部署文档（含安全细节，不对外）
+docs/DEPLOYMENT.md

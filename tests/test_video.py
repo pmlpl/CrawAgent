@@ -102,6 +102,45 @@ def test_media_downloader_error_and_detect():
     assert not dl._is_video_site("https://example.com/a.pdf")
 
 
+OG_VIDEO_HTML = """
+<html><head><title>视频页</title>
+<meta property="og:video" content="https://player.bilibili.com/player.html?bvid=BV1xx411c7mD">
+<meta property="og:image" content="https://i0.hdslb.com/bfs/cover.jpg">
+<meta property="og:title" content="我的视频标题">
+</head><body>
+  <video src="blob:https://www.bilibili.com/e415685c-8ed3"></video>
+  <iframe src="https://lf-rc1.yhgfb-cn-static.com/obj/rc-verifycenter/rmc-nocaptcha/1.0.0.44/index.html"></iframe>
+  <iframe src="https://www.youtube.com/embed/abc123"></iframe>
+  <img src="https://cdn.example.com/cover/photo_1.jpg" alt="摄影作品">
+</body></html>
+"""
+
+
+def test_video_extractor_og_meta():
+    """og:video 声明应提取为可点击播放链接（B站/YouTube 等视频站标准）。"""
+    result = VideoExtractor().extract(OG_VIDEO_HTML, base_url="https://www.bilibili.com/video/BV1xx411c7mD")
+    urls = [v.url for v in result.videos]
+    assert any("player.bilibili.com" in u for u in urls)
+    # og:video 带标题与封面
+    og = [v for v in result.videos if v.source_tag == "og:video"]
+    assert og and og[0].title == "我的视频标题"
+    assert og[0].poster == "https://i0.hdslb.com/bfs/cover.jpg"
+
+
+def test_video_extractor_filters_noise():
+    """blob: 伪 URL、验证码/存储 iframe 应被过滤，视频 iframe 保留。"""
+    result = VideoExtractor().extract(OG_VIDEO_HTML, base_url="https://www.bilibili.com/video/BV1xx411c7mD")
+    all_urls = [v.url for v in result.videos] + [v.url for v in result.iframes]
+    joined = "\n".join(all_urls)
+    # blob: 伪 URL 被过滤
+    assert "blob:" not in joined
+    # 验证码/存储 iframe 被过滤
+    assert "rmc-nocaptcha" not in joined
+    assert "x-storage-web" not in joined
+    # 已知视频平台 iframe 保留
+    assert "youtube.com/embed/abc123" in joined
+
+
 def test_security_hook_in_loop_blocks_save(tmp_path):
     """集成：SecurityHook 拦截的 save 在 loop 层被拒绝执行。"""
     from crawagent.harness.hooks import CrawlHooks

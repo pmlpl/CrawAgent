@@ -35,6 +35,14 @@
 
   /* 过渡 */
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 兼容旧页面使用的变量名（Monitor/Security/Video），映射到同一套设计令牌 */
+  --surface: var(--white);
+  --border: var(--line);
+  --accent: var(--terracotta);
+  --bg: var(--paper);
+  --text: var(--ink);
+  --text-muted: var(--ink-soft);
 }
 
 * {

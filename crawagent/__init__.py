@@ -24,8 +24,8 @@ from crawagent.core.models import (
 )
 from crawagent.config.settings import get_settings
 
-# Agent 运行器
-from crawagent.graph.agent_workflow import AgentRunner, get_agent_runner
+# Agent 运行器（双轨合一的唯一执行路径：crawagent.harness.CrawlHarness）
+from crawagent.config.settings import get_settings
 
 __all__ = [
     "Fetcher",
@@ -41,7 +41,5 @@ __all__ = [
     "ExtractedItem",
     "PageType",
     "CrawlJobStatus",
-    "AgentRunner",
-    "get_agent_runner",
     "get_settings",
 ]

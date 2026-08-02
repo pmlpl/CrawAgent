@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from crawagent.config.settings import get_settings
-from crawagent.graph.agent_workflow import AgentRunner, get_agent_runner
 from crawagent.core.fetcher import Fetcher
 from crawagent.core.frontier import SQLiteFrontier
 from crawagent.core.extractor import DEFAULT_EXTRACTOR
@@ -69,6 +69,12 @@ class RunRequest(BaseModel):
     max_depth: int = 2
 
 
+class ResumeRequest(BaseModel):
+    """断点续抓请求（P1-4）"""
+    job_id: str = ""         # 任务 ID（URL metadata 含 job_id 时按任务过滤；空则全部）
+    max_retries: int = 3     # 失败重试上限
+
+
 class AnalyzeRequest(BaseModel):
     url: str
 
@@ -105,6 +111,8 @@ class HarnessPromptRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     lane: str = "main"
+    max_pages: Optional[int] = None
+    max_depth: Optional[int] = None
 
 
 class HarnessPromptResponse(BaseModel):
@@ -113,6 +121,8 @@ class HarnessPromptResponse(BaseModel):
     kind: str  # "completed" / "needs_input" / "error" / "cancelled"
     data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None      # 本次 prompt 的 token 用量
+    usage_total: Optional[Dict[str, Any]] = None  # 该 session 累计 token 用量
 
 
 class HarnessQuickCrawlRequest(BaseModel):
@@ -165,13 +175,15 @@ async def _save_job_to_db(job_id: str, final: bool = False):
         "error": job.get("error"),
     }
     await store.update_job(job_id, **update_data)
-    
-    # 如果是最终状态，从缓存移除（释放内存）
-    if final and job.get("status") in ("completed", "failed"):
-        del _job_cache[job_id]
+    # 注意：完成后不删除缓存。_get_job 优先读缓存，数据库表不含
+    # messages/session_id 等字段，删缓存会导致这些数据在状态查询时丢失。
 
 
 async def _run_agent_background(job_id: str, instruction: str, seed_urls: List[str], thread_id: str, max_pages: int = 50, max_depth: int = 2):
+    """旧接口兼容转发：内部走 CrawlHarness（双轨合一的唯一执行路径）
+
+    保留 /api/agent/run 的异步任务 + 状态轮询语义，实际执行完全由 harness Loop 承担。
+    """
     try:
         # 初始化缓存
         _job_cache[job_id] = {
@@ -186,91 +198,91 @@ async def _run_agent_background(job_id: str, instruction: str, seed_urls: List[s
             "error": None,
             "logs": [{"level": "INFO", "message": f"任务 {job_id} 开始执行"}],
         }
-        
+
         # 先写入数据库
         await _save_job_to_db(job_id)
-        
-        _job_cache[job_id]["logs"].append({"level": "INFO", "message": "初始化 Agent..."})
-        
-        runner = get_agent_runner()
-        
-        _job_cache[job_id]["logs"].append({"level": "INFO", "message": "开始执行工作流..."})
-        
-        last_log_count = 0
-        final_items = []
-        final_error = None
-        final_pages = 0
-        last_db_sync = 0
-        
+
+        _job_cache[job_id]["logs"].append({"level": "INFO", "message": "初始化 Harness..."})
+
+        harness = await _get_harness()
+
+        # thread_id 兼容：复用为 harness session；不存在则创建
+        session = await harness.get_session(thread_id) if thread_id else None
+        if session is None:
+            session = await harness.create_session(name=f"agent:{instruction[:30]}")
+        session_id = session.session_id
+        _job_cache[job_id]["session_id"] = session_id
+
+        _job_cache[job_id]["logs"].append({"level": "INFO", "message": "开始执行 Agent Loop..."})
+
+        # 用户参数以任务备注注入（与 /api/harness/prompt 一致），覆盖 LLM 默认规划
+        task_notes = ""
+        if max_pages is not None or max_depth is not None:
+            parts = ["本次爬取任务的资源预算（严格遵守）："]
+            if max_pages is not None:
+                parts.append(f"- 最多抓取 {max_pages} 个页面（不要超过）")
+            if max_depth is not None:
+                parts.append(f"- 抓取深度最多 {max_depth} 层")
+            task_notes = "\n".join(parts)
+
+        # 组装消息：指令 + 种子 URL
+        message = instruction
+        if seed_urls:
+            message += "\n\n目标URL:\n" + "\n".join(seed_urls)
+
         try:
-            async def _run_with_timeout():
-                nonlocal final_items, final_error, final_pages, last_log_count, last_db_sync
-                try:
-                    async for state_chunk in runner.astream_state(
-                        user_input=instruction, seed_urls=seed_urls, thread_id=thread_id,
-                        max_pages=max_pages, max_depth=max_depth
-                    ):
-                        # state_chunk 是 dict: {node_name: state}
-                        for node_name, state in state_chunk.items():
-                            if not isinstance(state, dict):
-                                continue
-                            # 更新状态
-                            job = state.get("current_job")
-                            if job:
-                                pages = job.stats.get("pages_crawled", 0)
-                                total = job.plan.max_pages if job.plan else 1
-                                items_count = job.stats.get("items_extracted", 0)
-                                final_pages = pages
-                                _job_cache[job_id]["progress"] = {
-                                    "pages_crawled": pages,
-                                    "pages_total": total,
-                                }
-                                _job_cache[job_id]["items_count"] = items_count
-                            
-                            # 同步日志
-                            logs = state.get("logs", [])
-                            if len(logs) > last_log_count:
-                                new_logs = logs[last_log_count:]
-                                _job_cache[job_id]["logs"].extend(new_logs)
-                                last_log_count = len(logs)
-                            
-                            # 保存最终 items
-                            if state.get("extracted_items"):
-                                final_items = state["extracted_items"]
-                            
-                            if state.get("error_message"):
-                                final_error = state["error_message"]
-                            
-                            # 每 10 秒同步一次到数据库
-                            import time
-                            now = time.time()
-                            if now - last_db_sync > 10:
-                                last_db_sync = now
-                                # 异步同步，不阻塞
-                                asyncio.create_task(_save_job_to_db(job_id))
-                except Exception as e:
-                    final_error = str(e)
-                    raise
-            
-            await asyncio.wait_for(_run_with_timeout(), timeout=300)
+            result = await asyncio.wait_for(
+                harness.prompt(session_id, message, task_notes=task_notes),
+                timeout=300,
+            )
         except asyncio.TimeoutError:
-            final_error = "任务执行超时（5分钟）"
-            raise RuntimeError(final_error)
-        
-        items_dict = [item.model_dump() if hasattr(item, "model_dump") else item for item in final_items]
-        
+            raise RuntimeError("任务执行超时（5分钟）")
+
+        # 从会话消息树提取最终输出（items / messages）
+        final_items: List[Any] = []
+        final_messages: List[str] = []
+        final_error = result.error
+        try:
+            entries = await session.get_entries(limit=1000, order="asc")
+        except Exception as _e:
+            logger.warning(f"任务 {job_id} 读取 session entries 失败: {_e}")
+            entries = []
+        for e in entries:
+            if e.role == "tool" and e.content:
+                # extract/save/deep_crawl 等工具的返回 JSON 中含 items / pages 数组
+                try:
+                    payload = json.loads(e.content)
+                    items = payload.get("items") if isinstance(payload, dict) else None
+                    if not isinstance(items, list):
+                        items = payload.get("pages") if isinstance(payload, dict) else None
+                    if isinstance(items, list):
+                        final_items.extend(items)
+                except Exception:
+                    pass
+            elif e.content and not (e.tool_calls or e.tool_call_id):
+                final_messages.append(e.content)
+
+        if not final_error and result.kind != "completed":
+            final_error = final_error or f"任务状态: {result.kind}"
+
+        items_dict = [
+            i if isinstance(i, dict) else getattr(i, "model_dump", lambda: i)()
+            for i in final_items
+        ]
+
         _job_cache[job_id].update({
             "status": "failed" if final_error else "completed",
-            "progress": {"pages_crawled": final_pages, "pages_total": final_pages},
+            "progress": {"pages_crawled": len(items_dict), "pages_total": len(items_dict)},
             "items_count": len(items_dict),
             "items": items_dict,
+            "messages": final_messages,
             "error": final_error,
             "logs": _job_cache[job_id]["logs"] + (
-                [{"level": "SUCCESS", "message": "任务完成"}] if not final_error 
+                [{"level": "SUCCESS", "message": "任务完成"}] if not final_error
                 else [{"level": "ERROR", "message": final_error}]
             ),
         })
-        
+
         # 最终写入数据库
         await _save_job_to_db(job_id, final=True)
     except Exception as e:
@@ -380,6 +392,30 @@ async def get_job_status(job_id: str):
     return job
 
 
+@app.post("/api/agent/resume")
+async def resume_job(req: ResumeRequest):
+    """断点续抓（P1-4）：将 frontier 中失败/中断的 URL 重新入队
+
+    deep_crawl 抓取失败的页面会写入 frontier 重试队列，
+    调用此端点后可从上次断点继续抓取。
+    """
+    frontier = SQLiteFrontier()
+    await frontier.initialize()
+    try:
+        restored = await frontier.resume_job(max_retries=req.max_retries, job_id=req.job_id)
+        snapshot = await frontier.snapshot_job(req.job_id)
+    except Exception as e:
+        logger.error(f"断点续抓失败: {e}")
+        raise HTTPException(500, f"断点续抓失败: {e}")
+    finally:
+        await frontier.close()
+    return {
+        "restored": restored,
+        "snapshot": snapshot,
+        "job_id": req.job_id or "（全部）",
+    }
+
+
 @app.get("/api/agent/jobs")
 async def list_jobs(limit: int = 20, status: str = None):
     """获取任务列表"""
@@ -455,7 +491,8 @@ async def crawl_direct(req: CrawlDirectRequest):
                             base_url=result.url,
                         )
                     else:
-                        # ponytail: 无选择器时只保存基础元信息，不走不存在的 _fallback_generic
+                        # 无选择器时只保存基础元信息（_fallback_generic 存在于 extractor.py，
+                        # 但此路径直接走轻量元信息更高效）
                         items = [{"url": result.url, "title": result.title or "", "status": result.status_code}]
 
                     all_items.extend([item.model_dump() if hasattr(item, "model_dump") else item for item in items])
@@ -577,13 +614,31 @@ async def harness_prompt(req: HarnessPromptRequest):
     else:
         session_id = req.session_id
 
-    result = await harness.prompt(session_id, req.message, lane_name=req.lane)
+    # 用户指定的 max_pages/max_depth 以任务备注注入系统提示词，覆盖 LLM 默认规划
+    task_notes = ""
+    if req.max_pages is not None or req.max_depth is not None:
+        parts = ["本次爬取任务的资源预算（严格遵守）："]
+        if req.max_pages is not None:
+            parts.append(f"- 最多抓取 {req.max_pages} 个页面（不要超过）")
+        if req.max_depth is not None:
+            parts.append(f"- 抓取深度最多 {req.max_depth} 层")
+        task_notes = "\n".join(parts)
+
+    result = await harness.prompt(
+        session_id, req.message, lane_name=req.lane, task_notes=task_notes
+    )
+
+    # 提取 usage 字段（harness 已写入 result.data["usage"] / ["usage_total"]）
+    usage = (result.data or {}).get("usage")
+    usage_total = (result.data or {}).get("usage_total")
 
     return HarnessPromptResponse(
         session_id=session_id,
         kind=result.kind,
         data=result.data,
         error=result.error,
+        usage=usage,
+        usage_total=usage_total,
     )
 
 
@@ -627,6 +682,18 @@ async def get_harness_entries(session_id: str, limit: int = 50):
             for e in entries
         ]
     }
+
+
+@app.get("/api/harness/sessions/{session_id}/usage")
+async def get_harness_usage(session_id: str):
+    """获取 Session 的累计 token 用量（含缓存命中率与估算费用）"""
+    harness = await _get_harness()
+    session = await harness._session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    usage = harness.get_session_usage(session_id)
+    from crawagent.harness.harness import _usage_to_dict
+    return {"session_id": session_id, "usage": _usage_to_dict(usage)}
 
 
 @app.delete("/api/harness/sessions/{session_id}")
@@ -827,19 +894,18 @@ async def preview_output_path(req: OutputRenderRequest):
 async def read_output_file(path: str):
     """读取已保存文件内容"""
     from pathlib import Path
-    # 安全检查：路径必须在 output_dir 下
     output_dir = Path("./output").resolve()
-    abs_path = Path(path).resolve()
+    abs_path = Path(path).resolve() if not Path(path).is_absolute() else Path(path)
     try:
         abs_path.relative_to(output_dir)
     except ValueError:
         raise HTTPException(403, "路径越权：只能读取 output 目录下的文件")
     if not abs_path.is_file():
-        raise HTTPException(404, f"文件不存在: {path}")
+        raise HTTPException(404, f"文件不存在: {abs_path}")
     try:
         with open(abs_path, "r", encoding="utf-8") as f:
             content = f.read()
-        return {"path": path, "content": content, "size": len(content)}
+        return {"path": str(abs_path), "content": content, "size": len(content)}
     except Exception as e:
         raise HTTPException(500, f"读取失败: {e}")
 
@@ -849,18 +915,44 @@ async def delete_output_file(path: str):
     """删除已保存文件"""
     from pathlib import Path
     output_dir = Path("./output").resolve()
-    abs_path = Path(path).resolve()
+    abs_path = Path(path).resolve() if not Path(path).is_absolute() else Path(path)
     try:
         abs_path.relative_to(output_dir)
     except ValueError:
         raise HTTPException(403, "路径越权：只能删除 output 目录下的文件")
     if not abs_path.is_file():
-        raise HTTPException(404, f"文件不存在: {path}")
+        raise HTTPException(404, f"文件不存在: {abs_path}")
     try:
         abs_path.unlink()
-        return {"deleted": True, "path": path}
+        return {"deleted": True, "path": str(abs_path)}
     except Exception as e:
         raise HTTPException(500, f"删除失败: {e}")
+
+
+@app.post("/api/output/open")
+async def open_output_path(path: str):
+    """用系统默认程序打开文件或在资源管理器中打开文件夹"""
+    import subprocess
+    import sys
+    from pathlib import Path
+    output_dir = Path("./output").resolve()
+    abs_path = Path(path).resolve() if not Path(path).is_absolute() else Path(path)
+    try:
+        abs_path.relative_to(output_dir)
+    except ValueError:
+        raise HTTPException(403, f"路径越权：只能打开 output 目录下的文件/文件夹。output_dir={output_dir}, abs_path={abs_path}")
+    if not abs_path.exists():
+        raise HTTPException(404, f"路径不存在: {abs_path}")
+    try:
+        if sys.platform == 'win32':
+            os.startfile(str(abs_path))
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', str(abs_path)])
+        else:
+            subprocess.Popen(['xdg-open', str(abs_path)])
+        return {"opened": True, "path": str(abs_path), "is_dir": abs_path.is_dir()}
+    except Exception as e:
+        raise HTTPException(500, f"打开失败: {e}")
 
 
 # ==================== Monitor API 路由（P4） ====================
@@ -1180,13 +1272,15 @@ async def generate_patches(task_id: str, output_dir: str = ""):
     if not vulns:
         raise HTTPException(400, "该任务无漏洞，无需生成补丁")
     fixer = AutoFixer()
-    patches = await fixer.generate_patches(vulns, scan_task_id=task_id)
+    patches, reported_only = await fixer.generate_patches(vulns, scan_task_id=task_id)
     if not output_dir:
         output_dir = f"./output/security_patches/{task_id}"
     patch_files = await fixer.save_patches(patches, output_dir=output_dir)
     return {
         "task_id": task_id,
         "patches_generated": len(patches),
+        "reported_only_count": len(reported_only),
+        "reported_only": [v.model_dump() for v in reported_only],
         "patch_files": patch_files,
         "patches": [
             {
@@ -1201,6 +1295,139 @@ async def generate_patches(task_id: str, output_dir: str = ""):
             for p in patches
         ],
     }
+
+
+# ==================== 登录态 Profile API（P8） ====================
+# 抖音等需要登录才能完整抓取的站点：
+#   1. POST /api/auth/login         —— 弹出真实浏览器，用户手动登录后关闭即保存 cookie
+#   2. POST /api/auth/profile/fetch —— 带登录态抓取页面
+#   3. POST /api/auth/profile/export-cookies —— 导出 cookies.txt 供 yt-dlp 下载
+
+class AuthLoginRequest(BaseModel):
+    url: str = "https://www.douyin.com"
+    timeout: float = 120.0           # 等待用户登录的秒数
+    wait_for_navigation: str = ""    # 登录成功后的跳转 URL 片段（可选）
+
+
+class AuthFetchRequest(BaseModel):
+    url: str
+    headless: bool = True
+    wait_for: str = "domcontentloaded"
+    timeout: float = 30.0
+
+
+class AuthExportRequest(BaseModel):
+    url: str
+
+
+class AuthAnonymousRequest(BaseModel):
+    url: str = "https://www.douyin.com"
+    wait_ms: int = 8000
+    scroll_rounds: int = 0
+
+
+@app.get("/api/auth/profiles")
+async def list_auth_profiles():
+    """列出所有已保存登录态的站点"""
+    from crawagent.sessions.profile_manager import ProfileManager
+    pm = ProfileManager()
+    return {"total": len(pm.list_profiles()), "profiles": pm.list_profiles()}
+
+
+@app.get("/api/auth/profile")
+async def get_auth_profile(url: str):
+    """查询某域名是否已有登录态"""
+    from crawagent.sessions.profile_manager import ProfileManager
+    pm = ProfileManager()
+    info = pm.get_profile_info(url)
+    if not info:
+        return {"has_profile": False, "domain": pm._domain_key(url), "info": None}
+    return {"has_profile": pm.has_profile(url), "domain": pm._domain_key(url), "info": info}
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: AuthLoginRequest):
+    """交互式登录：打开真实浏览器让用户手动登录
+
+    注意：此接口会阻塞直到用户完成登录并关闭浏览器窗口
+    （或达到 timeout 秒），请保持请求连接。
+    登录态自动保存到 ~/.crawagent/profiles/<域名>/。
+    """
+    from crawagent.sessions.profile_manager import ProfileManager
+    pm = ProfileManager()
+    try:
+        result = await pm.login_interactive(
+            req.url,
+            wait_for_navigation=req.wait_for_navigation,
+            timeout=req.timeout,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"交互式登录失败: {e}")
+        raise HTTPException(500, f"交互式登录失败: {e}")
+
+
+@app.post("/api/auth/profile/fetch")
+async def auth_profile_fetch(req: AuthFetchRequest):
+    """使用已保存的登录态抓取页面（自动携带 cookie）"""
+    from crawagent.sessions.profile_manager import ProfileManager
+    pm = ProfileManager()
+    if not pm.has_profile(req.url):
+        raise HTTPException(409, f"域名 {pm._domain_key(req.url)} 无登录态，请先调用 POST /api/auth/login")
+    try:
+        result = await pm.fetch_with_profile(
+            req.url,
+            headless=req.headless,
+            wait_for=req.wait_for,
+            timeout=req.timeout,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"带登录态抓取失败: {e}")
+        raise HTTPException(500, f"带登录态抓取失败: {e}")
+
+
+@app.post("/api/auth/profile/export-cookies")
+async def auth_export_cookies(req: AuthExportRequest):
+    """导出 Netscape cookies.txt（供 yt-dlp /api/video/download 使用）"""
+    from crawagent.sessions.profile_manager import ProfileManager
+    pm = ProfileManager()
+    if not pm.has_profile(req.url):
+        raise HTTPException(409, f"域名 {pm._domain_key(req.url)} 无登录态，请先调用 POST /api/auth/login")
+    try:
+        cookies_file = pm.export_cookies_txt(req.url)
+        return {"success": True, "cookies_file": cookies_file}
+    except Exception as e:
+        raise HTTPException(500, f"导出 cookies 失败: {e}")
+
+
+@app.post("/api/auth/profile/anonymous")
+async def auth_anonymous_cookies(req: AuthAnonymousRequest):
+    """自动获取匿名 cookie（无需登录）
+
+    抖音等风控站点公开视频无需账号登录，只需浏览器渲染一次
+    收集 ttwid 等匿名 cookie，即可让 yt-dlp 下载完整清晰视频。
+    与 /api/video/download 联用可全自动下载。
+    """
+    from crawagent.sessions.profile_manager import ProfileManager
+    pm = ProfileManager()
+    try:
+        result = await pm.grab_anonymous_cookies(
+            req.url, wait_ms=req.wait_ms, scroll_rounds=req.scroll_rounds
+        )
+        return result
+    except Exception as e:
+        logger.error(f"匿名 cookie 获取失败: {e}")
+        raise HTTPException(500, f"匿名 cookie 获取失败: {e}")
+
+
+@app.delete("/api/auth/profile")
+async def auth_delete_profile(url: str):
+    """删除某域名的登录态"""
+    from crawagent.sessions.profile_manager import ProfileManager
+    pm = ProfileManager()
+    ok = pm.delete_profile(url)
+    return {"deleted": ok, "domain": pm._domain_key(url)}
 
 
 # ==================== Video 路由（P7） ====================

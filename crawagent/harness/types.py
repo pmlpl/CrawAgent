@@ -256,3 +256,29 @@ class TokenUsage:
     completion_tokens: int = 0
     total_tokens: int = 0
     model: str = ""
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
+
+    # DeepSeek deepseek-v4-flash 官方价（元 / 百万 tokens）
+    _PRICE_HIT = 0.02
+    _PRICE_MISS = 1.0
+    _PRICE_OUTPUT = 2.0
+
+    @property
+    def hit_rate(self) -> float:
+        """缓存命中率：hit/(hit+miss)，无缓存信息时返回 0.0。"""
+        denom = self.cache_hit_tokens + self.cache_miss_tokens
+        if denom <= 0:
+            return 0.0
+        return round(self.cache_hit_tokens / denom, 4)
+
+    def cost_yuan(self) -> float:
+        """估算费用（元）。hit+miss 为 0 时按 prompt_tokens 全部算未命中。"""
+        hit = self.cache_hit_tokens
+        miss = self.cache_miss_tokens
+        if hit + miss == 0 and self.prompt_tokens > 0:
+            miss = self.prompt_tokens
+        return round(
+            (hit * self._PRICE_HIT + miss * self._PRICE_MISS + self.completion_tokens * self._PRICE_OUTPUT) / 1e6,
+            4,
+        )
