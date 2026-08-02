@@ -125,6 +125,8 @@ class BrowserAPIHarvester:
         max_body_bytes: int = 2_000_000,
         headless: bool = True,
         wait_ms: int = 6000,
+        cookies: Optional[List[Dict[str, Any]]] = None,
+        cookies_file: str = "",
     ) -> HarvestResult:
         """打开页面并拦截 API 响应
 
@@ -137,6 +139,8 @@ class BrowserAPIHarvester:
             max_body_bytes: 单条响应体最大字节数（超限截断）
             headless: 是否无头模式
             wait_ms: 初次加载后的等待毫秒
+            cookies: 注入的 cookie 列表（Playwright 格式，登录态/匿名 cookie 降低风控）
+            cookies_file: Netscape cookies.txt 路径（与 cookies 二选一，自动转换注入）
 
         Returns:
             HarvestResult
@@ -147,6 +151,10 @@ class BrowserAPIHarvester:
         result = HarvestResult(page_url=url)
         captured: List[ApiCapture] = []
         patterns = list(api_patterns or []) + list(self._api_hints)
+
+        # 从 cookies.txt 解析 Netscape 格式（供 add_cookies 注入）
+        if cookies_file and not cookies:
+            cookies = _parse_netscape_cookies(cookies_file)
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -162,6 +170,11 @@ class BrowserAPIHarvester:
                     viewport={"width": 1280, "height": 900},
                     locale="zh-CN",
                 )
+                if cookies:
+                    try:
+                        await context.add_cookies(cookies)
+                    except Exception as e:
+                        logger.debug(f"[APIHarvester] cookie 注入失败: {e}")
                 page = await context.new_page()
 
                 # 拦截 XHR / fetch 响应
@@ -396,6 +409,38 @@ def _dedup_media(medias: List[Dict[str, str]]) -> List[Dict[str, str]]:
         seen.add(m["url"])
         out.append(m)
     return out
+
+
+def _parse_netscape_cookies(path: str) -> List[Dict[str, Any]]:
+    """解析 Netscape cookies.txt → Playwright cookie 列表（供 add_cookies 注入）
+
+    格式：domain \t includeSubdomains \t path \t secure \t expires \t name \t value
+    """
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists():
+        logger.warning(f"[APIHarvester] cookies.txt 不存在: {path}")
+        return []
+    cookies = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _sub, cpath, secure, expires, name, value = parts[:7]
+        cookies.append({
+            "name": name,
+            "value": value.replace("%09", "\t").replace("%0A", "\n"),
+            "domain": domain,
+            "path": cpath or "/",
+            "secure": secure.lower() == "true",
+            "httpOnly": False,
+            "expires": int(expires or 0),
+        })
+    return cookies
 
 
 __all__ = ["BrowserAPIHarvester", "HarvestResult", "ApiCapture"]

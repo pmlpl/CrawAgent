@@ -109,7 +109,7 @@ cd frontend && npm install && npm run dev
 | 输出 | `/output` | 文件整理 + 预览 |
 | 监控 | `/monitor` | 监控任务 + 告警 |
 | 安全 | `/security` | 漏洞扫描 + 修复 |
-| 视频 | `/video` | 视频下载 + 本地播放 |
+| 视频 | `/video` | 视频下载 + 本地播放 + API 捕获（强风控/JS 签名站） |
 | 设置 | `/settings` | 系统配置 |
 
 ## 项目结构

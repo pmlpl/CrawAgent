@@ -1430,6 +1430,37 @@ async def auth_delete_profile(url: str):
     return {"deleted": ok, "domain": pm._domain_key(url)}
 
 
+# ==================== API 捕获端点（P9 前端集成） ====================
+
+class HarvestRequest(BaseModel):
+    url: str
+    api_patterns: List[str] = []
+    max_scrolls: int = 5
+    cookies_file: str = ""
+
+
+@app.post("/api/harvest")
+async def harvest_api_endpoint(req: HarvestRequest):
+    """浏览器 API 捕获（强风控/JS 签名站点）
+
+    打开页面拦截签名 API 响应，滚动触发分页，返回结构化数据与媒体直链。
+    签名由浏览器 JS 自动计算，无需逆向算法。
+    """
+    from crawagent.core.api_harvester import BrowserAPIHarvester
+    try:
+        harvester = BrowserAPIHarvester()
+        result = await harvester.harvest(
+            req.url,
+            api_patterns=req.api_patterns,
+            max_scrolls=req.max_scrolls,
+            cookies_file=req.cookies_file,
+        )
+        return result.to_dict()
+    except Exception as e:
+        logger.error(f"API 捕获失败: {e}")
+        raise HTTPException(500, f"API 捕获失败: {e}")
+
+
 # ==================== Video 路由（P7） ====================
 
 class VideoDownloadRequest(BaseModel):

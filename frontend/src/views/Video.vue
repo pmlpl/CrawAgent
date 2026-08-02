@@ -24,6 +24,7 @@
       <button :class="['tab', { active: activeTab === 'download' }]" @click="activeTab = 'download'">下载</button>
       <button :class="['tab', { active: activeTab === 'files' }]" @click="activeTab = 'files'; loadFiles()">已下载</button>
       <button :class="['tab', { active: activeTab === 'extract' }]" @click="activeTab = 'extract'">视频提取</button>
+      <button :class="['tab', { active: activeTab === 'harvest' }]" @click="activeTab = 'harvest'">API 捕获</button>
       <button :class="['tab', { active: activeTab === 'adremove' }]" @click="activeTab = 'adremove'">广告移除</button>
     </div>
 
@@ -204,6 +205,54 @@
       </div>
     </div>
 
+    <!-- API 捕获 Tab（强风控 / JS 签名站点） -->
+    <div v-if="activeTab === 'harvest'" class="tab-content">
+      <div class="form-section">
+        <label>目标页面 URL</label>
+        <input v-model="harvestUrl" type="text" placeholder="https://www.douyin.com/" class="input-field" />
+      </div>
+      <div class="form-row">
+        <div class="form-section" style="flex:1">
+          <label>API 特征（逗号分隔，可选）</label>
+          <input v-model="harvestPatterns" type="text" placeholder="/aweme/, feed" class="input-field" />
+        </div>
+        <div class="form-section" style="width:140px">
+          <label>滚动轮数</label>
+          <input v-model.number="harvestScrolls" type="number" min="0" max="20" class="input-field" />
+        </div>
+      </div>
+      <button @click="runHarvest" :disabled="harvesting" class="btn btn-primary">
+        {{ harvesting ? '捕获中（约 30 秒）...' : '开始捕获签名 API' }}
+      </button>
+      <p class="help-text">浏览器打开页面并拦截其 XHR/fetch 接口（签名由浏览器 JS 自动计算），滚动触发分页，提取结构化数据与媒体直链。适用于抖音/小红书等强风控站点。</p>
+
+      <div v-if="harvestResult" class="result-card">
+        <h3>捕获结果</h3>
+        <p>
+          API 响应: <b>{{ harvestResult.api_calls?.length ?? 0 }}</b> 条
+          · 结构化数据: <b>{{ harvestResult.items_count ?? 0 }}</b> 条
+          · 媒体直链: <b>{{ harvestResult.media_urls?.length ?? 0 }}</b> 条
+          <span v-if="harvestResult.risk_detected" class="badge badge-warn">检测到风控特征</span>
+        </p>
+        <p v-if="harvestResult.error" class="error-text">{{ harvestResult.error }}</p>
+
+        <div v-if="harvestResult.media_urls?.length">
+          <h4>媒体直链（前 20 条，点击可打开）</h4>
+          <div v-for="(m, i) in harvestResult.media_urls.slice(0, 20)" :key="i" class="extract-item">
+            <span class="badge">{{ m.key }}</span>
+            <a :href="m.url" target="_blank" :title="m.url">{{ m.url }}</a>
+          </div>
+        </div>
+
+        <div v-if="harvestResult.items?.length">
+          <h4>结构化数据（前 10 条）</h4>
+          <div v-for="(it, i) in harvestResult.items.slice(0, 10)" :key="i" class="harvest-item">
+            <pre>{{ JSON.stringify(it, null, 2).slice(0, 400) }}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 广告移除 Tab -->
     <div v-if="activeTab === 'adremove'" class="tab-content">
       <div class="form-section">
@@ -254,6 +303,13 @@ const extractResult = ref(null)
 const adRemoveHtml = ref('')
 const removingAds = ref(false)
 const cleanedHtml = ref('')
+
+// API 捕获
+const harvestUrl = ref('')
+const harvestPatterns = ref('')
+const harvestScrolls = ref(5)
+const harvesting = ref(false)
+const harvestResult = ref(null)
 
 async function fetchInfo() {
   if (!downloadUrl.value) return
@@ -335,6 +391,28 @@ async function extractVideos() {
     alert('提取失败: ' + e.message)
   } finally {
     extracting.value = false
+  }
+}
+
+async function runHarvest() {
+  if (!harvestUrl.value) return
+  harvesting.value = true
+  harvestResult.value = null
+  try {
+    const patterns = harvestPatterns.value
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+    const { data } = await api.post('/harvest', {
+      url: harvestUrl.value,
+      api_patterns: patterns,
+      max_scrolls: harvestScrolls.value || 0,
+    }, { timeout: 180000 })
+    harvestResult.value = data
+  } catch (e) {
+    alert('捕获失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    harvesting.value = false
   }
 }
 
@@ -729,6 +807,29 @@ function formatDate(ts) {
   color: var(--text-muted);
   font-family: monospace;
   margin-top: 2px;
+  word-break: break-all;
+}
+.help-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 8px 0 0 0;
+  line-height: 1.6;
+}
+.badge-warn {
+  background: #fefcbf;
+  color: #975a16;
+  border-color: #f6e05e;
+  margin-left: 8px;
+}
+.harvest-item pre {
+  background: var(--bg);
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: monospace;
+  overflow-x: auto;
+  margin: 4px 0;
+  white-space: pre-wrap;
   word-break: break-all;
 }
 </style>

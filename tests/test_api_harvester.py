@@ -4,6 +4,7 @@ from crawagent.core.api_harvester import (
     _extract_media_urls,
     _dedup_items,
     _dedup_media,
+    _parse_netscape_cookies,
 )
 
 
@@ -112,3 +113,30 @@ def test_dedup_items_by_id():
     ]
     out = _dedup_items(items)
     assert len(out) == 2
+
+
+# ==================== _parse_netscape_cookies ====================
+
+def test_parse_netscape_cookies(tmp_path):
+    """Netscape cookies.txt → Playwright cookie 列表"""
+    f = tmp_path / "cookies.txt"
+    f.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".douyin.com\tTRUE\t/\tTRUE\t1750000000\tttwid\tvalue123\n"
+        "www.example.com\tFALSE\t/\tFALSE\t0\tname\tv1\n",
+        encoding="utf-8",
+    )
+    cookies = _parse_netscape_cookies(str(f))
+    assert len(cookies) == 2
+    assert cookies[0]["name"] == "ttwid"
+    assert cookies[0]["value"] == "value123"
+    assert cookies[0]["domain"] == ".douyin.com"
+    assert cookies[0]["secure"] is True
+    assert cookies[0]["expires"] == 1750000000
+    assert cookies[1]["secure"] is False
+    assert cookies[1]["expires"] == 0
+
+
+def test_parse_netscape_cookies_missing(tmp_path):
+    """cookies.txt 不存在时返回空列表"""
+    assert _parse_netscape_cookies(str(tmp_path / "nope.txt")) == []
