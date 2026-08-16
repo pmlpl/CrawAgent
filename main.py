@@ -77,7 +77,7 @@ def _clear_dead_proxy_env():
 _clear_dead_proxy_env()
 
 from loguru import logger
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, AIMessageChunk, ToolMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from crawagent.config.settings import get_settings
 from crawagent.graph.agent import get_agent
@@ -189,14 +189,26 @@ def main():
             state = agent.get_state(config)
             for m in state.values.get("messages", []):
                 shown_ids.add(m.id)
-            seen_llm_ids: set[str] = set()  # 已 on_llm_start 的 AIMessage.id（防止同一条多次触发 start）
+            seen_llm_ids: set[str] = set()  # 已在 values 快照处理过的 AIMessage.id（防重复打印）
+            started_llm_ids: set[str] = set()  # 已 on_llm_start 过的 AIMessage.id
 
             # 待配对的工具调用：tool_call_id → 起点时刻（AIMessage 里打印 [调用工具] 的时刻）
             pending_tool_starts: dict[str, float] = {}
 
             final_ai_content = ""
             # 只传入本轮新消息，检查点存储会自动并入历史上下文
-            for event in agent.stream({"messages": [HumanMessage(content=user_input)]}, config=config, stream_mode="values"):
+            # 双模式流：messages 给 token 级增量（首个 chunk 即 LLM 真实起点），values 给打印与指标
+            for mode, event in agent.stream({"messages": [HumanMessage(content=user_input)]}, config=config, stream_mode=["messages", "values"]):
+                if mode == "messages":
+                    chunk, _meta = event
+                    if isinstance(chunk, AIMessageChunk) and chunk.id and not chunk.tool_call_chunks:
+                        if chunk.id not in started_llm_ids:
+                            started_llm_ids.add(chunk.id)
+                            metrics.on_llm_start()
+                        if chunk.content:
+                            metrics.on_llm_first_token()
+                    continue
+
                 for msg in event.get("messages", []):
                     if msg.id in shown_ids:
                         continue
@@ -206,11 +218,12 @@ def main():
                         continue
 
                     elif isinstance(msg, AIMessage):
-                        # 一条 AIMessage = 一次模型调用（tool_calls 请求 或 最终文本回复），按 msg.id 去重 start
-                        # ponytail: CLI 用 values 流，快照在模型跑完后才到，故 LLM 耗时≈0、tok/s 无意义；
-                        # token 数与步数仍准确。要真实计时需像 web/server.py 那样加 messages 流。
+                        # 一条 AIMessage = 一次模型调用（tool_calls 请求 或 最终文本回复）
                         if msg.id not in seen_llm_ids:
                             seen_llm_ids.add(msg.id)
+                        # 非流式兜底/工具调用消息在 messages 流无内容块 → 这里补记起点
+                        if msg.id not in started_llm_ids:
+                            started_llm_ids.add(msg.id)
                             metrics.on_llm_start()
 
                         has_any_output = False
@@ -226,7 +239,6 @@ def main():
                                 pending_tool_starts[tc["id"]] = time.perf_counter()
                         if msg.content:
                             has_any_output = True
-                            metrics.on_llm_first_token()  # 首次出现文本时记为 首 token 到达
                             print(f"\nAgent> {msg.content}")
                             final_ai_content = msg.content
 

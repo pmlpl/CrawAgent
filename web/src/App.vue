@@ -70,6 +70,10 @@ function onSelectSession(id) {
   chat.switchSession(id)
 }
 
+function onDeleteSession(id) {
+  chat.deleteSession(id)
+}
+
 function onOpenSettings() {
   settings.open()
 }
@@ -96,6 +100,7 @@ onMounted(() => {
       :open="sidebarOpen"
       @select="onSelectSession"
       @close="sidebarOpen = false"
+      @delete="onDeleteSession"
     />
 
     <div class="chat-col">

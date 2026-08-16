@@ -6,11 +6,15 @@ defineProps({
   activeId: { type: String, required: true },
   open: { type: Boolean, default: false },
 })
-const emit = defineEmits(['select', 'close'])
+const emit = defineEmits(['select', 'close', 'delete'])
 
 function pick(id) {
   emit('select', id)
   emit('close')
+}
+
+function del(id) {
+  if (window.confirm('删除该会话？此操作不可恢复。')) emit('delete', id)
 }
 </script>
 
@@ -28,7 +32,7 @@ function pick(id) {
     </p>
 
     <ul v-else class="side-list">
-      <li v-for="s in sessions" :key="s.id">
+      <li v-for="s in sessions" :key="s.id" class="side-row">
         <button
           type="button"
           class="side-item"
@@ -38,6 +42,7 @@ function pick(id) {
           <span class="side-id">{{ s.id }}</span>
           <span class="side-preview">{{ s.preview || '（空会话）' }}</span>
         </button>
+        <button type="button" class="side-del" title="删除会话" @click.stop="del(s.id)">×</button>
       </li>
     </ul>
   </aside>
@@ -87,6 +92,25 @@ function pick(id) {
   flex-direction: column;
   gap: 4px;
 }
+.side-row { position: relative; }
+.side-del {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  font-size: 16px;
+  line-height: 1;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s, color .15s, background .15s;
+}
+.side-row:hover .side-del { opacity: 1; }
+.side-del:hover { color: var(--danger); background: var(--danger-soft); }
 .side-item {
   width: 100%;
   text-align: left;

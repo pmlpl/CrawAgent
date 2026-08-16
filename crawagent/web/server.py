@@ -389,6 +389,24 @@ async def sessions() -> dict[str, Any]:
     return {"sessions": await asyncio.to_thread(_load)}
 
 
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict[str, Any]:
+    """删除一个会话及其检查点数据（不可恢复）。"""
+    def _delete() -> None:
+        checkpointer = _get_checkpointer()
+        for table in ("checkpoints", "writes"):
+            checkpointer.conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (session_id,))
+        checkpointer.conn.commit()
+
+    try:
+        await asyncio.to_thread(_delete)
+    except Exception:
+        return {"ok": False}
+    _metrics.pop(session_id, None)
+    _session_locks.pop(session_id, None)
+    return {"ok": True, "id": session_id}
+
+
 # ---- 设置（API Key / 模型） ----
 
 def _mask_api_key(key: str) -> str:

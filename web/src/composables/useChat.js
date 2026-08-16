@@ -203,6 +203,12 @@ export function useChat() {
     loadHistory()
   }
 
+  async function deleteSession(id) {
+    try { await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }) } catch (e) { /* 删除失败不阻塞 */ }
+    if (id === session.value) newSession()
+    await fetchSessions()
+  }
+
   function newSession() {
     if (busy.value) return
     session.value = newId()
@@ -222,6 +228,6 @@ export function useChat() {
 
   return {
     items, busy, connected, typing, session, lastDraft, lastStatus, sessions,
-    connect, loadHistory, send, newSession, switchSession, fetchSessions, reconnect,
+    connect, loadHistory, send, newSession, switchSession, fetchSessions, reconnect, deleteSession,
   }
 }
