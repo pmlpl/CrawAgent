@@ -72,9 +72,6 @@ defineExpose({ fill })
         <span v-else class="spin" />
       </button>
     </form>
-    <div class="hint">
-      <span>Enter 发送 · Shift+Enter 换行</span>
-    </div>
   </footer>
 </template>
 
@@ -138,17 +135,6 @@ textarea::placeholder { color: var(--faint); }
   border-top-color: transparent;
   animation: rot .7s linear infinite;
 }
-.hint {
-  max-width: var(--maxw);
-  margin: 7px auto 0;
-  font-size: 12px;
-  color: var(--faint);
-  display: flex;
-  justify-content: flex-start;
-  gap: 12px;
-  padding: 0 6px;
-}
-
 @media (max-width: 640px) {
   .composer-wrap { padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); }
 }

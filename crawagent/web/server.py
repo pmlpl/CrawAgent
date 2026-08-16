@@ -198,6 +198,8 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                     if start is not None:
                         metrics.tool_total_time += max(0.0, time.perf_counter() - start)
                     metrics.tool_call_count += 1
+                    # 长任务中每完成一个工具就推一次中间状态，状态栏实时跳动
+                    _push(q, loop, {"type": "status", "line": metrics.status_line()})
 
         metrics.turn_end()
 
@@ -294,6 +296,8 @@ def _reconstruct_status(messages) -> str | None:
     total_cache = cache_hit + cache_miss
     if total_cache > 0:
         parts.append(f"缓存命中 {cache_hit / total_cache * 100:.0f}%")
+    else:
+        parts.append("缓存命中 —%")
     parts.append(f"输入 {_fmt_tokens(input_tokens)} tok · 输出 {_fmt_tokens(output_tokens)} tok")
     return "  |  ".join(parts)
 

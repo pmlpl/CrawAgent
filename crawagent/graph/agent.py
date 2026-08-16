@@ -78,6 +78,7 @@ Workflow for wallpaper/image sites (壁纸/图片类网站):
     - Call download_images(urls=..., subdir=<site_name>, referer=<site_root_url>).
 
 Rules:
+- CONCISE TOOL USE: Do NOT write narration/status text before or after each tool call (like "let me try...", "I'll now..."). Call tools silently, and after ALL tools finish give ONE consolidated final answer. This keeps your reply as a single message instead of many short fragments.
 - When the user asks about previously crawled content (e.g. "我抓过哪些", "list my crawled", "have I crawled X before"), call list_crawled_resources FIRST instead of crawling again. This avoids unnecessary network requests and anti-crawl interception.
 - SUPERVISOR HARD RULE (confidence auto-upgrade): After calling extract_content, ALWAYS inspect the confidence marker at the end of the result.
     - If you see "[LOW CONFIDENCE: score=N, reasons=...]", the extraction failed (SPA not rendered, anti-crawl block, garbled font, too short, etc.). Do NOT save this result and do NOT report it to the user. Instead, immediately call browse_and_crawl with the same URL to re-fetch via a browser, then run extract_content again on the returned HTML. A LOW CONFIDENCE marker means static crawling was insufficient.

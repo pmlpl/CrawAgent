@@ -213,8 +213,9 @@ class SessionMetrics:
     def status_line(self) -> str:
         """返回一行状态栏：`4 轮·106 步 | LLM 40m25s·工具 29m21s | 首 token 1.7s·80 tok/s | 缓存命中 99% | 输入 18.1M tok·输出 1.2M tok`"""
         parts = []
-        # 轮数·步数
-        parts.append(f"{self.turn_count} 轮 · {self.step_count} 步")
+        # 轮数·步数（进行中的这轮 turn_end 前 +1）
+        turns = self.turn_count + (1 if self._current_turn else 0)
+        parts.append(f"{turns} 轮 · {self.step_count} 步")
 
         # LLM·工具总耗时
         parts.append(f"LLM {_fmt_duration(self.llm_total_time)} · 工具 {_fmt_duration(self.tool_total_time)}")
@@ -229,9 +230,11 @@ class SessionMetrics:
         if perf:
             parts.append(" · ".join(perf))
 
-        # 缓存命中率
+        # 缓存命中率（无数据时显示 —）
         if self.cache_hit_rate is not None:
             parts.append(f"缓存命中 {self.cache_hit_rate * 100:.0f}%")
+        else:
+            parts.append("缓存命中 —%")
 
         # 输入·输出 token
         parts.append(f"输入 {_fmt_tokens(self.input_tokens)} tok · 输出 {_fmt_tokens(self.output_tokens)} tok")
