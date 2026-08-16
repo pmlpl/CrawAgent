@@ -10,69 +10,34 @@ __pycache__/
 dist/
 build/
 
-# 运行时输出
-/output/
-crawl_progress.json
-
 # 敏感配置
-models.json
 .env
+.env.bak
 
-# Cookie / 登录凭证
-*_cookies.txt
-cookies.txt
-youku_cookies.txt
+# 运行时数据
+data/
+logs/
+downloads/
+novels/
+output/
+assets/
 
-# 登录态 profile 数据（含 cookie，严禁提交）
-profiles/
-profiles_test/
+# 前端依赖与构建
+node_modules/
 
-# IDE
+# 智能体/IDE 本地状态
 .idea/
 .vscode/
+.trae/
+.claude/
+.workbuddy/
+.pytest_cache/
 *.swp
 *.swo
-
-# TRAE / Reasonix
-.reasonix/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# 测试覆盖率
-htmlcov/
-.coverage
-.pytest_cache/
-
-# 日志
-*.log
-logs/
-
-# 测试脚本（仅保留 tests/ 目录中的正式测试）
-tests/__pycache__/
-tests/*.pyc
-!tests/__init__.py
-!tests/test_*.py
-
-# 运行时数据库
-data/
-
-# 前端依赖
-frontend/node_modules/
-frontend/dist/
-
-# 第三方参考项目（仅供学习参考，不纳入版本控制）
-参考项目/
-
-# 临时验证脚本
+# 临时文件
 _test_*.py
-_probe.py
-_browser_probe.py
-_super_browser.py
-
-# IDE / 本地配置
-.trae/
-
-# 部署文档（含安全细节，不对外）
-docs/DEPLOYMENT.md

@@ -1,91 +1,54 @@
 [project]
 name = "crawagent"
-version = "1.0.0"
-description = "智能爬虫 Agent - 基于 LLM Agent 的专业爬虫系统"
-readme = "README.md"
+version = "0.1.0"
+description = "基于 LangChain + LangGraph 的智能爬虫 Agent"
 requires-python = ">=3.11"
 dependencies = [
-    # 核心框架
-    "langchain-core>=0.3.0",
-    "langgraph>=0.2.0",
-    "langchain-openai>=0.2.0",
+    # Agent 调度层
+    "langchain>=1.0.0",
+    "langchain-core>=1.0.0",
+    "langgraph>=1.0.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    "langchain-openai>=1.0.0",
+    # 显式锁定 openai：避免安装到被篡改的版本（魔改版用 httpx2 替代 httpx，
+    # 会劫持 httpx 命名空间并触发 SyncByteStream 断言失败 → APIConnectionError）
+    "openai>=2.26.0,<3.0.0",
 
-    # HTTP 客户端
-    "httpx>=0.27.0",
-    "curl-cffi>=0.7.0",
+    # LLM 调用链路追踪（LangSmith）
+    "langsmith>=0.1.0",
 
-    # HTML 解析
+    # 爬虫工具层
+    "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
-    "selectolax>=0.3.0",
     "lxml>=5.0.0",
-    "w3lib>=2.0.0",
+    "fake-useragent>=1.5.0",
 
-    # HTML → Markdown（P2）
-    "html2text>=2024.2.26",
-    "markdownify>=0.12.0",
-
-    # 配置与序列化
+    # 配置与校验
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
 
-    # 数据库（MySQL + SQLite 兼容）
-    "aiosqlite>=0.19.0",
-    "aiomysql>=0.2.0",
-    "sqlalchemy[asyncio]>=2.0.0",
-
-    # 缓存与队列
-    "redis>=5.0.0",
-
-    # 监控调度（P4）
-    "apscheduler>=3.10.0",
-
-    # 媒体下载（P3/P7）
-    "yt-dlp>=2024.8.6",
-
-    # 并发与重试
-    "tenacity>=8.0.0",
-
-    # Web 框架
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
-
-    # CLI
-    "click>=8.1.0",
-    "rich>=13.7.0",
-    "prompt-toolkit>=3.0.0",
+    # 存储（Demo 阶段用 SQLite，标准库自带）
+    # 后续升级：mysql-connector-python（MySQL）
 
     # 日志
     "loguru>=0.7.0",
-    "structlog>=24.0.0",
-
-    # 工具
-    "xxhash>=3.4.0",
-    "msgspec>=0.18.0",
 ]
 
 [project.optional-dependencies]
-# 浏览器自动化
+# 扩展可选：API 封装
+api = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
+# 扩展可选：浏览器渲染 + 字体解密（番茄小说等字体加密站点）
 browser = [
     "playwright>=1.40.0",
-    "patchright>=1.0.0",
+    "fonttools>=4.47.0",
+    "Pillow>=10.0.0",
+    "numpy>=1.26.0",
+    "brotli>=1.1.0",  # woff2 字体解码
 ]
-
-# 反爬与指纹
-stealth = [
-    "curl-cffi>=0.7.0",
-    "browserforge>=0.14.0",
-]
-
-# 数据处理
-data = [
-    "pandas>=2.0.0",
-    "orjson>=3.9.0",
-    "trafilatura>=1.8.0",
-]
-
-# 完整安装
-all = ["crawagent[browser,stealth,data]"]
 
 [build-system]
 requires = ["setuptools>=64", "wheel"]
@@ -93,16 +56,3 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["crawagent*"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.mypy]
-python_version = "3.11"
-strict = false
-ignore_missing_imports = true
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
