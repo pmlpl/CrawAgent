@@ -29,8 +29,7 @@ from crawagent.config.settings import get_settings
 from crawagent.graph.agent import get_agent
 from crawagent.observability.metrics import SessionMetrics, _fmt_tokens, usage_from_message
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
-# Vue 工程（项目根目录 web/）的构建产物；存在则优先托管，否则回退到旧版单文件页
+# Vue 工程（项目根目录 web/）的构建产物
 WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
 TOOL_RESULT_PREVIEW = 600  # 推送给前端的工具结果预览长度
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -254,15 +253,9 @@ def _session_lock(session_id: str) -> asyncio.Lock:
 
 # ---- 路由 ----
 
-def _index_file() -> Path:
-    """请求时动态解析首页：Vue 构建产物存在则用之，否则回退旧版单文件页"""
-    candidate = WEB_DIST / "index.html"
-    return candidate if candidate.exists() else STATIC_DIR / "index.html"
-
-
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(_index_file())
+    return FileResponse(WEB_DIST / "index.html")
 
 
 def _reconstruct_status(messages) -> str | None:
