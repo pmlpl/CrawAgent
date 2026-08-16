@@ -1,6 +1,8 @@
 <script setup>
 // CrawAgent WebUI — 主组件：消息流渲染 + 自动滚动 + 失败草稿恢复
 import { nextTick, onMounted, ref, watch } from 'vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import TopBar from './components/TopBar.vue'
 import EmptyState from './components/EmptyState.vue'
 import CrawlTrace from './components/CrawlTrace.vue'
@@ -13,6 +15,13 @@ import { useSettings } from './composables/useSettings'
 
 const chat = useChat()
 const settings = useSettings()
+
+// AI 回复渲染为 Markdown（gfm + 换行转 <br>），经 DOMPurify 清洗防 XSS
+marked.setOptions({ gfm: true, breaks: true })
+function md(text) {
+  if (!text) return ''
+  return DOMPurify.sanitize(marked.parse(text))
+}
 const composer = ref(null)
 const restoreDraft = ref('')
 const sidebarOpen = ref(false)
@@ -95,7 +104,7 @@ onMounted(() => {
 
         <template v-for="(item, i) in chat.items" :key="i">
           <div v-if="item.kind === 'user'" class="msg user">{{ item.content }}</div>
-          <div v-else-if="item.kind === 'ai'" class="msg ai" :class="{ streaming: item.streaming }">{{ item.content }}</div>
+          <div v-else-if="item.kind === 'ai'" class="msg ai md" :class="{ streaming: item.streaming }" v-html="md(item.content)"></div>
           <CrawlTrace v-else-if="item.kind === 'trace'" :steps="item.steps" />
           <Thinking v-else-if="item.kind === 'thinking'" :content="item.content" />
           <div v-else-if="item.kind === 'error'" class="err">{{ item.content }}</div>
@@ -179,6 +188,42 @@ onMounted(() => {
   border-bottom-left-radius: 4px;
   box-shadow: var(--shadow);
 }
+/* Markdown 渲染（AI 回复）：v-html 注入，需用 :deep 命中内部元素 */
+.msg.ai.md {
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.msg.ai.md :deep(p) { margin: 0 0 .6em; }
+.msg.ai.md :deep(p:last-child) { margin-bottom: 0; }
+.msg.ai.md :deep(h1), .msg.ai.md :deep(h2), .msg.ai.md :deep(h3), .msg.ai.md :deep(h4) {
+  margin: 1em 0 .5em; line-height: 1.3; font-weight: 600;
+}
+.msg.ai.md :deep(h1) { font-size: 1.4em; }
+.msg.ai.md :deep(h2) { font-size: 1.25em; }
+.msg.ai.md :deep(h3) { font-size: 1.1em; }
+.msg.ai.md :deep(h4) { font-size: 1em; }
+.msg.ai.md :deep(ul), .msg.ai.md :deep(ol) { margin: .4em 0 .8em; padding-left: 1.4em; }
+.msg.ai.md :deep(li) { margin: .25em 0; }
+.msg.ai.md :deep(li)::marker { color: var(--accent); }
+.msg.ai.md :deep(a) { color: var(--accent-strong); text-decoration: none; }
+.msg.ai.md :deep(a:hover) { text-decoration: underline; }
+.msg.ai.md :deep(code) {
+  font-family: var(--font-mono); font-size: .88em;
+  background: var(--panel-2); padding: .12em .4em; border-radius: 5px;
+}
+.msg.ai.md :deep(pre) {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px 14px; overflow-x: auto; margin: .6em 0;
+}
+.msg.ai.md :deep(pre code) { background: none; padding: 0; font-size: .85em; }
+.msg.ai.md :deep(blockquote) {
+  margin: .6em 0; padding: .2em .9em; border-left: 3px solid var(--accent); color: var(--dim);
+}
+.msg.ai.md :deep(table) { border-collapse: collapse; margin: .6em 0; width: 100%; }
+.msg.ai.md :deep(th), .msg.ai.md :deep(td) { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+.msg.ai.md :deep(th) { background: var(--panel-2); }
+.msg.ai.md :deep(hr) { border: none; border-top: 1px solid var(--line); margin: .8em 0; }
+.msg.ai.md :deep(img) { max-width: 100%; border-radius: 8px; }
 /* 流式输出中的光标：一缕正在生长的丝 */
 .msg.ai.streaming::after {
   content: "▍";
