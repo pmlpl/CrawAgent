@@ -35,7 +35,7 @@ WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
 TOOL_RESULT_PREVIEW = 600  # 推送给前端的工具结果预览长度
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-app = FastAPI(title="CrawAgent WebUI", docs_url=None, redoc_url=None)
+app = FastAPI(title="CrawAgent WebUI")
 
 # ---- 全局单例：Agent 与 checkpointer 只建一次，跨会话/跨连接复用 ----
 _agent = None
