@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import EmptyState from '../components/EmptyState.vue'
@@ -31,33 +31,19 @@ const restoreDraft = ref('')
 const streamRef = ref(null)
 const prevTyping = ref(false)
 
-// 消息变化时滚动：新 trace 滚到 trace，其他滚到底部
-watch(
-  () => chat.items.length,
-  () => {
-    const lastItem = chat.items[chat.items.length - 1]
-    if (lastItem && lastItem.kind === 'trace') {
-      scrollToTrace()
-    } else {
-      scrollDown()
-    }
-  }
-)
-watch(chat.items, () => {
-  const lastItem = chat.items[chat.items.length - 1]
-  if (lastItem && lastItem.kind === 'trace') {
-    scrollToTrace()
-  } else {
-    scrollDown()
-  }
-}, { deep: true })
+// ---------- 滚动跟随 / 回到底部 / 轮次锚点 ----------
+const showJump = ref(false)
+let prevLen = 0 // 上次 items 长度：增量 >3 视为历史批量载入，强制回底
 
-// 任务完成时（typing 从 true → false），滚动显示最后一个 trace
-watch(chat.typing, (val, old) => {
-  if (old && !val) {
-    scrollToTrace()
-  }
-})
+function isNearBottom() {
+  const el = streamRef.value
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 160
+}
+
+function onScroll() {
+  showJump.value = !isNearBottom()
+}
 
 function scrollDown() {
   nextTick(() => {
@@ -81,6 +67,50 @@ function scrollToTrace() {
       scrollDown()
     }
   })
+}
+
+// 消息变化时跟随滚动：仅当用户本来就在底部（或历史批量载入）才动，
+// 往回翻阅历史时流式输出不再把视口拽到底部
+function autoScroll() {
+  const bulk = chat.items.length - prevLen > 3
+  prevLen = chat.items.length
+  if (!bulk && !isNearBottom()) return
+  const lastItem = chat.items[chat.items.length - 1]
+  if (lastItem && lastItem.kind === 'trace' && !bulk) {
+    scrollToTrace()
+  } else {
+    scrollDown()
+  }
+}
+
+watch(() => chat.items.length, autoScroll)
+watch(chat.items, autoScroll, { deep: true })
+
+// 任务完成时（typing 从 true → false），在底部才滚动显示最后一个 trace
+watch(chat.typing, (val, old) => {
+  if (old && !val && isNearBottom()) {
+    scrollToTrace()
+  }
+})
+
+// 每轮会话锚点：所有用户消息（= 每轮任务的起点），供左侧导航点击跳转
+const turns = computed(() =>
+  chat.items
+    .filter(i => i.kind === 'user')
+    .map(i => {
+      const full = String(i.content || '').replace(/\s+/g, ' ').trim()
+      return { id: i._id, text: full.slice(0, 10), full }
+    })
+)
+
+function jumpToTurn(id) {
+  const el = document.getElementById('turn-' + id)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.classList.remove('flash')
+  void el.offsetWidth // 重启动画
+  el.classList.add('flash')
+  setTimeout(() => el.classList.remove('flash'), 1800)
 }
 
 // 新增 error 条目时，把草稿还给输入框（不清空用户输入）
@@ -119,32 +149,57 @@ onMounted(() => {
       连接已断开 · <b>点击重新连线</b>
     </div>
 
-    <!-- 消息流 -->
-    <main class="stream" ref="streamRef">
-      <EmptyState v-if="!chat.items.length" @suggest="onSuggest" />
+    <!-- 消息流（含轮次导航 + 回到底部） -->
+    <div class="stream-wrap">
+      <main class="stream" ref="streamRef" @scroll="onScroll">
+        <EmptyState v-if="!chat.items.length" @suggest="onSuggest" />
 
-      <template v-for="item in chat.items" :key="item._id || item.kind + '_' + (item.content?.substring?.(0,20) || '')">
-        <div v-if="item.kind === 'user'" class="msg user">{{ item.content }}</div>
-        <div v-if="item.kind === 'ai'" class="msg ai md" :class="{ streaming: item.streaming }" v-html="md(item.content)"></div>
-        <CrawlTrace v-if="item.kind === 'trace'" :steps="item.steps" :expanded="item._expanded" :round-id="item.roundId" />
-        <Thinking v-if="item.kind === 'thinking'" :content="item.content" />
-        <div v-if="item.kind === 'error'" class="err">{{ item.content }}</div>
-      </template>
+        <template v-for="item in chat.items" :key="item._id || item.kind + '_' + (item.content?.substring?.(0,20) || '')">
+          <div v-if="item.kind === 'user'" class="msg user" :id="'turn-' + item._id">{{ item.content }}</div>
+          <div v-if="item.kind === 'ai'" class="msg ai md" :class="{ streaming: item.streaming }" v-html="md(item.content)"></div>
+          <CrawlTrace v-if="item.kind === 'trace'" :steps="item.steps" :expanded="item._expanded" :round-id="item.roundId" />
+          <Thinking v-if="item.kind === 'thinking'" :content="item.content" />
+          <div v-if="item.kind === 'error'" class="err">{{ item.content }}</div>
+        </template>
 
-      <div v-if="chat.typing.value" class="typing">
-        <span class="dig-scene" aria-hidden="true">
-          <!-- 跳动粒子：5 颗像素点错落弹跳 -->
-          <i class="dot" style="--i:0" /><i class="dot" style="--i:1" /><i class="dot" style="--i:2" /><i class="dot" style="--i:3" /><i class="dot" style="--i:4" />
-        </span>
-        <span class="typing-label">
-          <span class="dig-brand">dig deep</span>
-          <template v-if="chat.currentProgress.value">
-            <span class="dig-sep">·</span>
-            <span class="dig-progress">{{ chat.currentProgress.value }}</span>
-          </template>
-        </span>
-      </div>
-    </main>
+        <div v-if="chat.typing.value" class="typing">
+          <span class="dig-scene" aria-hidden="true">
+            <!-- 跳动粒子：5 颗像素点错落弹跳 -->
+            <i class="dot" style="--i:0" /><i class="dot" style="--i:1" /><i class="dot" style="--i:2" /><i class="dot" style="--i:3" /><i class="dot" style="--i:4" />
+          </span>
+          <span class="typing-label">
+            <span class="dig-brand">dig deep</span>
+            <template v-if="chat.currentProgress.value">
+              <span class="dig-sep">·</span>
+              <span class="dig-progress">{{ chat.currentProgress.value }}</span>
+            </template>
+          </span>
+        </div>
+      </main>
+
+      <!-- 每轮会话锚点导航：点击跳到对应轮次的用户消息 -->
+      <nav v-if="turns.length >= 2" class="turn-rail" aria-label="轮次导航">
+        <button
+          v-for="(t, i) in turns"
+          :key="t.id"
+          type="button"
+          class="turn-chip"
+          :title="t.full"
+          @click="jumpToTurn(t.id)"
+        >
+          <span class="turn-no">{{ i + 1 }}</span>
+          <span class="turn-text">{{ t.text || '（空）' }}</span>
+        </button>
+      </nav>
+
+      <!-- 回到底部 -->
+      <button v-if="showJump" type="button" class="jump-bottom" @click="scrollDown">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 5v14M19 12l-7 7-7-7" />
+        </svg>
+        回到底部
+      </button>
+    </div>
 
     <!-- 输入组件：包含任务进度、工具栏、发送按钮 -->
     <ChatComposer
@@ -167,8 +222,18 @@ onMounted(() => {
   overflow: hidden;
 }
 
+/* 消息流容器：轮次导航与回到底部按钮相对它绝对定位 */
+.stream-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+
 .stream {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   width: 100%;
@@ -179,6 +244,88 @@ onMounted(() => {
   flex-direction: column;
   gap: 18px;
   scroll-behavior: smooth;
+}
+
+/* ---------- 每轮会话锚点导航（宽屏才显示，窄屏会压住消息） ---------- */
+.turn-rail {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 72%;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 12px;
+}
+.turn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 136px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  color: var(--dim);
+  font-size: 12px;
+  padding: 4px 9px 4px 5px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.turn-chip:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--accent-soft);
+}
+.turn-no {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  min-width: 19px;
+  height: 19px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.turn-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 1379px) {
+  .turn-rail { display: none; }
+}
+
+/* ---------- 回到底部 ---------- */
+.jump-bottom {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--dim);
+  font-size: 12.5px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  transition: color .15s, border-color .15s;
+  animation: rise .25s var(--ease) both;
+}
+.jump-bottom:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .msg {
@@ -194,6 +341,11 @@ onMounted(() => {
   background: var(--accent-soft);
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   border-bottom-right-radius: 4px;
+  transition: box-shadow .4s;
+}
+/* 轮次锚点跳转落地时的高亮闪烁 */
+.msg.user.flash {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 .msg.ai {
   align-self: flex-start;

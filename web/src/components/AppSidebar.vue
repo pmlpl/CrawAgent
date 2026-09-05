@@ -116,9 +116,8 @@ function onBulkDelete() {
 </script>
 
 <template>
-  <!-- 移动端遮罩 -->
-  <div v-if="!open && isMobile" class="backdrop" @click="emit('close')" />
-  <div v-else-if="open && isMobile" class="backdrop" @click="emit('close')" />
+  <!-- 移动端遮罩（仅抽屉打开时显示） -->
+  <div v-if="open && isMobile" class="backdrop" @click="emit('close')" />
 
   <aside class="sidebar" :class="{ open }" aria-label="侧边栏">
     <!-- Logo 区域 -->
@@ -130,6 +129,12 @@ function onBulkDelete() {
           <span class="logo-tag">吐丝 · 结网</span>
         </span>
       </a>
+      <!-- 收起会话列表（桌面端折叠为 0 宽，移动端合上抽屉） -->
+      <button type="button" class="collapse-btn" title="收起侧栏" aria-label="收起侧栏" @click="emit('close')">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="15 18 9 12 15 6" />
+        </svg>
+      </button>
     </div>
 
     <!-- 新对话按钮 -->
@@ -270,7 +275,15 @@ function onBulkDelete() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: transform .28s var(--ease);
+  transition: transform .28s var(--ease), width .28s var(--ease);
+}
+
+/* 桌面端收起：宽度折叠为 0（移动端走上面的 transform 抽屉） */
+@media (min-width: 861px) {
+  .sidebar:not(.open) {
+    width: 0;
+    border-right-color: transparent;
+  }
 }
 
 /* 桌面端默认打开，移动端通过 transform 控制 */
@@ -300,8 +313,29 @@ function onBulkDelete() {
 /* ---------- Logo ---------- */
 .logo-wrap {
   flex: none;
+  position: relative;
   padding: 16px 16px 8px;
   border-bottom: 1px solid var(--line);
+}
+.collapse-btn {
+  position: absolute;
+  top: 14px;
+  right: 10px;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  border-radius: 7px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color .15s, background .15s;
+}
+.collapse-btn:hover {
+  color: var(--accent);
+  background: var(--hover);
 }
 .logo {
   display: flex;

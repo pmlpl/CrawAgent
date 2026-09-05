@@ -109,7 +109,6 @@ function handleRenameSession(id, title) {
         :session-id="chat.session.value"
         :default-model="settings.config.defaultModel"
         @toggle-sidebar="sidebarOpen = !sidebarOpen"
-        @new-session="handleNewChat"
       />
 
       <!-- 页面内容出口 -->

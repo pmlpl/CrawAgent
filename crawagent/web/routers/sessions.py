@@ -21,6 +21,7 @@ from crawagent.web.state import (
     get_agent,
     get_checkpointer,
     get_metrics,
+    get_session_error,
 )
 
 router = APIRouter()
@@ -138,22 +139,23 @@ def _reconstruct_messages(messages, *, truncate=True):
 async def history(session_id: str) -> dict[str, Any]:
     """读取指定会话的历史消息与状态栏（供刷新页面/切换会话后恢复视图）"""
     def _load() -> dict[str, Any]:
+        last_error = get_session_error(session_id)
         try:
             agent = get_agent()
         except Exception:
-            return {"messages": [], "status": None}
+            return {"messages": [], "status": None, "last_error": last_error}
         config = {"configurable": {"thread_id": session_id}}
         try:
             state = agent.get_state(config)
         except Exception:
-            return {"messages": [], "status": None}
+            return {"messages": [], "status": None, "last_error": last_error}
         messages = state.values.get("messages", [])
         items = _reconstruct_messages(messages, truncate=True)
         # 状态栏：优先用内存里的会话指标（含耗时/性能），
         # 内存没有就从磁盘恢复（server 重启后），都没有才从检查点重建
         metrics = get_metrics(session_id)
         status = metrics.status_line() if metrics is not None else _reconstruct_status(messages)
-        return {"messages": items, "status": status}
+        return {"messages": items, "status": status, "last_error": last_error}
 
     return await asyncio.to_thread(_load)
 
@@ -420,6 +422,12 @@ def _delete_session_sync(session_id: str, *, do_archive: bool = True) -> dict[st
     checkpointer = get_checkpointer()
     for table in ("checkpoints", "writes"):
         checkpointer.conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (session_id,))
+    # 标题与失败记录一并清掉：会话没了，残留数据就是垃圾
+    for table in ("session_titles", "session_errors"):
+        try:
+            checkpointer.conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (session_id,))
+        except Exception:
+            pass  # 表尚未创建（老库）等情况，不阻断删除
     checkpointer.conn.commit()
     _metrics.pop(session_id, None)
     _session_locks.pop(session_id, None)

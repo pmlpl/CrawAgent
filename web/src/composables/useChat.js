@@ -220,8 +220,11 @@ function createChat() {
     console.log('[progress] lines:', evt.lines.length, 'attached to tool step:', step.name || '(unknown)')
   }
 
-  function pushError(message) {
-    items.push({ kind: 'error', content: `⚠ ${message}（输入内容已保留，可直接重发）`, _id: nextItemId() })
+  function pushError(message, opts = {}) {
+    const suffix = opts.restored
+      ? `（上次失败于 ${opts.ts || '未知时间'}，下一轮成功后自动清除）`
+      : '（输入内容已保留，可直接重发）'
+    items.push({ kind: 'error', content: `⚠ ${message}${suffix}`, _id: nextItemId() })
   }
 
   function handleEvent(e) {
@@ -308,6 +311,10 @@ function createChat() {
       }
       currentTrace = null
       if (data.status) statusBySession[session.value] = data.status
+      // 恢复上次未解决的报错（后端持久化，下一轮成功才清除），刷新后红条不丢
+      if (data.last_error && data.last_error.message) {
+        pushError(data.last_error.message, { restored: true, ts: data.last_error.ts })
+      }
       console.log('[loadHistory] loaded', data.messages?.length || 0, 'messages, items:', items.map(i => i.kind + (i.steps ? `(${i.steps.length}s)` : '')))
     } catch (e) {
       console.error('[loadHistory] failed:', e)

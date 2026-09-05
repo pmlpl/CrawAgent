@@ -29,11 +29,13 @@ from crawagent.web.event_log import EventLog
 from crawagent.web.state import (
     _active_turns,
     _metrics,
+    clear_session_error,
     get_agent,
     get_checkpointer,
-    warm_cache,
-    session_lock,
     save_metrics,
+    save_session_error,
+    session_lock,
+    warm_cache,
 )
 
 
@@ -48,10 +50,12 @@ _AUTO_TITLE_PROMPT = (
 _pending_titles: set[str] = set()
 
 
-def _maybe_auto_title(session_id: str, agent: Any, config: dict) -> None:
-    """首轮对话结束后检查：如果该会话还没有标题，后台调小模型自动生成。
+def _maybe_auto_title(session_id: str, agent: Any, config: dict, fallback_text: str = "") -> None:
+    """轮次结束后检查：如果该会话还没有标题，后台调小模型自动生成。
 
     已有标题（手动改名或前轮已生成）→ 跳过。不覆盖用户的手动命名。
+    fallback_text：检查点里读不到用户消息时的兜底素材（如本轮刚发出、
+    尚未落库就失败的原始输入），保证失败轮次也能命名。
     """
     if session_id in _pending_titles:
         return
@@ -83,6 +87,8 @@ def _maybe_auto_title(session_id: str, agent: Any, config: dict) -> None:
         if first_user and first_ai:
             break
     if not first_user:
+        first_user = (fallback_text or "").strip()[:300]
+    if not first_user:
         return  # 没有用户消息，无法命名
 
     _pending_titles.add(session_id)
@@ -94,17 +100,27 @@ def _maybe_auto_title(session_id: str, agent: Any, config: dict) -> None:
 
 
 def _generate_title(session_id: str, user_text: str, ai_text: str) -> None:
-    """后台线程：调小模型生成标题并写入 session_titles 表。"""
+    """后台线程：调小模型生成标题写入 session_titles 表；LLM 失败时退回用户关键词兜底。"""
     try:
-        from crawagent.llm.model import get_llm
-        llm = get_llm(thinking=False, max_tokens=64)
-        prompt = _AUTO_TITLE_PROMPT.format(user=user_text, ai=ai_text or "（无回复）")
-        resp = llm.invoke(prompt)
-        title = resp.content.strip() if isinstance(resp.content, str) else str(resp.content).strip()
-        # 清理：去引号、去换行、限长
-        title = title.strip("\"'""''「」【】 \n\t")
-        if not title or len(title) > 30:
-            return  # LLM 返回异常，不写入
+        title = ""
+        try:
+            from crawagent.llm.model import get_llm
+            llm = get_llm(thinking=False, max_tokens=64)
+            prompt = _AUTO_TITLE_PROMPT.format(user=user_text, ai=ai_text or "（无回复）")
+            resp = llm.invoke(prompt)
+            title = resp.content.strip() if isinstance(resp.content, str) else str(resp.content).strip()
+            # 清理：去引号、去换行、限长
+            title = title.strip("\"'""''「」【】 \n\t")
+        except Exception as e:
+            print(f"[AUTO_TITLE] {session_id} LLM 调用失败，改用用户关键词兜底: {e}")
+        if not title:
+            title = _fallback_title(user_text)
+            if title:
+                print(f"[AUTO_TITLE] {session_id} 兜底标题: {title}")
+        if title and len(title) > 30:
+            title = title[:30]
+        if not title:
+            return  # LLM 与兜底都提不出（用户输入为空）
         conn = get_checkpointer().conn
         conn.execute(
             "INSERT INTO session_titles (thread_id, title) VALUES (?, ?) "
@@ -114,9 +130,17 @@ def _generate_title(session_id: str, user_text: str, ai_text: str) -> None:
         conn.commit()
         print(f"[AUTO_TITLE] {session_id}: {title}")
     except Exception as e:
-        print(f"[AUTO_TITLE] {session_id} 生成失败（忽略）: {e}")
+        print(f"[AUTO_TITLE] {session_id} 写入失败（忽略）: {e}")
     finally:
         _pending_titles.discard(session_id)
+
+
+def _fallback_title(user_text: str) -> str:
+    """LLM 命名失败时的兜底标题：取用户首条指令的第一行（去掉 markdown 符号）截短。"""
+    lines = (user_text or "").strip().splitlines()
+    if not lines:
+        return ""
+    return lines[0].lstrip("#>-*· ").strip()[:16]
 
 
 def _emit(session_id: str, q: asyncio.Queue, loop: asyncio.AbstractEventLoop, event: dict[str, Any]) -> None:
@@ -152,6 +176,7 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
     try:
         agent = get_agent(model)
     except Exception as e:  # Agent 初始化失败（如缺 API Key）
+        save_session_error(session_id, f"Agent 初始化失败: {e}")
         _emit(session_id, q, loop, {"type": "error", "message": f"Agent 初始化失败: {e}"})
         return
 
@@ -362,6 +387,7 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                 pass
 
         _emit(session_id, q, loop, {"type": "status", "line": metrics.status_line()})
+        clear_session_error(session_id)  # 本轮成功：清掉失败记录，刷新后不再恢复红条
         _emit(session_id, q, loop, {"type": "done"})
         # 落盘 metrics：server 重启后状态栏能恢复上次数据
         save_metrics(session_id, metrics)
@@ -373,7 +399,14 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
         # 终端同步打印：轮次异常（如 429 配额耗尽）不能只在前端可见，
         # 否则排查时会被 warm_cache 静默失败的 429 误导
         print(f"[TURN_ERROR] session={session_id}: {type(e).__name__}: {e}")
+        # 持久化失败原因：刷新页面后 history 接口仍能返回，红条不丢
+        save_session_error(session_id, str(e) or type(e).__name__)
         _emit(session_id, q, loop, {"type": "error", "message": str(e)})
+        # 失败轮次也要尝试命名（LLM 挂了就用用户输入兜底），否则会话永远是编码名
+        try:
+            _maybe_auto_title(session_id, agent, config, fallback_text=text)
+        except Exception:
+            pass
     finally:
         # 任务结束后清理 _active_turns，允许新的任务或重连接管
         loop.call_soon_threadsafe(lambda sid=session_id: _active_turns.pop(sid, None))

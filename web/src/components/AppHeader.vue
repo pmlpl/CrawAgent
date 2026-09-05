@@ -1,7 +1,7 @@
 <script setup>
 // 顶部 Header（参考 crawagent-pro Header 设计 + 丝绸主题）
 // - 左侧：菜单按钮 + 标题 + 模型标签
-// - 右侧：主题切换 + 新会话按钮（仅聊天页）
+// - 右侧：导出 + 主题切换（新建会话入口在侧栏，避免重复按钮）
 import { inject } from 'vue'
 import { useTheme } from '../composables/useTheme'
 import ContextRing from './ContextRing.vue'
@@ -15,7 +15,7 @@ const props = defineProps({
   sessionId: { type: String, default: '' },
   defaultModel: { type: String, default: '' },
 })
-const emit = defineEmits(['toggle-sidebar', 'new-session'])
+const emit = defineEmits(['toggle-sidebar'])
 
 const { theme, toggle } = useTheme()
 const toggleSidebar = inject('toggleSidebar', () => emit('toggle-sidebar'))
@@ -39,10 +39,11 @@ function fmtModel(id) {
   <header class="header">
     <!-- 左侧：菜单按钮 + 标题 + 模型 -->
     <div class="left">
-      <!-- 菜单按钮（仅移动端显示） -->
+      <!-- 菜单按钮：移动端常显；桌面端仅侧栏收起时显示（重开入口） -->
       <button
         type="button"
         class="icon-btn menu-btn"
+        :class="{ 'force-show': !sidebarOpen }"
         :aria-label="sidebarOpen ? '关闭侧边栏' : '打开侧边栏'"
         @click="toggleSidebar"
       >
@@ -73,19 +74,6 @@ function fmtModel(id) {
 
     <!-- 右侧：操作按钮 -->
     <div class="right">
-      <!-- 聊天页：新会话按钮 -->
-      <button
-        v-if="isChatPage"
-        type="button"
-        class="btn-primary"
-        @click="emit('new-session')"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-        新会话
-      </button>
-
       <!-- 聊天页：导出会话（JSON / Markdown） -->
       <details v-if="isChatPage && sessionId" class="export-dropdown">
         <summary class="icon-btn export-btn" title="导出会话" aria-label="导出会话">
@@ -170,8 +158,9 @@ function fmtModel(id) {
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
-/* 菜单按钮：桌面端隐藏，移动端显示 */
+/* 菜单按钮：移动端常显；桌面端仅侧栏收起时显示（重开入口） */
 .menu-btn { display: none; }
+.menu-btn.force-show { display: inline-flex; }
 @media (max-width: 860px) {
   .menu-btn { display: inline-flex; }
 }
@@ -273,33 +262,13 @@ function fmtModel(id) {
   color: var(--accent);
 }
 
-/* ---------- 主按钮：新会话 ---------- */
-.btn-primary {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
-  height: 36px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 600;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background .15s, transform .1s;
-}
-.btn-primary:hover { background: color-mix(in srgb, var(--accent-soft) 70%, white); }
-.btn-primary:active { transform: scale(.98); }
-
 /* 移动端优化 */
 @media (max-width: 720px) {
   .header { padding: 10px 14px; gap: 8px; }
   .session-chip { display: none; }
   .title { max-width: 50vw; font-size: 14px; }
   .model-chip .chip-label { display: none; }
-  .btn-primary span, .btn-primary { font-size: 0; padding: 7px 10px; }
-  .btn-primary svg { display: inline-block; }
 }
+
+/* ---------- 导出下拉 ---------- */
 </style>

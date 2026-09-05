@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 from collections import OrderedDict
+from datetime import datetime
 from typing import Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -87,8 +88,50 @@ def get_checkpointer() -> SqliteSaver:
             "CREATE TABLE IF NOT EXISTS session_titles ("
             "thread_id TEXT PRIMARY KEY, title TEXT NOT NULL)"
         )
+        # 会话最后一次轮次失败原因：刷新页面后前端仍能显示红条，直到下一轮成功
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_errors ("
+            "thread_id TEXT PRIMARY KEY, message TEXT NOT NULL, ts TEXT NOT NULL)"
+        )
         conn.commit()
     return _checkpointer
+
+
+def save_session_error(session_id: str, message: str) -> None:
+    """记录会话最后一次轮次失败原因（新错误覆盖旧错误）。失败只打日志不阻断。"""
+    try:
+        conn = get_checkpointer().conn
+        conn.execute(
+            "INSERT INTO session_errors (thread_id, message, ts) VALUES (?, ?, ?) "
+            "ON CONFLICT(thread_id) DO UPDATE SET message = excluded.message, ts = excluded.ts",
+            (session_id, message[:500], datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"[ERROR_STORE] save_session_error({session_id}) 失败（忽略）: {e}")
+
+
+def clear_session_error(session_id: str) -> None:
+    """清除会话的失败记录（下一轮成功后调用：问题已解决，红条不再恢复）。"""
+    try:
+        conn = get_checkpointer().conn
+        conn.execute("DELETE FROM session_errors WHERE thread_id = ?", (session_id,))
+        conn.commit()
+    except Exception as e:
+        print(f"[ERROR_STORE] clear_session_error({session_id}) 失败（忽略）: {e}")
+
+
+def get_session_error(session_id: str) -> dict[str, str] | None:
+    """读取会话最后一次失败原因；无记录返回 None。"""
+    try:
+        row = get_checkpointer().conn.execute(
+            "SELECT message, ts FROM session_errors WHERE thread_id = ?", (session_id,)
+        ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {"message": row[0], "ts": row[1]}
 
 
 def get_agent(model: str | None = None):
