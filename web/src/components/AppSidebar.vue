@@ -44,8 +44,15 @@ function onConfirmArchive(e, id) {
 // 响应式窗口宽度（避免模板直接访问 window）
 const windowWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1200)
 function onResize() { windowWidth.value = window.innerWidth }
-onMounted(() => window.addEventListener('resize', onResize))
-onUnmounted(() => window.removeEventListener('resize', onResize))
+// 点击侧栏外任意位置收起操作菜单；菜单内按钮已 stopPropagation，不会误触发收起
+onMounted(() => {
+  window.addEventListener('resize', onResize)
+  document.addEventListener('click', closeActionMenu)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', onResize)
+  document.removeEventListener('click', closeActionMenu)
+})
 
 const isMobile = computed(() => windowWidth.value <= 860)
 
@@ -99,7 +106,7 @@ function onRename(e, s) {
 function onBulkDelete() {
   const ids = selectedIds.value
   if (!ids.length) return
-  const msg = `确定删除选中的 ${ids.length} 个会话？纪要将归档到 logs/ 目录。`
+  const msg = `确定删除选中的 ${ids.length} 个会话？记录将归档到 logs/ 目录。`
   if (window.confirm(msg)) {
     emit('bulk-delete', ids)
     selectedIds.value = []
