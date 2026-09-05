@@ -8,10 +8,12 @@ import AppHeader from './components/AppHeader.vue'
 import { useChat } from './composables/useChat'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
+import { useBg } from './composables/useBg'
 
 const chat = useChat()
 const { theme } = useTheme()
 const settings = useSettings()
+useBg() // 启动即恢复自定义背景（CSS 变量），否则刷新进聊天页背景会丢
 const route = useRoute()
 const router = useRouter()
 
@@ -127,7 +129,8 @@ function handleRenameSession(id, title) {
   display: flex;
   align-items: stretch;
   overflow: hidden;
-  background: var(--bg);
+  /* 背景交给 body（背景图+丝绸）与 #app（可读性遮罩），壳层保持透明，
+     否则实心 var(--bg) 会把自定义背景图完全盖住 */
   color: var(--ink);
 }
 

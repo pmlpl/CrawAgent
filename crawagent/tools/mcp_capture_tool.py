@@ -27,7 +27,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from crawagent.graph.skills import get_mcp_tools as _get_raw_mcp_tools
+from crawagent.graph.skills import ensure_mcp_started, get_mcp_tools as _get_raw_mcp_tools
 
 
 # ---------------------------------------------------------------------------
@@ -368,9 +368,26 @@ def check_mcp_status() -> str:
                 f"[MCP_AUTH_FAILED] token 认证失败: {msg}\n"
                 f"请让用户在 Electron 设置 → MCP Server 里检查 token 是否正确。"
             )
+        # AI 显式检查状态 = 有抓包意图 → 授权自动拉起 anything-analyzer（绕过开关）
+        if ensure_mcp_started(wait=True, force=True):
+            resp2 = _call_mcp("ping", {}, timeout=5)
+            if "error" not in resp2:
+                # 拉起成功但本 Agent 的工具箱是构建时装好的：重建缓存让下一轮
+                # 就能拿到原生 MCP 工具（create_session / get_requests ...）
+                note = "若你本轮工具列表里没有 create_session 等抓包工具，请让用户新发一条消息触发重建"
+                try:
+                    from crawagent.web.state import reset_agent_cache
+                    reset_agent_cache()
+                except Exception:
+                    note = "工具缓存重建失败：请让用户重启后端后再试"
+                return (
+                    f"[MCP_READY] （已自动拉起 anything-analyzer）\n"
+                    f"MCP 服务已就绪，{note}，然后即可继续抓包流程。"
+                )
         return (
             f"[MCP_UNREACHABLE] MCP server 没响应: {msg}\n"
-            f"可能原因：Electron 没启动 / MCP Server 开关没开 / 网络被防火墙拦。"
+            f"自动拉起未成功（可能没配 ANYTHING_ANALYZER_PATH / 自动启动开关没开）。"
+            f"请引导用户手动打开 anything-analyzer 应用并开启 MCP Server。"
         )
 
     cfg = _load_electron_mcp_config() or {}
@@ -409,6 +426,10 @@ def build_mcp_tools() -> list:
     final = [check_mcp_status, wait_capture_ready]
 
     if mcp_enabled:
+        # 开关开着但服务可能没起：按设置里的 MCP_AUTOSTART 自动拉起。
+        # 内部有守卫：已在运行 / 开关没开（立即返回不阻塞）/ 本进程已拉起过。
+        # 拉起成功 → 下面的原生 MCP 工具就能正常装进本轮工具箱。
+        ensure_mcp_started(wait=True)
         try:
             raw_tools = _get_raw_mcp_tools()
             for t in raw_tools:

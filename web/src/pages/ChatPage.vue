@@ -246,7 +246,7 @@ onMounted(() => {
   scroll-behavior: smooth;
 }
 
-/* ---------- 每轮会话锚点导航（宽屏才显示，窄屏会压住消息） ---------- */
+/* ---------- 每轮会话锚点导航（半透明悬浮在消息上层，窄屏只留序号） ---------- */
 .turn-rail {
   position: absolute;
   left: 10px;
@@ -260,14 +260,18 @@ onMounted(() => {
   overflow-y: auto;
   padding: 6px;
   border-radius: 12px;
+  pointer-events: none;
 }
 .turn-chip {
+  pointer-events: auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   max-width: 136px;
   border: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  background: color-mix(in srgb, var(--panel) 62%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   color: var(--dim);
   font-size: 12px;
   padding: 4px 9px 4px 5px;
@@ -299,8 +303,10 @@ onMounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-@media (max-width: 1379px) {
-  .turn-rail { display: none; }
+@media (max-width: 640px) {
+  /* 窄屏：只留序号圆点，不压正文 */
+  .turn-chip { max-width: none; padding: 4px 5px; }
+  .turn-text { display: none; }
 }
 
 /* ---------- 回到底部 ---------- */

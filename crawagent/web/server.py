@@ -188,11 +188,59 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             stream_task.cancel()
 
 
+def _silence_proactor_reset_noise() -> None:
+    """静音 Windows ProactorEventLoop 的 ConnectionResetError(10054) 刷屏。
+
+    浏览器刷新/WS 断开时对端强制关连接，_call_connection_lost 里的
+    sock.shutdown 抛 ConnectionResetError，asyncio 把整段栈打到终端——
+    属于正常断连噪音而非故障，这里捕获吞掉（仅 win32）。
+    """
+    import asyncio
+    import sys
+
+    if sys.platform != "win32":
+        return
+    try:
+        import asyncio.proactor_events as _pe
+
+        _orig = _pe._ProactorBasePipeTransport._call_connection_lost
+
+        def _quiet(self, exc=None):
+            try:
+                return _orig(self, exc)
+            except ConnectionResetError:
+                pass
+
+        _pe._ProactorBasePipeTransport._call_connection_lost = _quiet
+    except Exception:
+        pass  # 静音失败不影响功能
+
+
+def _open_browser_later(url: str, delay: float = 2.0) -> None:
+    """服务开始监听后自动打开浏览器（CRAWAGENT_NO_OPEN=1 可禁用）。"""
+    import os
+    import threading
+    import webbrowser
+
+    if os.environ.get("CRAWAGENT_NO_OPEN", "").strip().lower() in ("1", "true", "yes"):
+        return
+
+    def _open() -> None:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass  # 无 GUI 环境（Docker/服务器）打开失败不影响服务
+
+    threading.Timer(delay, _open).start()
+
+
 def main() -> None:
     import os
     import uvicorn
 
     from fastapi.staticfiles import StaticFiles
+
+    _silence_proactor_reset_noise()
 
     settings = get_settings()
     settings.log_dir.mkdir(parents=True, exist_ok=True)
@@ -204,6 +252,9 @@ def main() -> None:
     # 本地开发默认 127.0.0.1（更安全，只本机可访问）。
     host = os.environ.get("CRAWAGENT_HOST", "127.0.0.1")
     port = int(os.environ.get("CRAWAGENT_PORT", "8006"))
+    # 本机启动时自动打开 WebUI；绑定 0.0.0.0 视为服务器/容器部署，不开
+    if host not in ("0.0.0.0", "::"):
+        _open_browser_later(f"http://127.0.0.1:{port}")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 

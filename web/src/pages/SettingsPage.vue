@@ -5,6 +5,7 @@
 // 背景图上传：用户自选图片作为聊天背景板，仅本地保存
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useSettings } from '../composables/useSettings'
+import { useBg } from '../composables/useBg'
 
 const { state, load, addModel, updateModel, deleteModel, test, saveMcp, startAA } = useSettings()
 
@@ -75,26 +76,11 @@ async function remove(m) {
   await deleteModel(m.provider, m.name)
 }
 
-// ---------- 背景图（localStorage 持久化，应用到 body） ----------
-const BG_KEY = 'crawagent-bg-image'
-const bgImage = ref('')
+// ---------- 背景图（useBg 组合式：localStorage 持久化，App.vue 启动时恢复） ----------
+const { bgImage, setBg } = useBg()
 const bgFile = ref(null)
 const bgUploading = ref(false)
 
-function loadBg() {
-  try { bgImage.value = localStorage.getItem(BG_KEY) || '' } catch (e) { /* ignore */ }
-  applyBg()
-}
-function applyBg() {
-  if (bgImage.value) {
-    document.documentElement.style.setProperty('--bg-image', `url("${bgImage.value}")`)
-    // 半透明遮罩：背景图上覆盖一层 --bg 色，保证正文可读性
-    document.documentElement.style.setProperty('--app-overlay', 'color-mix(in srgb, var(--bg) 82%, transparent)')
-  } else {
-    document.documentElement.style.removeProperty('--bg-image')
-    document.documentElement.style.removeProperty('--app-overlay')
-  }
-}
 function onBgPick(e) {
   const f = e.target.files?.[0]
   if (!f) return
@@ -105,18 +91,14 @@ function onBgPick(e) {
   bgUploading.value = true
   const reader = new FileReader()
   reader.onload = () => {
-    bgImage.value = String(reader.result || '')
-    try { localStorage.setItem(BG_KEY, bgImage.value) } catch (err) { /* ignore quota */ }
-    applyBg()
+    setBg(String(reader.result || ''))
     bgUploading.value = false
   }
   reader.onerror = () => { bgUploading.value = false }
   reader.readAsDataURL(f)
 }
 function clearBg() {
-  bgImage.value = ''
-  try { localStorage.removeItem(BG_KEY) } catch (e) { /* ignore */ }
-  applyBg()
+  setBg('')
   if (bgFile.value) bgFile.value.value = ''
 }
 
@@ -124,7 +106,6 @@ function clearBg() {
 
 onMounted(async () => {
   await load()
-  loadBg()
 })
 </script>
 
