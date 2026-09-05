@@ -22,7 +22,11 @@ from crawagent.config.settings import get_settings
 
 
 def _parse_skill_dirs() -> list[Path]:
-    """解析 skills_dirs 配置为绝对路径列表。"""
+    """解析 skills_dirs 配置为绝对路径列表。
+
+    除配置的目录外，自动追加第三方插件自带的 skills/ 子目录
+    （plugins/*/skills，P2-9 插件规范）—— 插件技能随插件安装即生效。
+    """
     s = get_settings()
     roots = []
     for raw in s.skills_dirs.split(";"):
@@ -34,6 +38,14 @@ def _parse_skill_dirs() -> list[Path]:
             p = s.project_root / p
         if p.is_dir():
             roots.append(p)
+    try:
+        from crawagent.tools.registry import plugin_skill_dirs
+
+        for p in plugin_skill_dirs():
+            if p.is_dir() and p not in roots:
+                roots.append(p)
+    except Exception:
+        pass  # 插件目录扫描失败不影响常规技能加载
     return roots
 
 
@@ -130,7 +142,7 @@ _mcp_spawned = False  # 本进程只自动拉起一次
 def reset_mcp_cache() -> None:
     """清空 MCP 工具缓存（设置页改了 MCP 配置 / token 后调用）。"""
     global _mcp_tools_cache, _mcp_cache_signature
-    _mcp_tools_cache = None
+    _mcp_tools_cache = {}
     _mcp_cache_signature = ""
 
 
@@ -368,7 +380,9 @@ _mcp_spawned = False  # 本进程只自动拉起一次
 # 握手用的临时事件循环关闭后，库内部的 SSE 传输协程会泄漏（RuntimeWarning:
 # coroutine 'MultiServerMCPClient.get_tools' was never awaited）。缓存后整条
 # 生命周期只握手一次，泄漏消失。签名变化（token 轮换 / 开关切换）自动失效。
-_mcp_tools_cache: list | None = None
+# 逐 server 缓存（P2-9 多 MCP）：成功的 server 只握手一次；失败的 server 不缓存，
+# 下次调用自动重试（用户可能刚把服务拉起来），且不拖累其它 server。
+_mcp_tools_cache: dict[str, list] = {}
 _mcp_cache_signature: str = ""
 
 
@@ -376,6 +390,33 @@ def _mcp_config_signature() -> str:
     """MCP 配置指纹：token/端口/开关任一变化即失效缓存。"""
     import os
     return os.environ.get("MCP_SERVERS", "")
+
+
+def _expand_path_token(value: str) -> str:
+    """展开 {project_root} 占位符（stdio command/args 里引用项目 venv 解释器等）。"""
+    if "{project_root}" in value:
+        return value.replace("{project_root}", str(get_settings().project_root))
+    return value
+
+
+def _server_conn(srv: dict) -> dict | None:
+    """把 .env 里的单个 MCP server 配置转成 langchain-mcp-adapters 连接 dict。"""
+    name = srv.get("name")
+    if not name:
+        return None
+    transport = srv.get("transport", "stdio")
+    if transport == "stdio":
+        return {
+            "transport": "stdio",
+            "command": _expand_path_token(str(srv.get("command", ""))),
+            "args": [_expand_path_token(str(a)) for a in srv.get("args", [])],
+            "env": srv.get("env"),
+        }
+    # sse / streamable_http / websocket
+    entry = {"transport": transport, "url": srv.get("url")}
+    if srv.get("headers"):
+        entry["headers"] = srv["headers"]  # 鉴权头，如 {"Authorization": "Bearer <token>"}
+    return entry
 
 
 def get_mcp_tools() -> list:
@@ -386,17 +427,22 @@ def get_mcp_tools() -> list:
     适配器的工具是自包含协程（每次调用自建会话），同步侧 BaseTool.invoke
     会自动 asyncio.run 执行，无需常驻事件循环；代价是 stdio 型 server 每次
     调用重启子进程——长驻服务建议用 sse/streamable_http 传输。
-    任何 server 连接失败只打日志不阻断 Agent 构建（MCP 是可选增强）。
+
+    逐 server 连接与缓存（P2-9 多 MCP 接入）：单个 server 挂掉只跳过它自己，
+    其余 server 的工具照常可用（此前是全有全无，一个 server 连不上全部丢弃）。
+    失败的 server 不缓存，下次调用自动重试。
     """
     global _mcp_tools_cache, _mcp_cache_signature
 
     sig = _mcp_config_signature()
-    if _mcp_tools_cache is not None and sig == _mcp_cache_signature:
-        return _mcp_tools_cache
+    if _mcp_tools_cache and sig == _mcp_cache_signature:
+        return [t for tools in _mcp_tools_cache.values() for t in tools]
+    if not isinstance(_mcp_tools_cache, dict):
+        _mcp_tools_cache = {}  # 兼容旧版 None 初始化 / reset 遗留
 
     s = get_settings()
     if not s.mcp_servers.strip():
-        _mcp_tools_cache = None
+        _mcp_tools_cache = {}
         _mcp_cache_signature = sig
         return []
     # ensure_mcp_started() 不再自动触发 — 让用户在前端 Settings 页手动点"启动"按钮
@@ -406,51 +452,41 @@ def get_mcp_tools() -> list:
         print(f"[MCP] mcp_servers 配置不是合法 JSON，跳过: {e}")
         return []
 
+    import asyncio
+    import os
+
+    # 本机 MCP 服务绝不能走系统代理（Privoxy/Clash 会拦 localhost 请求返回 500）
+    no_proxy = os.environ.get("NO_PROXY", "")
+    if "127.0.0.1" not in no_proxy:
+        os.environ["NO_PROXY"] = (no_proxy + "," if no_proxy else "") + "127.0.0.1,localhost"
+
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
-    conn: dict = {}
+    merged: dict[str, list] = {}
     for srv in servers:
         name = srv.get("name")
-        transport = srv.get("transport", "stdio")
-        if not name:
+        conn_entry = _server_conn(srv)
+        if not name or not conn_entry:
             continue
-        if transport == "stdio":
-            conn[name] = {
-                "transport": "stdio",
-                "command": srv.get("command"),
-                "args": srv.get("args", []),
-                "env": srv.get("env"),
-            }
-        else:  # sse / streamable_http / websocket
-            entry = {"transport": transport, "url": srv.get("url")}
-            if srv.get("headers"):
-                entry["headers"] = srv["headers"]  # 鉴权头，如 {"Authorization": "Bearer <token>"}
-            conn[name] = entry
+        if name in _mcp_tools_cache and sig == _mcp_cache_signature:
+            merged[name] = _mcp_tools_cache[name]  # 命中缓存，不再握手
+            continue
+        try:
+            conn: dict = {name: conn_entry}  # 裸 dict 标注：适配器要 TypedDict，字面量推断会触发不变性报错
+            client = MultiServerMCPClient(conn)
+            tools = asyncio.run(client.get_tools())
+            if tools:
+                merged[name] = tools
+                print(f"[MCP] '{name}' loaded {len(tools)} tools ({srv.get('transport', 'stdio')})")
+            else:
+                print(f"[MCP] '{name}' 连接成功但 0 个工具")
+        except BaseException as e:
+            # TaskGroup 会把真实原因包在 ExceptionGroup 里，解开找到根因（通常是连接拒绝）
+            root = e
+            while hasattr(root, "exceptions") and root.exceptions:
+                root = root.exceptions[0]
+            print(f"[MCP] '{name}' 连接失败（跳过该 server，不影响其它）: {type(root).__name__}: {root}")
 
-    if not conn:
-        _mcp_tools_cache = None
-        _mcp_cache_signature = sig
-        return []
-    try:
-        import asyncio
-        import os
-
-        # 本机 MCP 服务绝不能走系统代理（Privoxy/Clash 会拦 localhost 请求返回 500）
-        no_proxy = os.environ.get("NO_PROXY", "")
-        if "127.0.0.1" not in no_proxy:
-            os.environ["NO_PROXY"] = (no_proxy + "," if no_proxy else "") + "127.0.0.1,localhost"
-
-        client = MultiServerMCPClient(conn)
-        tools = asyncio.run(client.get_tools())
-        print(f"[MCP] loaded {len(tools)} tools from: {', '.join(conn)}")
-        _mcp_tools_cache = tools
-        _mcp_cache_signature = sig
-        return tools
-    except BaseException as e:
-        # TaskGroup 会把真实原因包在 ExceptionGroup 里，解开找到根因（通常是连接拒绝）
-        root = e
-        while hasattr(root, "exceptions") and root.exceptions:
-            root = root.exceptions[0]
-        print(f"[MCP] 连接失败（跳过 MCP 工具）: {type(root).__name__}: {root}")
-        # 不缓存失败：下次调用允许重试（用户可能刚启动 MCP server）
-        return []
+    _mcp_tools_cache = merged
+    _mcp_cache_signature = sig
+    return [t for tools in merged.values() for t in tools]
