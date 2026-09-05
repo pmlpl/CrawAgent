@@ -1,6 +1,6 @@
 # CrawAgent
 
-LLM 驱动的智能爬虫 Agent 框架。基于 LangChain + LangGraph，内置 17+ 爬虫工具、浏览器渲染、MCP 协议扩展，支持会话持久化、技能插件化。
+LLM 驱动的智能爬虫 Agent 框架。基于 LangChain + LangGraph，内置 20 个爬虫工具、6 个攻略技能、浏览器渲染、MCP 协议扩展（fetch / playwright / 抓包分析）与第三方插件规范（plugins/），支持会话持久化。
 
 ## 快速开始
 
@@ -102,12 +102,38 @@ Agent 默认装配以下工具（共 20 个）：
 | `video_site_expert` | 视频站点子 Agent（自动选址+探测） |
 | `read_skill` | 按需读取 skill 插件正文 |
 
-### MCP 扩展（可选）
+### MCP 扩展（可选，.env 的 MCP_SERVERS 配置）
 
 | 工具 | 说明 |
 |------|------|
 | `wait_capture_ready` | 等待抓包会话就绪 |
 | `check_mcp_status` | 检查 MCP Server 状态 |
+| `fetch`（mcp-server-fetch） | 第三方 MCP：网页 → LLM 友好 Markdown（官方 fetch server，stdio） |
+| `browser_*` ×24（playwright-mcp） | 第三方 MCP：微软官方浏览器自动化（导航/点击/截图/表单等） |
+| navigate / filter_requests 等（anything-analyzer） | 自研 MCP：加密接口抓包分析（streamable-http） |
+
+单个 MCP server 连不上只跳过它自己，不影响其它 server。
+
+### 技能（SKILL.md）
+
+`skills/` 目录内置 6 个爬虫攻略技能（Agent 构建时索引进 system prompt，正文由
+`read_skill` 按需加载）：`bilibili-grab` / `douyin-grab` / `wallpaper-sites` /
+`weread-grab` / `batch-crawl-playbook`（批量抓取总配方）/ `custom-script-recipes`
+（脚本阶梯配方）。详见 [skills/README.md](skills/README.md)。
+
+### 插件（plugins/）
+
+第三方插件放进项目根 `plugins/` 下即自动接入（工具 + 技能一起生效）：
+
+```bash
+crawagent add-tool my_plugin                     # 从脚手架创建新插件包
+crawagent add-plugin D:/path/to/plugin           # 从本地目录接入
+crawagent add-plugin https://github.com/x/y.git  # 从 git 仓库接入
+crawagent plugins                                # 查看已装插件
+```
+
+插件约定：`plugins/<name>/plugin.json`（manifest）+ `tools/*.py`（工具模块）+
+`skills/*/SKILL.md`（技能包）。仓库自带示例插件 `plugins/example-rss/`。
 
 ## 架构
 
@@ -124,7 +150,9 @@ crawagent/
 ├── llm/model.py                 # get_llm() — DeepSeek 为主，LangChain 抽象
 ├── observability/metrics.py     # Token 统计、缓存命中追踪
 ├── prompts/                     # system.md + infinite-gen-2.md（导入时拼接）
-├── tools/                       # 19 个工具模块
+├── tools/                       # 19 个工具模块 + _template/ 插件脚手架
+├── plugins/                     # 第三方插件（plugin.json 规范，见 add-plugin）
+├── skills/                      # 内置爬虫技能包（6 个 SKILL.md）
 └── web/
     ├── server.py                # FastAPI，端口 8006，启动时 daemon 清理
     ├── routers/                 # sessions / settings / sites
