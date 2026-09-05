@@ -9,7 +9,7 @@ import { ref } from 'vue'
 const BG_KEY = 'crawagent-bg-image'
 const OPACITY_KEY = 'crawagent-bg-opacity'
 const bgImage = ref('')
-const bgOpacity = ref(78) // 遮罩浓度：--bg 占比%（0=图片全显，95=几乎只见底色）
+const bgOpacity = ref(60) // 遮罩浓度：--bg 占比%（0=图片全显，95=几乎只见底色）；毛玻璃卡片下不需要深罩
 let initialized = false
 
 function applyBg() {

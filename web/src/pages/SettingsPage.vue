@@ -262,7 +262,7 @@ onMounted(async () => {
             aria-label="遮罩浓度"
             @input="onOpacityInput"
           />
-          <p class="hint">越高文字越清晰、背景越淡。半透明卡片（用户气泡/轨迹/报错条）在背景开启时已自动换成实底，不会透字</p>
+          <p class="hint">越高文字越清晰、背景越淡。开启背景后各卡片自动变毛玻璃（半透明 + 模糊），文字不透底、背景也看得见</p>
         </div>
       </div>
     </section>

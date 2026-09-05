@@ -87,14 +87,67 @@ body::before {
 ::selection { background: var(--accent-soft); }
 
 /* ---------- 自定义背景激活态（html.bg-active，由 useBg 切换） ----------
-   底图之上文字发虚的根治手段：把会透出照片的半透明表面换成「实底等价色」
-   （把原来的 alpha 透明度改成对 var(--bg) 的同比例 color-mix，观感不变但不透字）。
-   放全局并用 html.bg-active 前缀抬高优先级，压过组件 scoped 样式。 */
-html.bg-active .msg.user { background: color-mix(in srgb, var(--accent) 13%, var(--bg)); }
-html.bg-active .err { background: color-mix(in srgb, var(--danger) 12%, var(--bg)); }
-html.bg-active .typing { background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
-html.bg-active .trace { background: color-mix(in srgb, var(--panel) 88%, var(--bg)); }
-html.bg-active .thinking { background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
+   策略：毛玻璃而非实底。实底卡片会把背景盖得"等于没设背景"；
+   半透明 + backdrop-blur 才能既看清背景又保证文字可读（模糊抹掉照片细节）。
+   全局规则用 html.bg-active 前缀抬高优先级，压过组件 scoped 样式。 */
+html.bg-active body::before { opacity: .25; } /* 丝绸纹理在照片上减淡 */
+
+html.bg-active .msg.ai {
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+}
+html.bg-active .msg.user {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+}
+html.bg-active .err {
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+html.bg-active .typing { background: color-mix(in srgb, var(--bg) 70%, transparent); }
+html.bg-active .trace {
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  backdrop-filter: blur(12px) saturate(1.1);
+  -webkit-backdrop-filter: blur(12px) saturate(1.1);
+}
+html.bg-active .thinking {
+  background: color-mix(in srgb, var(--bg) 66%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+html.bg-active .composer-wrap { background: none; } /* 撤掉底部实色渐变，输入卡自己毛玻璃 */
+html.bg-active .composer {
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+}
+html.bg-active .status-bar {
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+html.bg-active .header { background: color-mix(in srgb, var(--bg) 55%, transparent); }
+html.bg-active .sidebar {
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  backdrop-filter: blur(16px) saturate(1.1);
+  -webkit-backdrop-filter: blur(16px) saturate(1.1);
+}
+html.bg-active .list-head,
+html.bg-active .bulk-bar {
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+html.bg-active .card {
+  background: color-mix(in srgb, var(--panel) 84%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
 
 #app {
   position: relative;
