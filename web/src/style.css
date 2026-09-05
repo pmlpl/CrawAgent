@@ -86,6 +86,16 @@ body::before {
 
 ::selection { background: var(--accent-soft); }
 
+/* ---------- 自定义背景激活态（html.bg-active，由 useBg 切换） ----------
+   底图之上文字发虚的根治手段：把会透出照片的半透明表面换成「实底等价色」
+   （把原来的 alpha 透明度改成对 var(--bg) 的同比例 color-mix，观感不变但不透字）。
+   放全局并用 html.bg-active 前缀抬高优先级，压过组件 scoped 样式。 */
+html.bg-active .msg.user { background: color-mix(in srgb, var(--accent) 13%, var(--bg)); }
+html.bg-active .err { background: color-mix(in srgb, var(--danger) 12%, var(--bg)); }
+html.bg-active .typing { background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
+html.bg-active .trace { background: color-mix(in srgb, var(--panel) 88%, var(--bg)); }
+html.bg-active .thinking { background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
+
 #app {
   position: relative;
   z-index: 1;

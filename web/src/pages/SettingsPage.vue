@@ -77,9 +77,13 @@ async function remove(m) {
 }
 
 // ---------- 背景图（useBg 组合式：localStorage 持久化，App.vue 启动时恢复） ----------
-const { bgImage, setBg } = useBg()
+const { bgImage, bgOpacity, setBg, setBgOpacity } = useBg()
 const bgFile = ref(null)
 const bgUploading = ref(false)
+
+function onOpacityInput(e) {
+  setBgOpacity(e.target.value)
+}
 
 function onBgPick(e) {
   const f = e.target.files?.[0]
@@ -247,6 +251,19 @@ onMounted(async () => {
         </div>
         <div v-if="bgUploading" class="hint">处理中…</div>
         <div v-if="bgImage" class="bg-preview" :style="{ backgroundImage: `url(${bgImage})` }" />
+        <div v-if="bgImage" class="bg-opacity-row">
+          <span class="label">遮罩浓度 <b class="mono">{{ bgOpacity }}%</b></span>
+          <input
+            type="range"
+            min="0"
+            max="95"
+            step="5"
+            :value="bgOpacity"
+            aria-label="遮罩浓度"
+            @input="onOpacityInput"
+          />
+          <p class="hint">越高文字越清晰、背景越淡。半透明卡片（用户气泡/轨迹/报错条）在背景开启时已自动换成实底，不会透字</p>
+        </div>
       </div>
     </section>
 
@@ -650,6 +667,21 @@ select:disabled { opacity: .5; cursor: not-allowed; }
   background-size: cover;
   background-position: center;
   margin-top: 6px;
+}
+.bg-opacity-row {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bg-opacity-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.bg-opacity-row .mono {
+  font-family: var(--font-mono);
+  color: var(--accent);
 }
 
 @media (max-width: 640px) {
