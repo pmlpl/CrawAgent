@@ -1,0 +1,37 @@
+<svg width="100%" viewBox="0 0 680 344" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>滑动窗口与半水位淘汰的缓存前缀对比</title>
+<desc>滑动窗口每轮移动起点导致历史前缀无法命中，半水位淘汰后起点长期固定、前缀持续累积</desc>
+
+<text x="40" y="48" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#2C2C2A" dominant-baseline="central">滑动窗口 · 起点持续右移</text>
+<text x="640" y="48" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">仅 system prompt + 工具定义命中 · 37.5%</text>
+
+<rect x="110" y="64" width="510" height="18" rx="4" fill="#F1EFE8" stroke="#888780" stroke-width="0.5"/>
+<path d="M173.75 64 V82 M237.5 64 V82 M301.25 64 V82 M365 64 V82 M428.75 64 V82 M492.5 64 V82 M556.25 64 V82" fill="none" stroke="#888780" stroke-width="0.5"/>
+
+<text x="105" y="102" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">第 1 轮</text>
+<rect x="110" y="92" width="63.75" height="20" rx="4" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+
+<text x="105" y="128" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">第 4 轮</text>
+<rect x="173.75" y="118" width="191.25" height="20" rx="4" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+
+<text x="105" y="154" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">第 8 轮</text>
+<rect x="428.75" y="144" width="191.25" height="20" rx="4" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+
+<text x="110" y="180" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">起点每轮都变 → 历史前缀永远匹配不上</text>
+
+<text x="40" y="222" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#2C2C2A" dominant-baseline="central">半水位淘汰 · 起点长期固定</text>
+<text x="640" y="222" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">前缀累积命中 · 随对话上升</text>
+
+<rect x="110" y="238" width="510" height="18" rx="4" fill="#F1EFE8" stroke="#888780" stroke-width="0.5"/>
+<path d="M173.75 238 V256 M237.5 238 V256 M301.25 238 V256 M365 238 V256 M428.75 238 V256 M492.5 238 V256 M556.25 238 V256" fill="none" stroke="#888780" stroke-width="0.5"/>
+
+<text x="105" y="276" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">第 1 轮</text>
+<rect x="110" y="266" width="63.75" height="20" rx="4" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+
+<text x="105" y="302" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">第 4 轮</text>
+<rect x="110" y="292" width="255" height="20" rx="4" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+
+<text x="105" y="328" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" dominant-baseline="central">第 8 轮</text>
+<rect x="365" y="318" width="255" height="20" rx="4" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<path d="M365 310 V336" fill="none" stroke="#185FA5" stroke-width="1.5" stroke-dasharray="3 3"/>
+</svg>

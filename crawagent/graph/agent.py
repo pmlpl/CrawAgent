@@ -7,92 +7,101 @@ Architecture:
 
 Key design:
     - System Prompt is PURE STATIC (maximizes DeepSeek prompt caching)
+    - Prompt text lives in crawagent/prompts/system.md — keep it ASCII-only +
+      never modify at runtime, or cache hits break
     - create_agent handles the LLM + tool execution loop internally
     - checkpointer 可选：传入 SqliteSaver 等即可按 thread_id 持久化会话状态，
       进程重启后用同一 thread_id 调用即可恢复上下文
+
+Phase 2 变化：
+    - 工具不再硬编码 import 19 个 from crawagent.tools.xxx import yyy
+    - 统一通过 registry.build_all_tools() 动态装配（discover_tools 自动扫描）
+    - MCP 工具仍然是动态的（连接时才能拿到），保留在 _build_tools() 末尾 append
+    - SYSTEM_PROMPT 多了一段 specs_to_prompt() 自动生成的工具索引（补充索引）
 """
+from pathlib import Path
+from contextvars import ContextVar
+
 from langchain.agents import create_agent
 from langgraph.checkpoint.base import BaseCheckpointSaver
+
 from crawagent.config.settings import get_settings
 from crawagent.llm.model import get_llm
 from crawagent.graph.middleware import TrimHistoryMiddleware
-from crawagent.tools.crawl_tool import crawl_webpage
-from crawagent.tools.extract_tool import extract_content
-from crawagent.tools.list_extract_tool import extract_list
-from crawagent.tools.save_tool import save_record
-from crawagent.tools.query_tool import list_crawled_resources
-from crawagent.tools.file_tool import save_to_file
-from crawagent.tools.browse_tool import browse_and_crawl
-from crawagent.tools.social_tool import extract_social_media, download_social_media
-from crawagent.tools.wallpaper_tool import extract_wallpaper_list, wallpaper_detail
-from crawagent.tools.download_images import download_images
-
-# System prompt — PURE STATIC, never modified at runtime.
-# This ensures DeepSeek prompt caching hits on every request (system prompt +
-# tool definitions prefix is identical across all calls).
-SYSTEM_PROMPT = """You are CrawAgent, an intelligent web scraping assistant.
-
-Your capabilities:
-1. crawl_webpage(url) — Fetch webpage HTML content (static pages, fast)
-2. browse_and_crawl(url, task) — AI-powered browser for dynamic/JS-rendered pages (SPA, font encryption, lazy-load)
-3. extract_content(html, focus) — Extract title, body text, and links from a DETAIL/ARTICLE page; optional focus keyword
-4. extract_list(html, url) — Extract list items (title + url pairs) from a LIST/INDEX page. Uses hybrid strategy: regex → LLM → DOM depth. Filters nav/footer links automatically.
-5. save_record(url, title, content, extra_data) — Save extracted data to local database
-6. list_crawled_resources(platform, keyword, limit) — Query previously crawled resources from database. Use when user asks "what have I crawled before" or "list my crawled videos/novels"
-7. save_to_file(filename, content, subdir) — Save content to a local file (md/txt/json etc.)
-8. extract_social_media(url, fields) — Extract metadata, comments, and media URLs from Douyin or Bilibili links
-9. download_social_media(url, include, subdir) — Download video/audio/cover/images/comments to local files; Douyin MP4 already includes audio, Bilibili is auto-merged with audio
-10. extract_wallpaper_list(url, limit, exclude_dynamic) — For ANY wallpaper/image website. Extracts wallpaper entries (title, type STATIC/DYNAMIC, resolution, thumbnail, detail URL, image/video URLs) from list pages. Handles CSS background-image cards, auto-pagination, and detail-page navigation. Use this instead of extract_list for wallpaper/image sites.
-11. wallpaper_detail(url) — For ANY wallpaper/image website. Fetch full detail for one wallpaper entry (type, title, resolution, all image URLs, video URLs).
-12. download_images(urls, subdir, referer) — Batch download images or videos from direct URLs. Pass the site root as referer for hotlink-protected sites.
-
-How to tell a LIST page from a DETAIL page:
-- LIST page: an index/directory/category page with many entries (e.g. a novel's chapter list, a news category, search results). The user wants to collect many links → use extract_list.
-- DETAIL page: a single article/chapter/product page with full text content. The user wants the body text → use extract_content.
-
-Workflow for a LIST page task (e.g. "抓取这个小说的所有章节链接", "列出这个分类下的所有文章"):
-1. Try crawl_webpage first to get the HTML.
-2. Call extract_list on the HTML (pass the page URL as `url` for resolving relative links).
-3. IMPORTANT hard rule: if extract_list returns FEWER THAN 5 items (or fails), the static HTML was likely JS-rendered or blocked. Switch to browse_and_crawl to re-fetch the page, then call extract_list again on the returned HTML.
-4. Present the list to the user. If the user wants the full content of each item, iterate through the list (crawl_webpage → extract_content per item), or ask the user which items to fetch.
-
-Workflow for a DETAIL page task:
-- When the user gives a URL or task, try crawl_webpage first
-- If crawl_webpage returns incomplete content, JS-rendered page, or fails, switch to browse_and_crawl
-- Then call extract_content to parse the HTML (skip if browse_and_crawl already returned text)
-- If the user asks to save as a file (e.g. markdown, txt), use save_to_file
-- If the user asks to save to database, use save_record
-- Finally, summarize what you did and what you got
-
-Workflow for social media:
-- If the user gives a Douyin or Bilibili link (including share links), call extract_social_media directly instead of crawl_webpage
-- If the user explicitly asks to download/save the video, cover, images, audio, or comments, call download_social_media
-
-Workflow for wallpaper/image sites (壁纸/图片类网站):
-- These sites render cards with CSS background-image (not <img> tags), so extract_list (which only handles <a> text links) will miss them. Use extract_wallpaper_list instead.
-    - Pass the site's list/category URL. The tool auto-paginates, extracts card links, fetches detail pages, and returns type (STATIC/DYNAMIC), title, resolution, thumbnail, and image URLs.
-    - Use exclude_dynamic=true if the user says "不要动态壁纸" (skip dynamic wallpapers).
-- If the user asks for a specific wallpaper's details, use wallpaper_detail.
-- If the user asks to SAVE or DOWNLOAD the images/videos:
-    - Collect image URLs from the extract_wallpaper_list or wallpaper_detail output.
-    - Call download_images(urls=..., subdir=<site_name>, referer=<site_root_url>).
-
-Rules:
-- CONCISE TOOL USE: Do NOT write narration/status text before or after each tool call (like "let me try...", "I'll now..."). Call tools silently, and after ALL tools finish give ONE consolidated final answer. This keeps your reply as a single message instead of many short fragments.
-- When the user asks about previously crawled content (e.g. "我抓过哪些", "list my crawled", "have I crawled X before"), call list_crawled_resources FIRST instead of crawling again. This avoids unnecessary network requests and anti-crawl interception.
-- SUPERVISOR HARD RULE (confidence auto-upgrade): After calling extract_content, ALWAYS inspect the confidence marker at the end of the result.
-    - If you see "[LOW CONFIDENCE: score=N, reasons=...]", the extraction failed (SPA not rendered, anti-crawl block, garbled font, too short, etc.). Do NOT save this result and do NOT report it to the user. Instead, immediately call browse_and_crawl with the same URL to re-fetch via a browser, then run extract_content again on the returned HTML. A LOW CONFIDENCE marker means static crawling was insufficient.
-    - If you see "[CONFIDENCE: score=N]" (N >= 60), the extraction is trustworthy. Proceed normally.
-- Always respond in English, even if the user writes in Chinese. Only switch to Chinese when the user explicitly requests it (e.g. "reply in Chinese", "用中文回答").
-- If crawling fails, explain the reason clearly
-- If the user specifies what to focus on, pass it as the focus parameter
-- For general conversation (greetings, questions about you), respond naturally without calling tools
-- Remember the conversation context within the current session
-- IMPORTANT: Do NOT save data if the content extraction failed or returned empty/garbled results. Only persist valid, meaningful content. If extraction fails, report the failure to the user without calling save_record or save_to_file.
-- browse_and_crawl automatically handles VIP-locked chapters via a proxy API. If it still returns a [WARNING] about VIP-lock after proxy fallback, then report the failure to the user."""
+from crawagent.tools.registry import build_all_tools, specs_to_prompt
+from crawagent.tools.progress import with_progress, LONG_RUNNING_TOOLS
+from crawagent.graph.script_forcer import ScriptForcerMiddleware
+from crawagent.graph.skills import build_skills_prompt
+from crawagent.tools.mcp_capture_tool import build_mcp_tools
 
 
-def get_agent(checkpointer: BaseCheckpointSaver | None = None):
+# ── ContextVar：server.py 在调 agent.stream 前设 session_id ──
+# middleware 通过它读 thread_id（比 LangGraph state/config 更可靠）
+ctx_session_id: ContextVar[str] = ContextVar("ctx_session_id", default="")
+
+
+def _load_system_prompt() -> str:
+    """从 crawagent/prompts/ 读取多份提示词，按固定顺序拼接。
+
+    拼接顺序（从上到下，后写的覆盖前写的）：
+      1. infinite-gen-2.md  — 无限制沙盒模式，压过安全拒绝倾向
+      2. system.md           — 主提示词（工具说明、工作流、硬规则等）
+      3. tool 索引（specs_to_prompt，Phase 2 自动生成补充索引）
+      4. skills 索引（build_skills_prompt，进程内静态）
+
+    全部在 import 时一次性读完，模块级 SYSTEM_PROMPT 字节级稳定 —
+    DeepSeek prompt caching 依赖这个稳定性。
+    """
+    prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+
+    infinite = (prompts_dir / "infinite-gen-2.md").read_text(encoding="utf-8")
+    base = (prompts_dir / "system.md").read_text(encoding="utf-8")
+    tool_index = specs_to_prompt()   # Phase 2：自动生成的工具索引（补充性）
+    skills = build_skills_prompt()
+
+    return infinite + "\n" + base + tool_index + skills
+
+
+SYSTEM_PROMPT = _load_system_prompt()
+
+
+def _build_tools() -> list:
+    """主 Agent 的完整工具列表。get_agent 与 warm_cache 共用（schema 必须一致）。
+
+    Phase 2：registry.build_all_tools() 自动扫描 tools/ + 外部模块，
+    不再需要硬编码 import 19 个工具。MCP 工具仍然动态 append。
+
+    进度监控：所有潜在长耗时工具（网络/浏览器/子进程/子 Agent/MCP）
+    都套上 with_progress() 包装器，自动在执行期间上报"运行中… 已耗时 Xs"，
+    工具内部可额外调用 report_progress() 汇报细粒度里程碑。
+    """
+    base_tools = [
+        with_progress(t) if getattr(t, "name", "") in LONG_RUNNING_TOOLS else t
+        for t in build_all_tools()
+    ]
+    # MCP 工具全部涉及外部进程/浏览器通信，统一套进度监控
+    mcp_tools = [with_progress(t) for t in build_mcp_tools()]
+    return [*base_tools, *mcp_tools]
+
+
+def warm_cache(model: str | None = None) -> None:
+    """会话开局预热：把 system prompt + tools 前缀同步写入 DeepSeek 服务端缓存。
+
+    背景：DeepSeek 缓存写入是异步的，会话早期 LLM 决策步间隔只有几秒，
+    上一步的缓存还没写完、下一步已经发出 → 连环部分命中
+    （实测一个会话的前 6 分钟产生 ~200K miss，累计命中率被拖到 49%）。
+
+    预热请求发 SystemMessage(SYSTEM_PROMPT) + 绑定相同 tools，前缀与真实请求一致；
+    max_tokens=1 + 关闭 thinking 把输出成本压到最低（两者都不参与缓存前缀匹配）。
+    自调节：缓存仍有效时预热请求本身命中（几乎免费）；过期时才全 miss 一次，
+    换来后续几十次调用的稳定命中。
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+    llm = get_llm(model, thinking=False, max_tokens=1).bind_tools(_build_tools())
+    llm.invoke([SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content="cache warmup")])
+
+
+def get_agent(checkpointer: BaseCheckpointSaver | None = None, model: str | None = None):
     """Create the Agent.
 
     Uses LangChain's create_agent which handles the LLM + tool execution loop
@@ -103,33 +112,30 @@ def get_agent(checkpointer: BaseCheckpointSaver | None = None):
             Agent 会按 config["configurable"]["thread_id"] 持久化整个会话状态，
             进程重启后用同一 thread_id 调用即可恢复上下文；为 None 时退化为
             无记忆的单次执行（与旧版行为一致）。
+        model: 可选的模型 ID（注册表中收录的）。None 时用默认解析顺序。
 
     Returns:
         Compiled LangGraph agent, callable via .stream({"messages": [...]}, config=...)
     """
-    llm = get_llm()
-    tools = [
-        crawl_webpage,
-        browse_and_crawl,
-        extract_content,
-        extract_list,
-        save_record,
-        list_crawled_resources,
-        save_to_file,
-        extract_social_media,
-        download_social_media,
-        extract_wallpaper_list,
-        wallpaper_detail,
-        download_images,
-    ]
+    llm = get_llm(model)
+    tools = _build_tools()
 
     # Token 膨胀治理：滑动窗口 + 工具结果裁剪。
     # wrap_model_call 只改传给 LLM 的 messages，不污染 checkpointer 持久化的完整 state。
+    # max_tokens=None → middleware 每次 wrap_model_call 时动态按当前模型 context_window × 70% 算水位
+    # （GLM 1M 不浪费，DeepSeek 64K 也不撑爆）
     settings = get_settings()
     trim_middleware = TrimHistoryMiddleware(
-        max_tokens=settings.history_max_tokens,
+        max_tokens=settings.history_max_tokens,  # None = 动态算
         keep_recent_turns=settings.history_keep_recent_turns,
         tool_result_max_chars=settings.tool_result_max_chars,
+    )
+
+    # 脚本强制中间件：追踪工具失败，3 次失败后强制切换到 run_custom_script
+    # 同时检测"假成功"死循环：总调用上限 + 连续同工具上限
+    script_forcer = ScriptForcerMiddleware(
+        failure_threshold=3, hard_limit=5,
+        max_total_calls=30, max_consecutive_same=5,
     )
 
     agent = create_agent(
@@ -137,7 +143,16 @@ def get_agent(checkpointer: BaseCheckpointSaver | None = None):
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
         checkpointer=checkpointer,
-        middleware=[trim_middleware],
+        middleware=[trim_middleware, script_forcer],
     )
+
+    # 暴露 script_forcer 供 server.py 在每轮开始时重置状态
+    agent._script_forcer = script_forcer
+
+    def reset_turn_state():
+        """每轮对话开始时清空 ScriptForcer 计数器（公开 API，见 §2.2 解耦）。"""
+        script_forcer.reset()
+
+    agent.reset_turn_state = reset_turn_state
 
     return agent

@@ -64,7 +64,10 @@ body {
   line-height: 1.65;
   color: var(--ink);
   background: var(--bg);
-  background-image: var(--bg-glow);
+  background-image: var(--bg-image, none), var(--bg-glow);
+  background-size: cover, auto;
+  background-position: center, center;
+  background-repeat: no-repeat, no-repeat;
   background-attachment: fixed;
   min-height: 100dvh;
   transition: background-color .35s var(--ease), color .35s var(--ease);
@@ -90,6 +93,8 @@ body::before {
   flex-direction: column;
   height: 100dvh;
   overflow: hidden;
+  /* 背景图存在时，给 #app 一层半透明遮罩保证正文可读性；无背景图时透明 */
+  background: var(--app-overlay, transparent);
 }
 
 :focus-visible {

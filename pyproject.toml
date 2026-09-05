@@ -13,26 +13,26 @@ dependencies = [
     # 显式锁定 openai：避免安装到被篡改的版本（魔改版用 httpx2 替代 httpx，
     # 会劫持 httpx 命名空间并触发 SyncByteStream 断言失败 → APIConnectionError）
     "openai>=2.26.0,<3.0.0",
-
     # LLM 调用链路追踪（LangSmith）
     "langsmith>=0.1.0",
-
     # 爬虫工具层
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
     "lxml>=5.0.0",
     "fake-useragent>=1.5.0",
-
+    # HTML → Markdown 转换：extract_content / browse_and_crawl 的输出格式依赖它
+    "html2text>=2024.2.26",
     # 配置与校验
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
-
+    # Phase 3: 站点档案 YAML 化（per-domain profiles/*.yaml 支持 git diff）
+    "pyyaml>=6.0",
     # 存储（Demo 阶段用 SQLite，标准库自带）
     # 后续升级：mysql-connector-python（MySQL）
-
     # 日志
     "loguru>=0.7.0",
+    "yt-dlp>=2026.8.19",
 ]
 
 [project.optional-dependencies]
@@ -54,5 +54,30 @@ browser = [
 requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project.scripts]
+crawagent = "crawagent.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["crawagent*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",          # FastAPI TestClient 需要
+    "pyright>=1.1.380",     # 类型检查（选 pyright 不选 mypy：Pydantic v2 + LangChain 兼容性更好）
+]
+type-stubs = [
+    "types-requests",
+    "types-beautifulsoup4",
+    "types-html5lib",
+    "types-Pillow",
+]
+
+[tool.pyright]
+include = ["crawagent", "tests", "scripts"]
+exclude = ["**/__pycache__", "crawagent/prompts/**", "crawagent/tools/seagull_overlay.py"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = "error"
+reportMissingTypeStubs = "none"

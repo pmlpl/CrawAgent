@@ -110,23 +110,24 @@ def _unique_path(dir_path: Path, stem: str, ext: str) -> Path:
 
 @tool
 def download_images(urls: str, subdir: str = "wallpapers", referer: str = "") -> str:
-    """Download a batch of image or video URLs to the output directory.
+    """批量下载图片或视频到项目下载目录 downloads/。
 
-    Use this when the user asks to save images/videos (wallpaper thumbnails,
-    preview videos, social media covers, etc.) to disk.
+    适用场景：用户要求保存图片/视频到本地（壁纸缩略图、预告片预览、
+    社交平台封面图等）。**所有媒体文件必须放到 downloads/ 子目录下**
+    （项目根/downloads/<子目录名>），绝对不允许写到别的地方。
 
-    Args:
-        urls: One or more URLs. Supports:
-              - single URL
-              - comma/newline/semicolon/space separated list
-              - JSON array string like '["http://a.jpg","http://b.jpg"]'
-        subdir: Subdirectory name under output/ (default "wallpapers").
-                Examples: "wallpapers", "douyin_videos", "bilibili_covers"
-        referer: Optional Referer header for sites that enforce hotlink protection
-                 (pass the site's root URL, e.g. "https://example.com/").
+    参数：
+        urls: 一个或多个 URL。支持格式：
+              - 单条 URL
+              - 英文逗号 / 换行 / 分号 / 空格分隔
+              - JSON 数组字符串，如 '["http://a.jpg","http://b.jpg"]'
+        subdir: downloads/ 下的子目录名（默认 "wallpapers"）。
+                建议值："wallpapers" / "douyin_videos" / "bilibili_covers"
+        referer: 可选。针对有热链保护的站点传入 Referer 头
+                 （传目标站点主页 URL，例 "https://example.com/"）。
 
-    Returns:
-        Formatted result: success count, failed urls list, saved file paths.
+    返回：
+        格式化字符串：下载成功数 + 失败 URL 清单 + 已保存本地绝对路径。
     """
     url_list = _split_urls(urls)
     if not url_list:
@@ -134,9 +135,10 @@ def download_images(urls: str, subdir: str = "wallpapers", referer: str = "") ->
 
     settings = get_settings()
     base = settings.project_root.resolve()
-    out_dir: Path = (base / "output" / subdir).resolve()
-    if not out_dir.is_relative_to(base):
-        return "download_images failed: subdir escapes project root"
+    downloads_root = settings.downloads_dir.resolve()
+    out_dir: Path = (downloads_root / subdir).resolve()
+    if not out_dir.is_relative_to(downloads_root) or not str(out_dir).startswith(str(base)):
+        return "download_images failed: subdir escapes downloads root"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     headers = {"User-Agent": UA}

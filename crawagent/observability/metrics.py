@@ -45,21 +45,63 @@ def _fmt_tokens(n: int) -> str:
 def usage_from_message(msg) -> dict[str, int] | None:
     """从消息提取 token 用量，兼容流式与非流式两种来源。
 
-    流式路径下 langchain 把用量放在 msg.usage_metadata（response_metadata 里没有 token_usage），
-    非流式则放在 response_metadata["token_usage"]。统一成 on_llm_end 期望的键。
+    DeepSeek 缓存说明：
+    DeepSeek 在 token_usage 顶层返回 prompt_cache_hit_tokens / prompt_cache_miss_tokens。
+    langchain-openai 会把 hit 映射到 input_token_details.cache_read。
+    cache miss 数据不在 input_token_details 中，只在 response_metadata.token_usage 中。
+
+    为兼容不同 langchain 版本，我们同时从 usage_metadata 和 response_metadata 取值。
+    优先使用 response_metadata.token_usage 作为权威数据源。
     """
     um = getattr(msg, "usage_metadata", None) or {}
+    rm = getattr(msg, "response_metadata", None)
+
+    hit = 0
+    miss = 0
+
+    # ---- 从 usage_metadata.input_token_details 取 cache_read ----
     if um.get("input_tokens") or um.get("output_tokens"):
         details = um.get("input_token_details") or {}
+        hit = int(details.get("cache_read") or 0)
+
+    # ---- 从 response_metadata.token_usage 取权威数据 ----
+    if isinstance(rm, dict):
+        tu = rm.get("token_usage") or {}
+        tu_hit = tu.get("prompt_cache_hit_tokens")
+        tu_miss = tu.get("prompt_cache_miss_tokens")
+        if tu_hit is not None:
+            hit = int(tu_hit)
+        if tu_miss is not None:
+            miss = int(tu_miss)
+        # 兜底：某些版本 API 用 prompt_tokens_details.cached_tokens
+        if miss == 0:
+            ptd = tu.get("prompt_tokens_details") or {}
+            cached = ptd.get("cached_tokens")
+            if cached is not None:
+                miss = int(cached)
+
+    # DeepSeek 语义：prompt_tokens = cache_hit + cache_miss。
+    # 部分 langchain 版本不映射 prompt_cache_miss_tokens（token_usage 为空），
+    # 此时 miss 可由 prompt - hit 推导，避免命中率虚高成 100%。
+    prompt_total = int((um.get("input_tokens") if um else 0) or 0)
+    if prompt_total and miss == 0 and hit < prompt_total:
+        miss = prompt_total - hit
+
+    if um.get("input_tokens") or um.get("output_tokens"):
         return {
             "prompt_tokens": int(um.get("input_tokens") or 0),
             "completion_tokens": int(um.get("output_tokens") or 0),
-            "prompt_cache_hit_tokens": int(details.get("cache_read") or 0),
-            "prompt_cache_miss_tokens": int(details.get("cache_write") or 0),
+            "prompt_cache_hit_tokens": hit,
+            "prompt_cache_miss_tokens": miss,
         }
-    rm = getattr(msg, "response_metadata", None)
     if isinstance(rm, dict) and rm.get("token_usage"):
-        return rm["token_usage"]
+        tu = rm["token_usage"]
+        return {
+            "prompt_tokens": int(tu.get("prompt_tokens") or 0),
+            "completion_tokens": int(tu.get("completion_tokens") or 0),
+            "prompt_cache_hit_tokens": hit,
+            "prompt_cache_miss_tokens": miss,
+        }
     return None
 
 
@@ -107,6 +149,9 @@ class SessionMetrics:
     output_tokens: int = 0
     cache_hit_tokens: int = 0
     cache_miss_tokens: int = 0
+    # 最近一次 LLM 调用的缓存数据（区分"会话累计"与"最近一轮"，避免冷启动/挤占误判）
+    last_hit_tokens: int = 0
+    last_miss_tokens: int = 0
 
     # ---- 内部状态：当前正在发生的事件 ----
     _current_turn: bool = False
@@ -135,7 +180,7 @@ class SessionMetrics:
             self._current_llm.first_token = time.perf_counter() - self._current_llm.start
 
     def on_llm_end(self, token_usage: dict[str, Any] | None) -> None:
-        """一次 LLM 调用结束。token_usage 为 response_metadata['token_usage']。"""
+        """一次 LLM 调用结束。token_usage 为 usage_from_message() 的结果。"""
         if self._current_llm is None:
             return
         self._current_llm.end = time.perf_counter()
@@ -158,11 +203,18 @@ class SessionMetrics:
 
             cache_hit = int(token_usage.get("prompt_cache_hit_tokens") or 0)
             cache_miss = int(token_usage.get("prompt_cache_miss_tokens") or 0)
-            # DeepSeek 某些版本只返回 hit/miss，不返回 prompt_tokens，兜底换算
             if prompt_tokens == 0 and (cache_hit or cache_miss):
                 self.input_tokens += cache_hit + cache_miss
             self.cache_hit_tokens += cache_hit
             self.cache_miss_tokens += cache_miss
+            self.last_hit_tokens = cache_hit
+            self.last_miss_tokens = cache_miss
+            
+            # DEBUG: 打印本次 LLM 调用的缓存数据
+            print(f"[METRICS] on_llm_end: prompt={prompt_tokens}, completion={completion_tokens}, "
+                  f"cache_hit={cache_hit}, cache_miss={cache_miss}, "
+                  f"total_input={self.input_tokens}, total_hit={self.cache_hit_tokens}, "
+                  f"total_miss={self.cache_miss_tokens}")
 
             # tok/s：输出 token ÷ 纯生成时长（总耗时 − 首 token 等待）
             generate_time = max(0.001, t.total - (t.first_token if t.first_token > 0 else t.total * 0.5))
@@ -206,6 +258,14 @@ class SessionMetrics:
             return None
         return self.cache_hit_tokens / total
 
+    @property
+    def last_round_hit_rate(self) -> float | None:
+        """最近一次 LLM 调用的命中率（排除冷启动/挤占的一次性影响）。"""
+        total = self.last_hit_tokens + self.last_miss_tokens
+        if total <= 0:
+            return None
+        return self.last_hit_tokens / total
+
     # =============================================================
     # 格式化：对齐你截图里的样式
     # =============================================================
@@ -213,14 +273,11 @@ class SessionMetrics:
     def status_line(self) -> str:
         """返回一行状态栏：`4 轮·106 步 | LLM 40m25s·工具 29m21s | 首 token 1.7s·80 tok/s | 缓存命中 99% | 输入 18.1M tok·输出 1.2M tok`"""
         parts = []
-        # 轮数·步数（进行中的这轮 turn_end 前 +1）
         turns = self.turn_count + (1 if self._current_turn else 0)
         parts.append(f"{turns} 轮 · {self.step_count} 步")
 
-        # LLM·工具总耗时
         parts.append(f"LLM {_fmt_duration(self.llm_total_time)} · 工具 {_fmt_duration(self.tool_total_time)}")
 
-        # 首 token 延迟 · tok/s
         perf = []
         if self.avg_first_token_ms is not None:
             s = self.avg_first_token_ms / 1000
@@ -230,13 +287,15 @@ class SessionMetrics:
         if perf:
             parts.append(" · ".join(perf))
 
-        # 缓存命中率（无数据时显示 —）
         if self.cache_hit_rate is not None:
-            parts.append(f"缓存命中 {self.cache_hit_rate * 100:.0f}%")
+            cache_part = f"缓存命中 {self.cache_hit_rate * 100:.0f}%"
+            # 本轮命中率：冷启动/缓存挤占只影响累计值，最近一轮才是前缀稳定性的真实反映
+            if self.last_round_hit_rate is not None and self.llm_call_count > 1:
+                cache_part += f"（本轮 {self.last_round_hit_rate * 100:.0f}%）"
+            parts.append(cache_part)
         else:
             parts.append("缓存命中 —%")
 
-        # 输入·输出 token
         parts.append(f"输入 {_fmt_tokens(self.input_tokens)} tok · 输出 {_fmt_tokens(self.output_tokens)} tok")
 
         return "  |  ".join(parts)
@@ -256,9 +315,42 @@ class SessionMetrics:
             "avg_first_token_ms": round(self.avg_first_token_ms, 1) if self.avg_first_token_ms else None,
             "avg_tok_per_s": round(self.avg_tok_per_s, 1) if self.avg_tok_per_s else None,
             "cache_hit_rate_pct": round(self.cache_hit_rate * 100, 1) if self.cache_hit_rate is not None else None,
+            "last_round_hit_rate_pct": round(self.last_round_hit_rate * 100, 1) if self.last_round_hit_rate is not None else None,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_hit_tokens": self.cache_hit_tokens,
             "cache_miss_tokens": self.cache_miss_tokens,
+            "last_hit_tokens": self.last_hit_tokens,
+            "last_miss_tokens": self.last_miss_tokens,
+            # 原始列表：持久化后能恢复 avg_first_token_ms / avg_tok_per_s 派生值
+            "first_token_latencies_ms": list(self.first_token_latencies_ms),
+            "generate_tok_per_s": list(self.generate_tok_per_s),
             "status_line": self.status_line(),
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SessionMetrics":
+        """从持久化的 dict 重建 SessionMetrics（server 重启后恢复状态栏）。
+
+        丢弃 _current_turn / _current_llm / _current_tool 等瞬时状态——
+        恢复的是已完成轮次的累计数据，不恢复进行中的轮次。
+        """
+        m = cls()
+        m.turn_count = int(data.get("turn_count") or 0)
+        m.llm_call_count = int(data.get("llm_call_count") or 0)
+        m.tool_call_count = int(data.get("tool_call_count") or 0)
+        m.llm_total_time = float(data.get("llm_total_time_sec") or 0)
+        m.tool_total_time = float(data.get("tool_total_time_sec") or 0)
+        m.input_tokens = int(data.get("input_tokens") or 0)
+        m.output_tokens = int(data.get("output_tokens") or 0)
+        m.cache_hit_tokens = int(data.get("cache_hit_tokens") or 0)
+        m.cache_miss_tokens = int(data.get("cache_miss_tokens") or 0)
+        m.last_hit_tokens = int(data.get("last_hit_tokens") or 0)
+        m.last_miss_tokens = int(data.get("last_miss_tokens") or 0)
+        latencies = data.get("first_token_latencies_ms")
+        if isinstance(latencies, list):
+            m.first_token_latencies_ms = [float(x) for x in latencies]
+        tps = data.get("generate_tok_per_s")
+        if isinstance(tps, list):
+            m.generate_tok_per_s = [float(x) for x in tps]
+        return m

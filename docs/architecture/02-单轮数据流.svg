@@ -1,0 +1,50 @@
+<svg width="100%" viewBox="0 0 680 580" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>CrawAgent 单轮对话数据流</title>
+<desc>用户消息从 WebSocket 进入工作线程，经 agent.stream 触发 LLM 与工具循环，事件写入 EventLog 后按 cursor 重放推送前端</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<g>
+<rect x="160" y="40" width="360" height="56" rx="10" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="180" y="60" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#D3D1C7" dominant-baseline="central">① 前端 WebSocket</text>
+<text x="180" y="78" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" dominant-baseline="central">发送 {type: message, content, model}</text>
+</g>
+
+<g>
+<rect x="160" y="156" width="360" height="56" rx="10" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="180" y="176" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#D3D1C7" dominant-baseline="central">② _run_turn 工作线程</text>
+<text x="180" y="194" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" dominant-baseline="central">双模式流 · 会话注入 · forcer 重置 · 悬空调用修复</text>
+</g>
+
+<g>
+<rect x="160" y="272" width="360" height="56" rx="10" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+<text x="180" y="292" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#B5D4F4" dominant-baseline="central">③ LLM 决策</text>
+<text x="180" y="310" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#85B7EB" dominant-baseline="central">有 tool_calls → 调工具；无 → 输出最终回复</text>
+</g>
+
+<g>
+<rect x="160" y="388" width="360" height="56" rx="10" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+<text x="180" y="408" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#B5D4F4" dominant-baseline="central">④ 工具执行 · 18 个 @tool</text>
+<text x="180" y="426" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#85B7EB" dominant-baseline="central">结果回灌 LLM · 中间件判成败并累计计数</text>
+</g>
+
+<g>
+<rect x="160" y="504" width="360" height="56" rx="10" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="180" y="524" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#D3D1C7" dominant-baseline="central">⑤ EventLog 事件日志</text>
+<text x="180" y="542" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" dominant-baseline="central">append 事件 → cursor 重放；progress 走 2s 心跳</text>
+</g>
+
+<path d="M340 96 V156" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M340 212 V272" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M340 328 V388" fill="none" stroke="#185FA5" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M160 416 H120 V300 H160" fill="none" stroke="#185FA5" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M520 300 H572 V532 H520" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M440 444 V504" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+
+<text x="110" y="358" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#185FA5" dominant-baseline="central">循环</text>
+<text x="560" y="258" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#444441" dominant-baseline="central">最终回复</text>
+<text x="452" y="474" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#444441" dominant-baseline="central">全过程事件</text>
+</svg>

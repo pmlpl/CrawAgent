@@ -1,24 +1,40 @@
-"""Browser tool — Playwright direct render for dynamic/JS-rendered pages.
+"""浏览器工具 — Playwright 无头渲染动态/JS 渲染页面。
 
-Uses Playwright to render JS, handle SPA navigation, and extract rendered
-content that plain HTTP requests cannot fetch. Includes font-encryption
-decryption for sites like Fanqie Novel that map real chars to PUA codepoints.
-VIP-locked chapters are fetched via a content proxy API.
+用 Playwright 跑完整 JS、处理 SPA 跳转、抽出普通 requests 拿不到的已渲染内容。
+额外能力：番茄小说这类把真实字映射到 PUA 私用码位的「字体加密」页面，
+内置思源黑体字形比对自动解密；VIP 锁定章节通过内容代理接口抓取。
 """
 import asyncio
 import re
+
+import html2text
 from langchain_core.tools import tool
 from crawagent.config.settings import get_settings
 
 
+def _html_to_md(raw_html: str) -> str:
+    """浏览器渲染后的 HTML → Markdown（保留标题/列表/代码块/行内链接）。
+
+    内容过短或转换后为空时返回空串，调用方回退纯文本。"""
+    if not raw_html or len(raw_html) < 200:
+        return ""
+    h2t = html2text.HTML2Text()
+    h2t.body_width = 0              # 不自动折行
+    h2t.backquote_code_style = True # 块级代码用 ``` 围栏并保留原始缩进
+    h2t.ul_item_mark = "-"          # 无序列表用 - 标记
+    h2t.single_line_break = False
+    md = h2t.handle(raw_html).strip()
+    return md if len(md) > 50 else ""
+
+
 def _fetch_locked_chapter(item_id: str) -> str:
-    """Fetch full content of a VIP-locked chapter via proxy API.
+    """通过代理接口抓取 VIP 锁定章节的完整正文。
 
-    Args:
-        item_id: The chapter's itemId (last path segment of the reader URL).
+    参数：
+        item_id: 章节 itemId（阅读器 URL 的最后一段路径）。
 
-    Returns:
-        Cleaned plain text of the full chapter, or empty string on failure.
+    返回：
+        清洗后的全章节纯文本；失败返回空串。
     """
     import requests
     from bs4 import BeautifulSoup
@@ -64,22 +80,19 @@ def _fetch_locked_chapter(item_id: str) -> str:
 
 @tool
 def browse_and_crawl(url: str, task: str = "") -> str:
-    """Use a headless browser to crawl dynamic/JS-rendered web pages.
+    """用无头浏览器爬取 SPA/JS 动态渲染页面。
 
-    Use this tool when crawl_webpage fails or returns incomplete content
-    (e.g. SPA pages, JS-rendered content, lazy-loaded images, font-encrypted text).
-    The browser renders the full page including JavaScript, then extracts the content.
-    If the page uses font-based encryption (PUA characters), the text is automatically
-    decrypted using Source Han Sans glyph matching.
+    当 crawl_webpage 失败或返回不完整内容时用它（例如 SPA 应用、
+    JS 渲染正文、懒加载图片、字体加密文字）。浏览器完整渲染后再抽取内容，
+    若命中 PUA 字体加密页会自动用思源黑体字形映射做解密。
 
-    Args:
-        url: The target URL, must include http:// or https://
-        task: Optional instruction describing what content to extract from the page.
-              If empty, extracts the main body text.
+    参数：
+        url: 目标 URL，必须带 http:// 或 https://
+        task: 可选指令，说明要从页面取什么内容；为空则只抽正文主体。
 
-    Returns:
-        On success: the extracted (and decrypted if needed) page content as text.
-        On failure: "Browse failed: <error details>".
+    返回：
+        成功：抽取并（必要时）解密后的页面文本。
+        失败："浏览失败：<错误详情>"。
     """
     async def _run():
         from playwright.async_api import async_playwright
@@ -130,6 +143,7 @@ def browse_and_crawl(url: str, task: str = "") -> str:
                            document.querySelector('article') ||
                            document.body;
                 const text = el ? el.innerText : '';
+                const html = el ? el.innerHTML : '';
 
                 // Collect @font-face URLs from stylesheets
                 const fontUrls = [];
@@ -162,7 +176,7 @@ def browse_and_crawl(url: str, task: str = "") -> str:
                     }
                 } catch(e) {}
 
-                return { isChapterList: false, text, title, fontUrls, stateFontUrl,
+                return { isChapterList: false, text, html, title, fontUrls, stateFontUrl,
                          chapterLock, chapterWordNumber };
             }""")
 
@@ -217,7 +231,13 @@ def browse_and_crawl(url: str, task: str = "") -> str:
                 )
                 parts.append(text)
         else:
-            parts.append(text)
+            # 浏览器渲染后的 HTML 转 Markdown（保留标题/列表/代码块）；
+            # 字体加密场景（PUA）保持纯文本，因为 decrypt_text 面向纯文本
+            if has_pua(text):
+                parts.append(text)
+            else:
+                md = _html_to_md(result.get("html", ""))
+                parts.append(md if md else text)
         return "\n\n".join(parts)
 
     try:

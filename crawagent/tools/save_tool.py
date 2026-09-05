@@ -1,9 +1,20 @@
 """存储工具 — 将提取的内容保存到 SQLite 数据库"""
 import sqlite3
 import json
+from contextvars import ContextVar
 from datetime import datetime
 from langchain_core.tools import tool
 from crawagent.config.settings import get_settings
+
+# 当前会话上下文：由 web 服务层（server.py 的 _run_turn）在任务线程开始时设置，
+# 工具执行与 agent.stream 在同一线程，可安全读取。
+# save_record 自动带上 session_id，避免依赖 LLM 传参；CLI 场景为空串（全局记录）。
+_current_session: ContextVar[str] = ContextVar("crawagent_current_session", default="")
+
+
+def set_current_session(session_id: str) -> None:
+    """设置当前执行线程所属的会话 ID（供 save_record/list_crawled_resources 使用）"""
+    _current_session.set(session_id or "")
 
 
 # 已知平台的 URL 域名映射（用于从 URL 自动推断 platform 字段）
@@ -58,36 +69,39 @@ def _init_db() -> None:
             created_at TEXT NOT NULL
         )
     """)
-    # 兼容迁移：给已有表加 platform / save_path 字段（SQLite ADD COLUMN 无损）
+    # 兼容迁移：给已有表加 platform / save_path / session_id 字段（SQLite ADD COLUMN 无损）
+    # 并发首启时另一线程可能已完成迁移，duplicate column 直接忽略
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(crawl_records)")
     existing_cols = {row[1] for row in cursor.fetchall()}
-    if "platform" not in existing_cols:
-        conn.execute("ALTER TABLE crawl_records ADD COLUMN platform TEXT DEFAULT ''")
-    if "save_path" not in existing_cols:
-        conn.execute("ALTER TABLE crawl_records ADD COLUMN save_path TEXT DEFAULT ''")
+    for col in ("platform", "save_path", "session_id"):
+        if col not in existing_cols:
+            try:
+                conn.execute(f"ALTER TABLE crawl_records ADD COLUMN {col} TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
     conn.commit()
     conn.close()
 
 
 @tool
 def save_record(url: str, title: str, content: str, extra_data: str = "", platform: str = "", save_path: str = "") -> str:
-    """Save extracted content to the local database.
+    """把抽取到的内容保存进本地 SQLite 数据库。
 
-    Only call this tool when the extracted content is valid and complete.
-    Do NOT save if the content is empty, garbled, or failed to extract due to anti-crawl measures.
+    **必须在确认内容正确且完整后再调**。
+    如果内容空、乱码、或被反爬挡住没抽出来 → 严禁调用它存一条垃圾记录。
 
-    Args:
-        url: The URL of the crawled webpage
-        title: The page title
-        content: The extracted body text — must be meaningful content, not empty or error messages
-        extra_data: Optional additional data (JSON string), e.g. link lists, image lists
-        platform: Optional platform name (e.g. "番茄小说", "抖音", "B站"). If omitted, inferred from URL.
-        save_path: Optional local file path if content was also saved to a file
+    参数：
+        url: 被爬页面的 URL
+        title: 页面标题
+        content: 抽取到的正文 —— 必须是实际可读内容，不准是空或报错文字
+        extra_data: 可选附加数据（JSON 字串），如链接列表、图片清单
+        platform: 可选平台名，例 "番茄小说" / "抖音" / "B站"；为空则从 URL 推断
+        save_path: 可选。如果内容也同时存了本地文件，这里填对应绝对路径
 
-    Returns:
-        On success: "Saved successfully! Record ID: <id>, URL: <url>, Title: <title>, Content length: <N> chars".
-        On failure: database error message.
+    返回：
+        成功："保存成功! 记录 ID: <id>, URL: <url>, 标题: <title>, 内容长度: <N>字"
+        失败：数据库错误信息字串。
     """
     _init_db()
     db_path = _get_db_path()
@@ -99,9 +113,10 @@ def save_record(url: str, title: str, content: str, extra_data: str = "", platfo
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO crawl_records (url, title, content, extra_data, created_at, platform, save_path) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (url, title, content, extra_data, datetime.now().isoformat(), platform, save_path),
+            "INSERT INTO crawl_records (url, title, content, extra_data, created_at, platform, save_path, session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (url, title, content, extra_data, datetime.now().isoformat(), platform, save_path,
+             _current_session.get("")),
         )
         record_id = cursor.lastrowid
         conn.commit()

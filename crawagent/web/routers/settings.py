@@ -1,0 +1,379 @@
+"""设置相关 API：多服务商模型注册表的增删改查、思考深度与连通性测试。
+
+数据存储在 .env 的 LLM_PROVIDERS 键（JSON 数组），结构见 crawagent/llm/registry.py。
+Key 按服务商共享：同一服务商下的多个模型共用一个 api_key。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, Body
+
+from crawagent.config.settings import get_settings
+from crawagent.llm.registry import load_providers
+from crawagent.web.state import reset_agent_cache
+
+router = APIRouter()
+
+ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+
+
+def _read_env_lines() -> list[str]:
+    """读取 .env 原始行（保留注释与空行），用于改写时尽量不破坏格式"""
+    if not ENV_FILE.exists():
+        return []
+    return ENV_FILE.read_text(encoding="utf-8").splitlines()
+
+
+def _save_env_updates(updates: dict[str, str]) -> None:
+    """把 updates 写回 .env：保留注释与其他键，更新已存在的键、追加新键"""
+    lines = _read_env_lines()
+    remaining = dict(updates)
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            out.append(line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in remaining:
+            out.append(f"{key}={remaining.pop(key)}")
+        else:
+            out.append(line)
+    for key, value in remaining.items():
+        out.append(f"{key}={value}")
+    ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def _persist_providers(providers: list[dict]) -> None:
+    """把注册表写回 .env 并失效 Agent 缓存（下次对话按新配置重建）"""
+    _save_env_updates({"LLM_PROVIDERS": json.dumps(providers, ensure_ascii=False)})
+    # load_providers() 直接从磁盘读 .env（绕过 pydantic-settings 的 cached_property 缓存）
+    # 所以写完 .env 它立即读到新值，无需额外清缓存
+    reset_agent_cache()
+
+
+def _find_provider(providers: list[dict], name: str) -> dict | None:
+    for p in providers:
+        if p.get("name") == name:
+            return p
+    return None
+
+
+def _model_exists(providers: list[dict], model: str, exclude_provider: str = "") -> bool:
+    """模型 ID 全局唯一（避免对话页选择时无法区分服务商）"""
+    for p in providers:
+        if p.get("name") == exclude_provider:
+            continue
+        if model in (p.get("models") or []):
+            return True
+    return False
+
+
+def _settings_snapshot() -> dict[str, Any]:
+    """GET /api/settings 响应：模型条目列表 + 服务商（含是否已配 Key），不含明文 Key"""
+    providers = load_providers()
+    return {
+        "models": [
+            {"name": m, "provider": p.get("name", "")}
+            for p in providers
+            for m in (p.get("models") or [])
+        ],
+        "providers": [
+            {"name": p.get("name", ""), "base_url": p.get("base_url", ""), "key_set": bool(p.get("api_key"))}
+            for p in providers
+        ],
+        "thinking_depth": get_settings().thinking_depth,
+        "mcp_autostart": get_settings().MCP_AUTOSTART,
+        "mcp_start_command": get_settings().MCP_START_COMMAND,
+        "mcp_configured": bool(get_settings().mcp_servers.strip()),
+        # 内置 anything-analyzer 检测状态（前端据此决定 UI：显示内置状态还是 textarea）
+        "aa_builtin_found": _aa_status()["found"],
+        "aa_builtin_path": _aa_status()["path"],
+        "aa_builtin_port": _aa_status()["port"],
+    }
+
+
+def _aa_status() -> dict:
+    """检测 anything-analyzer 是否可被内置启动。"""
+    from crawagent.graph.skills import _find_anything_analyzer, _build_autostart_command
+    s = get_settings()
+    try:
+        first = json.loads(s.mcp_servers)[0] if s.mcp_servers.strip() else {}
+        url = first.get("url", "")
+        from urllib.parse import urlparse
+        port = urlparse(url).port if url else 0
+    except (json.JSONDecodeError, ValueError, IndexError):
+        port = 0
+    aa_path = _find_anything_analyzer()
+    return {
+        "found": bool(aa_path),
+        "path": aa_path or "",
+        "port": port or 0,
+    }
+
+
+@router.get("/api/settings")
+async def get_settings_route() -> dict[str, Any]:
+    """返回模型注册表与思考深度（API Key 不出后端，前端只看 key_set）"""
+    return _settings_snapshot()
+
+
+def _validate(payload: dict, providers: list[dict], *, exclude_provider: str = "") -> tuple[str, str, str, str] | str:
+    """校验添加/编辑请求，返回 (provider, model, api_key, base_url) 或错误信息字符串"""
+    provider = str(payload.get("provider") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    api_key = str(payload.get("api_key") or "").strip()
+    base_url = str(payload.get("base_url") or "").strip()
+
+    if not provider:
+        return "服务商不能为空"
+    if not model:
+        return "模型 ID 不能为空"
+    if _model_exists(providers, model, exclude_provider=exclude_provider):
+        return f"模型 {model} 已存在（同一模型 ID 不能重复添加）"
+
+    existing = _find_provider(providers, provider)
+    if base_url and not base_url.startswith("http"):
+        return "Base URL 必须以 http 开头"
+    if existing is None:
+        # 新服务商：必须提供 base_url 与 api_key
+        if not base_url:
+            return f"服务商 {provider} 需要填写 Base URL"
+        if not api_key:
+            return f"服务商 {provider} 需要填写 API Key"
+    else:
+        base_url = base_url or existing.get("base_url", "")
+    return provider, model, api_key, base_url
+
+
+@router.post("/api/models")
+async def add_model_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """添加模型：新服务商必须带 api_key + base_url；已有服务商的 api_key 可留空复用"""
+    providers = load_providers()
+    result = _validate(payload, providers)
+    if isinstance(result, str):
+        return {"ok": False, "error": result}
+    provider, model, api_key, base_url = result
+
+    entry = _find_provider(providers, provider)
+    if entry is None:
+        providers.append({"name": provider, "base_url": base_url, "api_key": api_key, "models": [model]})
+    else:
+        entry.setdefault("models", []).append(model)
+
+    _persist_providers(providers)
+    return {"ok": True, **_settings_snapshot()}
+
+
+@router.post("/api/models/update")
+async def update_model_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """编辑模型：密钥框留空 = 保留目标服务商原 Key（清空重填语义）"""
+    providers = load_providers()
+    orig_provider = str(payload.get("orig_provider") or "").strip()
+    orig_name = str(payload.get("orig_name") or "").strip()
+    if not orig_name:
+        return {"ok": False, "error": "缺少模型 ID"}
+
+    # 在深拷贝上摘除原条目（拿到原服务商旧 Key 备用）；校验失败不影响已存数据
+    kept: list[dict] = json.loads(json.dumps(providers, ensure_ascii=False))
+    old_key = ""
+    for p in kept:
+        models = p.get("models") or []
+        if p.get("name") == orig_provider and orig_name in models:
+            old_key = p.get("api_key", "")
+            p["models"] = [m for m in models if m != orig_name]
+    # 原服务商若已无模型则丢弃条目（换回时 Key 由 old_key 兜底）
+    kept = [p for p in kept if (p.get("models") or []) or p.get("name") != orig_provider]
+    result = _validate(payload, kept)
+    if isinstance(result, str):
+        return {"ok": False, "error": result}
+    provider, model, api_key, base_url = result
+
+    entry = _find_provider(kept, provider)
+    if entry is None:
+        # 换到新服务商且没填 Key → 沿用原服务商的旧 Key
+        kept.append({
+            "name": provider, "base_url": base_url,
+            "api_key": api_key or old_key, "models": [model],
+        })
+    else:
+        entry.setdefault("models", []).append(model)
+        if api_key:
+            entry["api_key"] = api_key
+        if base_url:
+            entry["base_url"] = base_url
+
+    _persist_providers(kept)
+    return {"ok": True, **_settings_snapshot()}
+
+
+@router.post("/api/models/delete")
+async def delete_model_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """删除模型；服务商下模型清空时保留服务商条目（Key 留着，重新添加时无需再填）"""
+    providers = load_providers()
+    provider = str(payload.get("provider") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    entry = _find_provider(providers, provider)
+    if entry is None or name not in (entry.get("models") or []):
+        return {"ok": False, "error": "模型不存在"}
+    entry["models"] = [m for m in entry["models"] if m != name]
+    _persist_providers(providers)
+    return {"ok": True, **_settings_snapshot()}
+
+
+@router.post("/api/settings")
+async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """保存思考深度 / MCP 自动启动开关到 .env"""
+    updates: dict[str, str] = {}
+    depth = payload.get("thinking_depth")
+    if isinstance(depth, str) and depth.strip():
+        updates["THINKING_DEPTH"] = depth.strip()
+
+    mcp_changed = False
+    if "mcp_autostart" in payload:
+        updates["MCP_AUTOSTART"] = "true" if payload["mcp_autostart"] else "false"
+        mcp_changed = True
+    if "mcp_start_command" in payload:
+        updates["MCP_START_COMMAND"] = str(payload["mcp_start_command"]).strip()
+        mcp_changed = True
+
+    if updates:
+        _save_env_updates(updates)
+
+    mcp_status = None
+    if mcp_changed:
+        # 重读配置；开关打开时立即在后台拉起 MCP 服务，并清掉 Agent 缓存
+        # 让下一轮对话重建工具列表（含 MCP 工具），无需重启后端
+        get_settings.cache_clear() if hasattr(get_settings, "cache_clear") else None
+        from crawagent.graph.skills import ensure_mcp_started
+        from crawagent.web.state import reset_agent_cache
+
+        s = get_settings()
+        if s.MCP_AUTOSTART and s.mcp_servers.strip():
+            # 同步等到出结果：就绪 = started；120 秒超时 = failed（不再有中间态）
+            started = await asyncio.to_thread(ensure_mcp_started, True)
+            mcp_status = "started" if started else "failed"
+        else:
+            mcp_status = "disabled"
+        # 任何 MCP 配置变化都清 Agent 缓存，下一轮对话按新工具列表重建
+        try:
+            reset_agent_cache()
+        except Exception:
+            pass
+    return {
+        "ok": True, "saved": list(updates.keys()),
+        "thinking_depth": get_settings().thinking_depth,
+        "mcp_status": mcp_status,
+    }
+
+
+@router.post("/api/settings/test")
+async def test_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """用给定配置做一次 ping 连通性测试（不影响当前 Agent）。
+
+    api_key 留空时按服务商取已存 Key；base_url 留空时同上。
+    """
+    try:
+        from langchain_core.messages import HumanMessage
+        from langchain_openai import ChatOpenAI
+
+        provider = str(payload.get("provider") or "").strip()
+        model = str(payload.get("model") or "").strip()
+        base_url = str(payload.get("base_url") or "").strip()
+        api_key = str(payload.get("api_key") or "").strip()
+
+        entry = _find_provider(load_providers(), provider) if provider else None
+        if entry:
+            base_url = base_url or entry.get("base_url", "")
+            api_key = api_key or entry.get("api_key", "")
+        if not model:
+            return {"ok": False, "error": "缺少模型 ID"}
+        if not api_key or "*" in api_key:
+            return {"ok": False, "error": "该服务商还没有配置 API Key"}
+        if not base_url:
+            return {"ok": False, "error": "缺少 Base URL"}
+
+        llm = ChatOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=0,
+            timeout=30,
+            max_retries=0,
+        )
+
+        def _invoke() -> str:
+            result = llm.invoke([HumanMessage(content="ping")])
+            return result.content if isinstance(result.content, str) else str(result.content)
+
+        content = await asyncio.to_thread(_invoke)
+        return {"ok": True, "response": (content or "").strip()[:80] or "（空响应）"}
+    except Exception as e:
+        return {"ok": False, "error": str(e) or e.__class__.__name__}
+
+
+@router.post("/api/mcp/start")
+async def start_mcp_route() -> dict[str, Any]:
+    """打开启动脚本文件夹，让用户双击 bat 启动 anything-analyzer。"""
+    from crawagent.graph.skills import _port_listening, _find_anything_analyzer, _find_pnpm_cmd, _build_autostart_command
+    from pathlib import Path
+    import asyncio, os, re
+
+    # 先同步 Electron token
+    from crawagent.tools.mcp_capture_tool import auto_sync_mcp_token
+    auto_sync_mcp_token()
+
+    s = get_settings()
+    try:
+        first = json.loads(s.mcp_servers)[0] if s.mcp_servers.strip() else {}
+        from urllib.parse import urlparse
+        port = urlparse(first.get("url", "")).port or 23816
+    except Exception:
+        port = 23816
+
+    if port and _port_listening("127.0.0.1", port):
+        return {"ok": True, "message": f"MCP 服务已在运行（127.0.0.1:{port}）", "already_running": True}
+
+    aa_path = _find_anything_analyzer()
+    if not aa_path:
+        return {"ok": False, "error": "没找到 anything-analyzer 项目，请在 .env 里加 ANYTHING_ANALYZER_PATH"}
+
+    # 1. 生成 bat 文件
+    scripts_dir = Path(__file__).parent.parent / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    bat_path = scripts_dir / "start_anything_analyzer.bat"
+
+    # 用干净的方式构建 bat —— 直接调 _find_pnpm_cmd
+    from crawagent.graph.skills import _find_pnpm_cmd
+    pnpm = _find_pnpm_cmd()
+    exe_path = pnpm
+    exe_args = "dev"
+
+    bat_path.write_text(
+        "@echo off\r\n"
+        "chcp 65001 >nul\r\n"
+        "title anything-analyzer MCP Server\r\n"
+        "echo.\r\n"
+        "echo === anything-analyzer ===\r\n"
+        f'cd /d "{aa_path}"\r\n'
+        f'call "{exe_path}" {exe_args}\r\n'
+        "echo.\r\n"
+        "pause >nul\r\n",
+        encoding="utf-8"
+    )
+
+    # 2. 直接执行 bat（和手动双击完全等价，shell32 绕开 Trae sandbox）
+    if os.name == "nt":
+        os.startfile(str(bat_path))
+
+    return {
+        "ok": True,
+        "message": "已启动 anything-analyzer —— 会弹一个 cmd 窗口自动跑 pnpm dev",
+        "bat_path": str(bat_path),
+        "aa_path": aa_path,
+        "already_running": False,
+    }

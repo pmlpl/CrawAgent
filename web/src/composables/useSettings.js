@@ -1,18 +1,61 @@
-// 设置面板状态：读取、测试、保存 API Key / 模型 / Base URL
-import { reactive, ref } from 'vue'
+// 设置面板状态：多服务商模型注册表（列表/添加/编辑/删除）、思考深度、连通性测试
+// API Key 只在添加/编辑表单中提交，后端不出明文，前端只看 key_set
+import { computed, reactive } from 'vue'
+
+const SELECTED_MODEL_KEY = 'crawagent-selected-model'
 
 const state = reactive({
   open: false,
   loading: false,
   saving: false,
   testing: false,
-  apiKey: '',
-  apiKeySet: false,         // 是否在服务端已配置（用于只显示掩码）
-  baseUrl: '',
-  model: '',
-  testResult: null,         // {ok: bool, response/error: string}
-  saveTip: '',              // 保存提示文案
+  models: [],              // [{name, provider}] 已添加的模型
+  providers: [],           // [{name, base_url, key_set}] 服务商（Key 不出后端）
+  model: '',               // 当前对话选中的模型 ID（前端本地持久化）
+  thinkingDepth: 'off',    // off / low / high / max
+  testResult: null,        // {ok: bool, msg: string}
+  saveTip: '',             // 操作提示文案
+  mcpAutostart: false,     // MCP 自动启动开关
+  mcpStartCommand: '',     // MCP 服务拉起命令（高级：自定义，留空则用内置 anything-analyzer 启动）
+  mcpConfigured: false,    // .env 里是否配置了 MCP_SERVERS
+  mcpStatus: '',           // started / not_ready / disabled / error
+  // 内置 anything-analyzer 自动检测
+  aaBuiltinFound: false,
+  aaBuiltinPath: '',
+  aaBuiltinPort: 0,
+  advancedMode: false,     // 是否展示自定义命令 textarea
 })
+
+// 简化视图：给 App.vue/Header 等只读场景用
+const config = computed(() => ({
+  defaultModel: state.model || state.models[0]?.name || '',
+  thinkingDepth: state.thinkingDepth,
+}))
+
+function _loadSelectedModel() {
+  try { return localStorage.getItem(SELECTED_MODEL_KEY) || '' } catch (e) { return '' }
+}
+
+function _persistSelectedModel(v) {
+  try { localStorage.setItem(SELECTED_MODEL_KEY, v || '') } catch (e) { /* ignore */ }
+}
+
+function _pickModel(models) {
+  const names = models.map(m => m.name)
+  const selected = _loadSelectedModel()
+  if (selected && names.includes(selected)) return selected
+  return names[0] || ''
+}
+
+function _applySnapshot(data) {
+  // 容错：把字符串条目（旧格式）归一化为 {name, provider}，并过滤无效项
+  const raw = Array.isArray(data.models) ? data.models : []
+  state.models = raw
+    .map(m => (typeof m === 'string' ? { name: m, provider: '' } : m))
+    .filter(m => m && m.name)
+  state.providers = Array.isArray(data.providers) ? data.providers : []
+  state.model = _pickModel(state.models)
+}
 
 async function load() {
   state.loading = true
@@ -20,38 +63,108 @@ async function load() {
     const res = await fetch('/api/settings')
     if (!res.ok) return
     const data = await res.json()
-    state.apiKey = data.openai_api_key || ''
-    state.apiKeySet = !!data.openai_api_key_set
-    state.baseUrl = data.openai_base_url || ''
-    state.model = data.default_model || ''
+    _applySnapshot(data)
+    state.thinkingDepth = data.thinking_depth || 'off'
+    state.mcpAutostart = !!data.mcp_autostart
+    state.mcpStartCommand = data.mcp_start_command || ''
+    state.mcpConfigured = !!data.mcp_configured
+    state.aaBuiltinFound = !!data.aa_builtin_found
+    state.aaBuiltinPath = data.aa_builtin_path || ''
+    state.aaBuiltinPort = data.aa_builtin_port || 0
+    // 有自定义命令时默认展开高级模式
+    state.advancedMode = !!state.mcpStartCommand
   } finally {
     state.loading = false
   }
 }
 
-async function save() {
+function _post(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(r => r.json())
+}
+
+async function addModel(form) { // {provider, model, apiKey, baseUrl}
   state.saving = true
-  state.testResult = null
   state.saveTip = ''
   try {
-    const body = {
-      openai_base_url: state.baseUrl.trim(),
-      default_model: state.model.trim(),
-    }
-    // API Key：只在用户改了（不再是掩码，掩码含星号）时下发
-    if (state.apiKey && !state.apiKey.includes('*')) {
-      body.openai_api_key = state.apiKey.trim()
-    }
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+    const data = await _post('/api/models', {
+      provider: form.provider, model: form.model,
+      api_key: form.apiKey, base_url: form.baseUrl,
     })
-    const data = await res.json()
+    if (_applyResult(data)) return true
+  } catch (e) {
+    state.saveTip = '添加失败：' + (e?.message || e)
+  } finally {
+    state.saving = false
+  }
+  return false
+}
+
+async function updateModel(form) { // {origProvider, origName, provider, model, apiKey, baseUrl}
+  state.saving = true
+  state.saveTip = ''
+  try {
+    const data = await _post('/api/models/update', {
+      orig_provider: form.origProvider, orig_name: form.origName,
+      provider: form.provider, model: form.model,
+      api_key: form.apiKey, base_url: form.baseUrl,
+    })
+    if (_applyResult(data)) return true
+  } catch (e) {
+    state.saveTip = '保存失败：' + (e?.message || e)
+  } finally {
+    state.saving = false
+  }
+  return false
+}
+
+function _applyResult(data) {
+  if (data.ok) {
+    _applySnapshot(data)
+    return true
+  }
+  state.saveTip = data.error || '未知错误'
+  return false
+}
+
+async function deleteModel(provider, name) {
+  try {
+    const data = await _post('/api/models/delete', { provider, name })
+    return _applyResult(data)
+  } catch (e) {
+    state.saveTip = '删除失败：' + (e?.message || e)
+    return false
+  }
+}
+
+async function saveThinking() {
+  try {
+    const data = await _post('/api/settings', { thinking_depth: state.thinkingDepth })
+    if (data.ok) state.saveTip = '思考深度已保存'
+    else state.saveTip = '保存失败：' + (data.error || '未知错误')
+  } catch (e) {
+    state.saveTip = '保存失败：' + (e?.message || e)
+  }
+}
+
+async function saveMcp() {
+  state.saving = true
+  state.saveTip = ''
+  try {
+    const data = await _post('/api/settings', {
+      mcp_autostart: state.mcpAutostart,
+      mcp_start_command: state.mcpStartCommand,
+    })
     if (data.ok) {
-      state.saveTip = '已保存，下次对话生效'
-      // 重新拉一次以更新 apiKeySet 与掩码回显
-      await load()
+      state.mcpStatus = data.mcp_status || ''
+      state.saveTip = {
+        started: '✓ MCP 服务已启动并接入 Agent',
+        failed: '✗ 启动失败：命令已执行但服务 120 秒内未就绪，查看 logs/mcp_autostart.log 定位原因',
+        disabled: 'MCP 自动启动已关闭',
+      }[state.mcpStatus] || '已保存'
     } else {
       state.saveTip = '保存失败：' + (data.error || '未知错误')
     }
@@ -62,24 +175,15 @@ async function save() {
   }
 }
 
-async function test() {
+async function test(form) { // {provider, model, apiKey, baseUrl}
   state.testing = true
   state.testResult = null
   state.saveTip = ''
   try {
-    const body = {
-      openai_base_url: state.baseUrl.trim(),
-      default_model: state.model.trim(),
-    }
-    if (state.apiKey && !state.apiKey.includes('*')) {
-      body.openai_api_key = state.apiKey.trim()
-    }
-    const res = await fetch('/api/settings/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+    const data = await _post('/api/settings/test', {
+      provider: form.provider, model: form.model,
+      api_key: form.apiKey, base_url: form.baseUrl,
     })
-    const data = await res.json()
     state.testResult = data.ok
       ? { ok: true, msg: '✓ 连接成功 · ' + (data.response || '') }
       : { ok: false, msg: '✗ ' + (data.error || '失败') }
@@ -94,13 +198,41 @@ async function open() {
   state.open = true
   state.testResult = null
   state.saveTip = ''
-  await load()
+  await loadAll()
 }
 
 function close() {
   state.open = false
 }
 
+function setSelectedModel(v) {
+  if (!v) return
+  state.model = v
+  _persistSelectedModel(v)
+}
+
+async function startAA() {
+  state.saving = true
+  state.saveTip = ''
+  try {
+    const res = await fetch('/api/mcp/start', { method: 'POST' })
+    const data = await res.json()
+    if (data.ok) {
+      state.saveTip = data.already_running ? 'anything-analyzer 已在运行 ✓' : 'anything-analyzer 已启动 ✓'
+    } else {
+      state.saveTip = '启动失败: ' + (data.error || '未知错误')
+    }
+  } catch (e) {
+    state.saveTip = '请求失败: ' + e.message
+  } finally {
+    state.saving = false
+  }
+}
+
 export function useSettings() {
-  return { state, load, save, test, open, close }
+  return {
+    state, config,
+    load, addModel, updateModel, deleteModel,
+    saveThinking, saveMcp, startAA, test, open, close, setSelectedModel,
+  }
 }

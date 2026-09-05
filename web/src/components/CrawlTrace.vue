@@ -1,34 +1,64 @@
 <script setup>
 // 爬行轨迹：一次工具调用 = 蛛丝上的一个节点，结果挂载在节点之下。
-// 默认收起，只展示摘要；点击展开查看完整步骤。
-import { computed, ref } from 'vue'
+// 默认展开，展示完整步骤；点击可收起。
+import { computed, nextTick, ref, watch } from 'vue'
 
 const props = defineProps({
   steps: { type: Array, required: true }, // [{ name, args, result, done }]
+  expanded: { type: Boolean, default: true },
+  roundId: { type: Number, default: 0 },
 })
 
-const collapsed = ref(true)
+const collapsed = ref(!props.expanded)
+const progressRefs = ref({}) // step index → DOM element（用于自动滚动）
 
-const RESULT_FOLD_AT = 220
-const PREVIEW_AT = 120
+watch(() => props.expanded, (val) => {
+  collapsed.value = !val
+})
+
+// 当 steps 从空变为有内容时自动展开
+watch(() => props.steps?.length, (n, old) => {
+  if (n > 0 && (!old || old === 0)) {
+    collapsed.value = false
+  }
+})
+
+// 进度日志新增行时自动滚到底部
+watch(
+  () => props.steps.map(s => s.progress_lines?.length || 0).join(','),
+  () => {
+    nextTick(() => {
+      for (const el of Object.values(progressRefs.value)) {
+        if (el) el.scrollTop = el.scrollHeight
+      }
+    })
+  }
+)
 
 const summary = computed(() => {
   const n = props.steps.length
-  if (n === 0) return '调用 0 次'
+  if (n === 0) return '等待 AI 生成计划…'
+  const thinkCount = props.steps.filter(s => kindOf(s) === 'thinking').length
+  const toolCount = n - thinkCount
   const done = props.steps.filter(s => s.done).length
-  if (done < n) return `${n} 次调用 · ${done} 已完成`
-  return `${n} 次工具调用`
+  const parts = []
+  if (thinkCount) parts.push(`${thinkCount} 思考`)
+  if (toolCount) parts.push(`${toolCount} 工具调用`)
+  if (done < n) parts.push(`${done}/${n} 已完成`)
+  else parts.push('全部完成')
+  return parts.join(' · ')
 })
 
-function shortArgs(args) {
-  if (!args) return ''
-  return args.length > 110 ? args.slice(0, 110) + '…' : args
+function kindOf(step) {
+  return step && step.kind === 'thinking' ? 'thinking' : 'tool'
 }
-function isLong(result) {
-  return result && result.length > RESULT_FOLD_AT
-}
-function preview(result) {
-  return result.slice(0, PREVIEW_AT) + ' …'
+
+function thinkSummary(text) {
+  if (!text) return ''
+  const flat = text.replace(/\s+/g, ' ').trim()
+  // 折叠 summary 最多显示 50 字截断，展开处看完整内容，避免 summary 和详情显示同一句话
+  if (flat.length <= 50) return flat
+  return flat.slice(0, 50) + '…'
 }
 </script>
 
@@ -41,20 +71,51 @@ function preview(result) {
       @click="collapsed = !collapsed"
     >
       <span class="chevron" aria-hidden="true">{{ collapsed ? '▸' : '▾' }}</span>
-      <span class="trace-label">爬行轨迹 · crawl trace</span>
+      <span class="trace-label">爬行轨迹 · crawl trace<span v-if="roundId > 0" class="trace-round">#{{ roundId }}</span></span>
       <span class="trace-summary">{{ summary }}</span>
     </button>
 
     <ol v-show="!collapsed" class="trace-body">
-      <li v-for="(step, i) in steps" :key="i" class="step" :class="{ done: step.done }">
-        <span class="step-name">{{ step.name }}()</span>
-        <span class="step-args" :title="step.args">{{ shortArgs(step.args) }}</span>
+      <li v-for="(step, i) in steps" :key="i" class="step" :class="[`step-${kindOf(step)}`, { done: step.done }]">
 
-        <details v-if="step.result && isLong(step.result)" class="step-result">
-          <summary>{{ preview(step.result) }}</summary>
-          <div>{{ step.result }}</div>
-        </details>
-        <div v-else-if="step.result" class="step-result">{{ step.result }}</div>
+        <!-- THINKING STEP：AI 的思考/工具调用计划 -->
+        <template v-if="kindOf(step) === 'thinking'">
+          <div class="step-bullet think-bullet" aria-hidden="true" title="思考">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z" /></svg>
+          </div>
+          <span class="step-kind think-kind">thinking · 思考</span>
+          <details class="step-thinking">
+            <summary>{{ thinkSummary(step.content) }}</summary>
+            <pre class="thinking-pre">{{ step.content }}</pre>
+          </details>
+        </template>
+
+        <!-- TOOL CALL STEP -->
+        <template v-else>
+          <span class="step-name">{{ step.name }}()</span>
+          <span v-if="!step.done" class="step-running">
+            <span class="run-dot" /><span class="run-text">运行中…</span>
+          </span>
+          <span class="step-args">{{ step.args }}</span>
+          <!-- 子 Agent 内联进度日志（video_site_expert 等长耗时工具） -->
+          <div
+            v-if="step.progress_lines && step.progress_lines.length"
+            class="step-progress"
+            :ref="el => { if (el) progressRefs[i] = el }"
+          >
+            <div v-for="(ln, li) in step.progress_lines" :key="li" class="progress-line" :class="{ latest: li === step.progress_lines.length - 1 && !step.done }">
+              <span class="progress-bullet">•</span>
+              <span class="progress-text">{{ ln }}</span>
+            </div>
+          </div>
+          <div v-if="step.result" class="step-result-wrap">
+            <details class="step-result" :open="step.result.length <= 2000">
+              <summary v-if="step.result.length > 2000">结果（{{ step.result.length }} 字符，点击展开）</summary>
+              <div class="step-result-content">{{ step.result }}</div>
+            </details>
+          </div>
+        </template>
+
       </li>
     </ol>
   </div>
@@ -65,12 +126,14 @@ function preview(result) {
   align-self: flex-start;
   max-width: 92%;
   border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
   background: color-mix(in srgb, var(--panel) 70%, transparent);
   border-radius: var(--radius);
   font-family: var(--font-mono);
   font-size: 13px;
   animation: rise .35s var(--ease) both;
-  overflow: hidden;
+  overflow: visible;
+  position: relative;
 }
 
 .trace-head {
@@ -106,6 +169,16 @@ function preview(result) {
   text-transform: uppercase;
   flex: none;
 }
+.trace-round {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 4px;
+  color: var(--accent);
+  letter-spacing: 0;
+}
 .trace-summary {
   flex: 1;
   color: var(--dim);
@@ -130,6 +203,22 @@ function preview(result) {
   padding: 4px 16px 12px 14px;
   margin: 0;
   border-top: 1px dashed var(--silk);
+  max-height: 60vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent) transparent;
+}
+.trace-body::-webkit-scrollbar {
+  width: 6px;
+}
+.trace-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.trace-body::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  border-radius: 3px;
+  opacity: 0.5;
 }
 
 .step {
@@ -151,17 +240,152 @@ function preview(result) {
   border: 2px solid var(--accent);
 }
 .step.done::before { background: var(--accent); }
+
+/* ---- THINKING STEP 样式（发光脑图点 + 虚线框） ---- */
+.step.step-thinking {
+  padding-left: 28px;
+  margin-left: 2px;
+}
+.step.step-thinking::before {
+  display: none; /* 用 think-bullet 代替 */
+}
+.think-bullet {
+  position: absolute;
+  left: -6px;
+  top: 4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px dashed var(--accent);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.think-kind {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  border: 1px dashed var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+  vertical-align: middle;
+}
+.step-thinking {
+  margin-top: 2px;
+}
+.step-thinking summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--dim);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.step-thinking summary::before { content: "▸ 思考："; color: var(--accent); font-weight: 600; }
+.step-thinking[open] summary::before { content: "▾ 思考："; }
+.step-thinking summary:hover { color: var(--accent); }
+.thinking-pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-left: 2px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 30%, transparent);
+  color: var(--dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 0 4px 4px 0;
+  max-height: 500px;
+  overflow-y: auto;
+}
+
 .step-name { color: var(--accent); font-weight: 600; }
+.step-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.run-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: run-pulse 1s ease-in-out infinite;
+}
+.run-text { opacity: .9; }
+@keyframes run-pulse {
+  0%, 100% { opacity: .3; transform: scale(.8); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
 .step-args {
   color: var(--faint);
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.step-progress {
+  margin: 6px 0 2px 14px;
+  padding: 8px 10px;
+  border-left: 2px dashed var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-radius: 4px;
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.progress-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  line-height: 1.5;
+  animation: rise .25s ease both;
+}
+.progress-line.latest {
+  color: var(--accent);
+  font-weight: 500;
+}
+.progress-line.latest .progress-bullet {
+  animation: run-pulse 1s ease-in-out infinite;
+}
+.progress-bullet {
+  color: var(--accent);
+  flex-shrink: 0;
+  font-weight: 700;
+  line-height: 1.4;
+  transform: translateY(-1px);
+}
+.progress-text {
+  color: var(--text);
+  word-break: break-word;
+  opacity: .92;
+}
+
+.step-result-wrap {
+  margin-top: 4px;
 }
 .step-result {
-  margin-top: 4px;
   border-left: 2px solid var(--line);
   padding: 4px 10px;
   color: var(--dim);
@@ -169,15 +393,26 @@ function preview(result) {
   white-space: pre-wrap;
   word-break: break-word;
 }
-details.step-result summary {
+.step-result > summary {
   cursor: pointer;
   color: var(--faint);
   list-style: none;
-  min-height: 24px;
+  min-height: 20px;
+  font-size: 11px;
+  font-family: var(--font-display);
+  letter-spacing: .06em;
+  padding: 2px 0;
 }
-details.step-result summary::before { content: "▸ 结果 "; }
-details.step-result[open] summary::before { content: "▾ 结果 "; }
-details.step-result summary:hover { color: var(--accent); }
+.step-result > summary::before { content: "▸ "; color: var(--accent); font-weight: 600; }
+.step-result[open] > summary::before { content: "▾ "; }
+.step-result > summary:hover { color: var(--accent); }
+.step-result-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+  padding-top: 4px;
+}
 
 @media (max-width: 640px) {
   .trace { max-width: 100%; }

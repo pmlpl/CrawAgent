@@ -6,6 +6,9 @@ env/
 # Python
 __pycache__/
 *.py[cod]
+.coverage
+.coverage.*
+htmlcov/
 *.egg-info/
 dist/
 build/
@@ -40,4 +43,6 @@ node_modules/
 Thumbs.db
 
 # 临时文件
-_test_*.py
+diag_*.png
+trace_*.png
+test_results/

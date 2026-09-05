@@ -145,19 +145,19 @@ def _stage1_regex(html: str, base_url: str = "") -> list[dict]:
 # 阶段 2：LLM 兜底
 # =============================================================
 
-_LLM_PROMPT_TEMPLATE = """You are a list-page extractor. From the HTML below, extract all list items as a JSON array.
+_LLM_PROMPT_TEMPLATE = """你是一个列表页抽取专家。从以下 HTML 中，抽取所有列表条目组成 JSON 数组返回。
 
-Rules:
-- Each item: {{"title": "...", "url": "..."}}
-- URLs must be absolute (resolve against base url: {base_url})
-- Skip navigation, footer, login, register, pagination, "read more" links
-- Return ONLY a JSON array, no explanation, no markdown fences
-- If the page is not a list page, return []
+规则：
+- 每条格式：{{"title": "标题文字", "url": "完整跳转链接"}}
+- URL 必须是绝对地址（以 base_url={base_url} 为参照做相对路径解析）
+- 跳过：全站导航、页脚、登录/注册、分页按钮、"展开全文"、"阅读更多" 类文字链接
+- 只返回纯 JSON 数组，不要解释文字、不要 ```json 包裹
+- 如果这页面明显不是列表页，返回 []
 
 HTML:
 {snippet}
 
-JSON array:"""
+JSON 数组:"""
 
 
 def _stage2_llm(html: str, base_url: str = "") -> list[dict]:
@@ -176,7 +176,8 @@ def _stage2_llm(html: str, base_url: str = "") -> list[dict]:
     try:
         llm = get_llm()
         resp = llm.invoke([HumanMessage(content=prompt)])
-        content = resp.content.strip()
+        raw = resp.content
+        content = raw.strip() if isinstance(raw, str) else str(raw)
         # 提取 JSON 数组（LLM 可能包裹在 markdown 里）
         m = re.search(r"\[.*\]", content, re.DOTALL)
         if not m:
@@ -262,9 +263,10 @@ def _stage3_dom_depth(html: str, base_url: str = "") -> list[dict]:
             if signature(child) != most_common_sig:
                 continue
             a = child.find("a", href=True)
-            if not a:
+            if not isinstance(a, Tag):
                 continue
-            full_url = _normalize_url(a["href"], base_url)
+            raw_href = a.get("href") or ""
+            full_url = _normalize_url(raw_href if isinstance(raw_href, str) else " ".join(raw_href), base_url)
             if not full_url:
                 continue
             title = a.get_text(strip=True)
@@ -280,8 +282,10 @@ def _stage3_dom_depth(html: str, base_url: str = "") -> list[dict]:
             item = {"title": title, "url": full_url}
             # 额外字段：图片（save_executor 硬约束要求识别图片字段）
             img = child.find("img")
-            if img and img.get("src"):
-                item["image"] = _normalize_url(img["src"], base_url)
+            raw_src = img.get("src") if isinstance(img, Tag) else None
+            if raw_src:
+                src = raw_src if isinstance(raw_src, str) else " ".join(raw_src)
+                item["image"] = _normalize_url(src, base_url)
             items.append(item)
 
         if len(items) > len(best_items):
@@ -297,26 +301,26 @@ def _stage3_dom_depth(html: str, base_url: str = "") -> list[dict]:
 
 @tool
 def extract_list(html: str, url: str = "") -> str:
-    """Extract list items (title + url pairs) from a list/index page.
+    """从列表页/索引页提取列表条目（标题+URL 配对）。
 
-    Uses a hybrid strategy (hard constraint):
-    1. Regex first — fast pattern matching for repeated <a href> structures, grouped by URL prefix
-    2. LLM fallback — if regex returns fewer than 5 items, ask the LLM to extract from the HTML
-    3. DOM depth — ultimate fallback, find the deepest container with repeated child structure
+    三段式混合策略（硬约束）：
+    1. 正则优先 — 快速扫描重复 <a href> 结构，按 URL 前缀自动分组
+    2. LLM 兜底 — 正则结果少于 5 条时，让 LLM 从 HTML 中语义抽取
+    3. DOM 深度兜底 — 最终保险，找出最深层的重复子结构容器
 
-    Filters navigation/footer/login/register links (hard constraint).
+    自动过滤：全站导航/页脚/登录注册/分页按钮 等非内容链接（硬约束）。
 
-    Args:
-        html: The HTML source of the list page
-        url: Optional base URL for resolving relative links
+    参数：
+        html: 列表页的 HTML 原文
+        url: 可选基础 URL，用于补全相对链接
 
-    Returns:
-        Formatted list with strategy tag, e.g.:
-        "List (12 items, strategy=regex):
-        1. [title1](url1)
-        2. [title2](url2)
+    返回：
+        格式化列表 + 策略标签，例如：
+        "列表（12 条，策略=正则）:
+        1. [标题1](url1)
+        2. [标题2](url2)
         ..."
-        On failure: "List extraction failed: <reason>"
+        失败时："列表抽取失败：原因"
     """
     if not html or len(html) < 100:
         return "List extraction failed: HTML too short"

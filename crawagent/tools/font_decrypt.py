@@ -98,7 +98,7 @@ def _build_shs_lookup():
 
     _ensure_shs_font()
     shs_font = TTFont(str(SHS_FONT_PATH))
-    shs_cmap = shs_font.getBestCmap()
+    shs_cmap = shs_font.getBestCmap() or {}
     pil_font = ImageFont.truetype(str(SHS_FONT_PATH), size=RENDER_SIZE)
 
     chars = []
@@ -139,7 +139,7 @@ def _build_pua_mapping(font_url: str) -> dict:
     resp = requests.get(font_url, timeout=30)
     resp.raise_for_status()
     enc_font = TTFont(BytesIO(resp.content))
-    enc_cmap = enc_font.getBestCmap()
+    enc_cmap = enc_font.getBestCmap() or {}
     pua_codes = [c for c in enc_cmap if PUA_LOW <= c <= PUA_HIGH]
     if not pua_codes:
         enc_font.close()

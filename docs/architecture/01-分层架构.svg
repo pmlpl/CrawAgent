@@ -1,0 +1,46 @@
+<svg width="100%" viewBox="0 0 680 524" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>CrawAgent 七层架构</title>
+<desc>从前端层、服务层、Agent 编排层、LLM 层、工具层到存储层与可观测层的分层结构</desc>
+
+<g>
+<rect x="40" y="40" width="600" height="56" rx="10" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="60" y="60" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#D3D1C7" dominant-baseline="central">① 前端层 · web/</text>
+<text x="60" y="78" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" dominant-baseline="central">Vue 3 + Vite · WebSocket 流式渲染 · 明暗双主题</text>
+</g>
+
+<g>
+<rect x="40" y="108" width="600" height="56" rx="10" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="60" y="128" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#D3D1C7" dominant-baseline="central">② 服务层 · crawagent/web/</text>
+<text x="60" y="146" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" dominant-baseline="central">FastAPI · /ws/{session_id} · REST 路由 sessions / settings / sites</text>
+</g>
+
+<g>
+<rect x="40" y="176" width="600" height="56" rx="10" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+<text x="60" y="196" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#B5D4F4" dominant-baseline="central">③ Agent 编排层 · crawagent/graph/</text>
+<text x="60" y="214" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#85B7EB" dominant-baseline="central">create_agent 单节点 · TrimHistory + ScriptForcer 双中间件</text>
+</g>
+
+<g>
+<rect x="40" y="244" width="600" height="56" rx="10" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+<text x="60" y="264" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#B5D4F4" dominant-baseline="central">④ LLM 层 · crawagent/llm/</text>
+<text x="60" y="282" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#85B7EB" dominant-baseline="central">模型注册表 → ChatOpenAI → DeepSeek（prompt cache / thinking）</text>
+</g>
+
+<g>
+<rect x="40" y="312" width="600" height="56" rx="10" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+<text x="60" y="332" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#B5D4F4" dominant-baseline="central">⑤ 工具层 · crawagent/tools/ · 18 个工具</text>
+<text x="60" y="350" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#85B7EB" dominant-baseline="central">crawl · browse · extract（→ Markdown）· save · script · 子 Agent</text>
+</g>
+
+<g>
+<rect x="40" y="380" width="600" height="56" rx="10" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="60" y="400" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#D3D1C7" dominant-baseline="central">⑥ 存储层 · data/ · downloads/ · output/</text>
+<text x="60" y="418" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" dominant-baseline="central">sessions.db 会话 · crawagent.db 记录 · sites.json 站点档案</text>
+</g>
+
+<g>
+<rect x="40" y="448" width="600" height="56" rx="10" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="60" y="468" font-family="system-ui, sans-serif" font-size="14" font-weight="500" fill="#D3D1C7" dominant-baseline="central">⑦ 可观测层 · crawagent/observability/</text>
+<text x="60" y="486" font-family="system-ui, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" dominant-baseline="central">SessionMetrics 状态栏 · LangSmith 链路追踪</text>
+</g>
+</svg>

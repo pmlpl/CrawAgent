@@ -249,23 +249,22 @@ def _extract_detail_info(html: str, detail_url: str) -> dict:
 
 @tool
 def extract_wallpaper_list(url: str, limit: int = 10, exclude_dynamic: bool = False) -> str:
-    """Extract wallpaper entries from ANY wallpaper/image website.
+    """从**任何壁纸/图片站**抽取壁纸条目列表。
 
-    For wallpaper/image sites that render cards with CSS background-image (not <img> tags),
-    require detail-page navigation, and use pagination. Use this instead of extract_list
-    for wallpaper/image sites — extract_list only handles <a> text links and will miss
-    background-image cards.
+    适配场景：壁纸/图片站通常用 CSS background-image（而非 <img>）渲染卡片、
+    必须进入详情页才能看到原图、还有分页。壁纸站用它而不是 extract_list ——
+    因为 extract_list 只处理 <a> 文字链接，会漏掉背景图卡片这类站点。
 
-    Auto-detects STATIC vs DYNAMIC per entry. Auto-paginates to collect enough entries.
+    每条自动识别：静态图 STATIC / 动态视频 DYNAMIC；自动翻页到凑齐数量为止。
 
-    Args:
-        url: List page URL (homepage, category page, or search results of a wallpaper site).
-        limit: Number of wallpaper entries to return (default 10).
-        exclude_dynamic: If True, skip dynamic/video wallpapers and only return static images.
+    参数：
+        url: 列表页 URL（首页、分类页、或壁纸站搜索结果页）。
+        limit: 返回条目数（默认 10）。
+        exclude_dynamic: 为 True 时，跳过动态/视频壁纸，只返回静态图。
 
-    Returns:
-        Formatted list with type (STATIC/DYNAMIC), title, resolution, detail URL,
-        thumbnail URL, and other image/video URLs.
+    返回：
+        格式化列表，每条含：类型（静/动）、标题、分辨率、详情页 URL、
+        缩略图 URL、其他图/视频 URL。
     """
     # 1. 自动翻页收集详情页链接
     target = limit * 4 if exclude_dynamic else limit * 2
@@ -326,13 +325,13 @@ def extract_wallpaper_list(url: str, limit: int = 10, exclude_dynamic: bool = Fa
 
 @tool
 def wallpaper_detail(url: str) -> str:
-    """Fetch detailed info for a single wallpaper entry from ANY wallpaper/image site.
+    """从**任何壁纸/图片站**抓取单条壁纸的详情信息。
 
-    Args:
-        url: Detail page URL of the wallpaper.
+    参数：
+        url: 单条壁纸的详情页 URL。
 
-    Returns:
-        Formatted detail: type, title, resolution, all image URLs, video URLs.
+    返回：
+        格式化详情：类型（静态/动态）、标题、分辨率、所有图片 URL、视频 URL。
     """
     try:
         html = _get(url)

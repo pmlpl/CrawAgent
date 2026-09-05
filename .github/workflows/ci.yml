@@ -1,0 +1,41 @@
+name: CI
+on: [push, pull_request, workflow_dispatch]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pipx install uv
+      - run: uv sync --group dev --group type-stubs --all-extras
+      - env: { OPENAI_API_KEY: "sk-fake-for-ci-only" }
+        run: uv run pytest tests/ -v --color=yes
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pipx install uv
+      - run: uv sync --group dev --group type-stubs --all-extras
+      - run: |
+          set -o pipefail
+          uv run pyright --outputjson > pyright-report.json || true
+          ERRORS=$(python -c "import json;d=json.load(open('pyright-report.json'));print(sum(1 for g in d.get('generalDiagnostics',[]) if g.get('severity')=='error') + sum(1 for f in d.get('files',{}).values() for x in f.get('diagnostics',[]) if x.get('severity')=='error'))")
+          echo "pyright errors: $ERRORS"
+          [ "$ERRORS" -le 50 ]
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - working-directory: web
+        run: npm ci || npm install && npm run build

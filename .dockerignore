@@ -1,0 +1,33 @@
+# Phase 4.3 — .dockerignore
+# 保持镜像小、安全（不把真实 cookies / venv / node_modules 打进构建上下文）
+
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.env.local
+*.db
+*.db-journal
+data/
+output/
+downloads/
+logs/
+node_modules/
+work/
+.idea/
+.vscode/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.git/
+.gitignore
+.trae/
+.claude/
+.agents/
+.workbuddy/
+fix-mcp.ps1
+_test_spawn.py
+_agent_output.log
