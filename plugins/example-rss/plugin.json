@@ -1,0 +1,7 @@
+{
+  "name": "example-rss",
+  "version": "0.1.0",
+  "description": "示例插件：fetch_rss_feed 工具 + RSS 内容发现技能，演示 CrawAgent 插件规范。",
+  "author": "CrawAgent",
+  "dependencies": ["requests"]
+}

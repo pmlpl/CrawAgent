@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -314,8 +315,136 @@ def discover_tools() -> list[ToolSpec]:
                 instance=obj,
             ))
 
+    # 4. 扫第三方插件（plugins/*/tools/*.py，plugin.json manifest 约定）
+    for spec in _plugin_tool_specs(seen):
+        if spec.name in seen:
+            continue  # 双保险：正常不会走到（_plugin_tool_specs 内部已按 seen 过滤）
+        seen.add(spec.name)
+        specs.append(spec)
+
     # 按 category → name 排序，保证每次 discovery 顺序稳定（prompt 缓存稳定）
     specs.sort(key=lambda s: (s.category, s.name))
+    return specs
+
+
+# ---------------------------------------------------------------------------
+# 插件发现（P2-9 插件规范）— plugins/ 目录 + plugin.json manifest
+# ---------------------------------------------------------------------------
+
+def plugins_root() -> Path:
+    """第三方插件根目录：项目根/plugins/。"""
+    return Path(__file__).resolve().parent.parent.parent / "plugins"
+
+
+def list_plugins() -> list[dict]:
+    """扫描 plugins/ 下的插件（不 import，只读 manifest）。
+
+    返回 [{name, version, description, author, dependencies, dir, valid, error}]。
+    valid=False 的插件保留在列表里（doctor / CLI 展示用），但不会提供工具。
+    """
+    root = plugins_root()
+    results: list[dict] = []
+    if not root.is_dir():
+        return results
+    for d in sorted(root.iterdir()):
+        if not d.is_dir() or d.name.startswith(("_", ".")):
+            continue
+        manifest_path = d / "plugin.json"
+        if not manifest_path.exists():
+            results.append({
+                "name": d.name, "version": "", "description": "", "author": "",
+                "dependencies": [], "dir": str(d), "valid": False,
+                "error": "缺少 plugin.json manifest",
+            })
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            results.append({
+                "name": d.name, "version": "", "description": "", "author": "",
+                "dependencies": [], "dir": str(d), "valid": False,
+                "error": f"plugin.json 解析失败: {e}",
+            })
+            continue
+        if not isinstance(manifest, dict) or not manifest.get("name"):
+            results.append({
+                "name": d.name, "version": "", "description": "", "author": "",
+                "dependencies": [], "dir": str(d), "valid": False,
+                "error": "manifest 缺少 name 字段",
+            })
+            continue
+        results.append({
+            "name": str(manifest.get("name") or d.name),
+            "version": str(manifest.get("version", "")),
+            "description": str(manifest.get("description", "")),
+            "author": str(manifest.get("author", "")),
+            "dependencies": [str(x) for x in manifest.get("dependencies", []) if x],
+            "dir": str(d),
+            "valid": True,
+            "error": "",
+        })
+    return results
+
+
+def plugin_skill_dirs() -> list[Path]:
+    """所有插件自带的 skills/ 子目录（有效的插件才计入）。"""
+    return [Path(p["dir"]) / "skills" for p in list_plugins() if p["valid"]]
+
+
+def _plugin_tool_specs(seen: set[str] | None = None) -> list[ToolSpec]:
+    """import 每个有效插件的 tools/*.py，收集其中的 BaseTool 实例。
+
+    插件模块不在 sys.path 上，用 spec_from_file_location 以唯一模块名导入；
+    已导入过的模块直接复用 sys.modules 缓存（discover 重入时不重复执行）。
+    单个插件/模块失败只打警告，不阻断 Agent 构建。
+    seen 里的名字（内置/已注册工具）直接跳过，避免同一名字两条路重复收录。
+    """
+    import sys as _sys
+    import importlib.util
+
+    skip = seen or set()
+    specs: list[ToolSpec] = []
+    for plugin in list_plugins():
+        if not plugin["valid"]:
+            continue
+        pdir = Path(plugin["dir"])
+        tools_dir = pdir / "tools"
+        if not tools_dir.is_dir():
+            continue
+        for py in sorted(tools_dir.glob("*.py")):
+            if py.stem.startswith("_"):
+                continue
+            mod_name = f"crawagent_plugin_{plugin['name']}_{py.stem}"
+            try:
+                if mod_name in _sys.modules:
+                    mod = _sys.modules[mod_name]
+                else:
+                    spec = importlib.util.spec_from_file_location(mod_name, py)
+                    if spec is None or spec.loader is None:
+                        continue
+                    mod = importlib.util.module_from_spec(spec)
+                    _sys.modules[mod_name] = mod  # 先注册防装饰器自引用递归
+                    spec.loader.exec_module(mod)
+            except Exception as e:
+                print(f"[PLUGIN] '{plugin['name']}' 模块 {py.stem} 导入失败（跳过）: "
+                      f"{type(e).__name__}: {e}")
+                continue
+            for attr_name in dir(mod):
+                if attr_name.startswith("_"):
+                    continue
+                obj = getattr(mod, attr_name, None)
+                if not isinstance(obj, BaseTool) or obj.name in _SKIP_TOOL_NAMES:
+                    continue
+                if obj.name in skip:
+                    continue  # 内置/step1 已收（重入 discover 时 _REGISTERED 先行），不重复收
+                specs.append(ToolSpec(
+                    name=obj.name,
+                    description=obj.description[:500] if obj.description else "",
+                    source_file=f"plugins/{plugin['name']}/tools/{py.name}",
+                    dependencies=list(plugin["dependencies"]),
+                    category=_guess_category(obj.name),
+                    instance=obj,
+                ))
     return specs
 
 

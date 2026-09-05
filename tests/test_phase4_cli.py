@@ -2,16 +2,17 @@
 
 覆盖：
   1. crawagent doctor 基本可运行（exit code 0 或 1 — 都合法）
-  2. crawagent add-tool 创建目录 + 脚手架文件 + 重命名
-  3. crawagent add-tool 拒绝非法名 / 重名
-  4. 没有命令时 argparse 报错
+  2. crawagent add-tool 创建插件包（plugins/<name>/，P2-9 插件规范）+ 重命名 + manifest
+  3. crawagent add-tool 拒绝重名
+  4. crawagent plugins 列出插件
+  5. 没有命令时 argparse 报错
 """
 
+import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,25 +45,16 @@ def test_doctor_runs():
     assert "Python" in r.stdout
 
 
-def test_add_tool_creates_scaffold(tmp_path):
-    """add-tool 创建目录、重命名文件、替换模板内容。"""
-    # 临时把 tools/_template 复制到一个隔离位置
-    tools_dir = PROJECT_ROOT / "crawagent" / "tools"
-    template_dir = tools_dir / "_template"
+def test_add_tool_creates_plugin_scaffold():
+    """add-tool 创建 plugins/<name>/ 插件包：manifest + tools/ + skills/ 齐备。"""
+    template_dir = PROJECT_ROOT / "crawagent" / "tools" / "_template"
     assert template_dir.exists(), "_template 目录必须存在才能测试 add-tool"
 
-    new_name = "test_scaffold_tool_xyz"
-    dst = tools_dir / new_name
+    new_name = "test_scaffold_xyz"
+    plugins_root = PROJECT_ROOT / "plugins"
+    dst = plugins_root / new_name
 
-    # 确保干净
     if dst.exists():
-        shutil_ret = (
-            subprocess.run(["rm", "/s", "/q", str(dst)], capture_output=True)
-            if False
-            else None
-        )
-        import shutil
-
         shutil.rmtree(dst, ignore_errors=True)
 
     try:
@@ -70,37 +62,37 @@ def test_add_tool_creates_scaffold(tmp_path):
         assert r.returncode == 0, (
             f"add-tool exit={r.returncode}\nstdout={r.stdout}\nstderr={r.stderr}"
         )
-        assert dst.exists(), "目标目录应被创建"
+        assert dst.exists(), "插件目录应被创建在 plugins/ 下"
 
-        # 核心文件存在且已重命名
-        tool_file = dst / f"{new_name}_tool.py"
-        assert tool_file.exists(), f"{new_name}_tool.py 应被创建"
-        # 旧的 example_tool.py 应该已不存在
-        assert not (dst / "example_tool.py").exists(), "example_tool.py 应该已重命名"
+        # manifest 存在且 name 已落成插件名
+        manifest_path = dst / "plugin.json"
+        assert manifest_path.exists(), "plugin.json manifest 应存在"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["name"] == new_name, "manifest.name 应替换成插件名"
 
-        # 内容已替换：模板里的 "example" 应变成我们的工具名
+        # 工具模块重命名 + 内容替换
+        tool_file = dst / "tools" / f"{new_name}_tool.py"
+        assert tool_file.exists(), f"tools/{new_name}_tool.py 应被创建"
+        assert not (dst / "tools" / "example_tool.py").exists(), "example_tool.py 应已重命名"
         content = tool_file.read_text(encoding="utf-8")
-        # 允许模板里保留少量通用 "example"（比如 docstring 里），
-        # 但至少 Tool 名称 / 注册函数名应替换
-        assert f"{new_name}_tool" in content or new_name in content
-    finally:
-        import shutil
+        assert new_name in content, "工具模块内容应包含新插件名"
 
+        # 技能目录重命名
+        skill_md = dst / "skills" / f"{new_name}-usage" / "SKILL.md"
+        assert skill_md.exists(), "技能 SKILL.md 应随目录重命名保留"
+        sk_text = skill_md.read_text(encoding="utf-8")
+        assert f"name: {new_name}-usage" in sk_text, "技能 frontmatter name 应同步替换"
+    finally:
         shutil.rmtree(dst, ignore_errors=True)
 
 
-def test_add_tool_rejects_duplicate(tmp_path):
-    """已有同名目录时拒绝。"""
-    import shutil
-
-    tools_dir = PROJECT_ROOT / "crawagent" / "tools"
-    existing = tools_dir / "_template"
-    assert existing.exists()
-
-    # 先手动复制一个假的同名目录，触发重名检查
-    fake_name = "_template_dup_check_xyz"
-    fake_dst = tools_dir / fake_name
-    shutil.copytree(existing, fake_dst, dirs_exist_ok=True)
+def test_add_tool_rejects_duplicate():
+    """plugins/ 下已有同名目录时拒绝。"""
+    plugins_root = PROJECT_ROOT / "plugins"
+    plugins_root.mkdir(exist_ok=True)
+    fake_name = "dup_check_xyz"
+    fake_dst = plugins_root / fake_name
+    fake_dst.mkdir(exist_ok=True)
 
     try:
         r = _run_cli("add-tool", fake_name)
@@ -108,6 +100,56 @@ def test_add_tool_rejects_duplicate(tmp_path):
         assert "已存在" in r.stdout or "exists" in r.stdout.lower()
     finally:
         shutil.rmtree(fake_dst, ignore_errors=True)
+
+
+def test_add_plugin_from_local_path():
+    """add-plugin 从本地目录接入：校验 manifest、复制进 plugins/。"""
+    template_dir = PROJECT_ROOT / "crawagent" / "tools" / "_template"
+    plugins_root = PROJECT_ROOT / "plugins"
+    fake_src = plugins_root / "_fake_src_plugin"
+    dst = plugins_root / "fake-src-plugin"
+
+    shutil.rmtree(fake_src, ignore_errors=True)
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(template_dir, fake_src)
+    # manifest name 决定安装目录名
+    (fake_src / "plugin.json").write_text(
+        json.dumps({"name": "fake-src-plugin", "version": "0.1.0", "dependencies": []}),
+        encoding="utf-8",
+    )
+
+    try:
+        r = _run_cli("add-plugin", str(fake_src))
+        assert r.returncode == 0, (
+            f"add-plugin exit={r.returncode}\nstdout={r.stdout}\nstderr={r.stderr}"
+        )
+        assert dst.exists(), "插件应安装到 plugins/fake-src-plugin/"
+        assert (dst / "plugin.json").exists()
+    finally:
+        shutil.rmtree(fake_src, ignore_errors=True)
+        shutil.rmtree(dst, ignore_errors=True)
+
+
+def test_add_plugin_rejects_missing_manifest():
+    """add-plugin 拒绝没有 plugin.json 的目录。"""
+    plugins_root = PROJECT_ROOT / "plugins"
+    fake_src = plugins_root / "_fake_no_manifest"
+    shutil.rmtree(fake_src, ignore_errors=True)
+    fake_src.mkdir(parents=True)
+
+    try:
+        r = _run_cli("add-plugin", str(fake_src))
+        assert r.returncode == 2, f"缺 manifest 应 exit=2, 实际 exit={r.returncode}"
+        assert "plugin.json" in r.stdout
+    finally:
+        shutil.rmtree(fake_src, ignore_errors=True)
+
+
+def test_plugins_lists_installed():
+    """plugins 子命令列出 example-rss 示例插件。"""
+    r = _run_cli("plugins")
+    assert r.returncode == 0, f"plugins exit={r.returncode}, stderr={r.stderr}"
+    assert "example-rss" in r.stdout, "示例插件应出现在列表里"
 
 
 def test_no_command_errors():

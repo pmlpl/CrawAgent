@@ -1,0 +1,7 @@
+{
+  "name": "example-plugin",
+  "version": "0.1.0",
+  "description": "示例插件：一个 RSS Feed 抓取工具 + 一个使用说明技能，演示 CrawAgent 插件规范。",
+  "author": "CrawAgent",
+  "dependencies": ["requests"]
+}

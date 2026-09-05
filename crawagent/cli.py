@@ -1,22 +1,35 @@
 """Phase 4.4 — CrawAgent CLI 入口。
 
-三个子命令：
-  start      启动 WebUI（uvicorn，端口 8006）
-  doctor     环境健康检查（Python / .env / API key / data 目录 / 依赖版本）
-  add-tool   从 _template/ 脚手架创建一个新的爬虫工具模块
+子命令：
+  start       启动 WebUI（uvicorn，端口 8006）
+  doctor      环境健康检查（Python / .env / API key / data 目录 / 依赖版本）
+  add-tool    从 _template/ 脚手架创建一个新的插件包（plugins/<name>/）
+  add-plugin  从本地路径或 git URL 一键接入第三方插件
+  plugins     列出已安装插件
 
 用法：
   uv run crawagent start
   uv run crawagent doctor
   uv run crawagent add-tool my_new_crawler
+  uv run crawagent add-plugin D:/path/to/some-plugin
+  uv run crawagent add-plugin https://github.com/user/some-plugin.git
+  uv run crawagent plugins
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+
+def _plugins_root() -> Path:
+    """第三方插件根目录：项目根/plugins/。"""
+    return Path(__file__).resolve().parent.parent / "plugins"
 
 
 def _cmd_start(args: argparse.Namespace) -> int:
@@ -109,48 +122,171 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_add_tool(args: argparse.Namespace) -> int:
-    """从 tools/_template/ 复制脚手架创建新工具模块。"""
+    """从 tools/_template/ 脚手架创建一个插件包（plugins/<name>/，P2-9 插件规范）。"""
     name = args.name.strip()
     if not name or not name.replace("_", "").isalnum():
-        print(f"❌ 非法工具名: '{name}'（只允许字母/数字/下划线）")
+        print(f"❌ 非法插件名: '{name}'（只允许字母/数字/下划线）")
         return 2
 
     src_dir = Path(__file__).resolve().parent / "tools" / "_template"
-    dst_dir = Path(__file__).resolve().parent / "tools" / name
+    plugins = _plugins_root()
+    dst_dir = plugins / name
 
     if not src_dir.exists():
         print(f"❌ 模板目录不存在: {src_dir}")
         return 2
     if dst_dir.exists():
-        print(f"❌ 已存在同名工具目录: {dst_dir}")
+        print(f"❌ 已存在同名插件目录: {dst_dir}")
         return 2
 
+    plugins.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src_dir, dst_dir)
 
-    # 把 example_tool.py 重命名为 {name}_tool.py
-    example = dst_dir / "example_tool.py"
-    target = dst_dir / f"{name}_tool.py"
+    # tools/example_tool.py → tools/<name>_tool.py，并替换内容里的示例名
+    tools_dir = dst_dir / "tools"
+    example = tools_dir / "example_tool.py"
     if example.exists():
+        target = tools_dir / f"{name}_tool.py"
         example.rename(target)
-        # 替换文件内容里的 "example" → name
         text = target.read_text(encoding="utf-8")
-        text = text.replace("example", name)
+        text = text.replace("example_tool", f"{name}_tool").replace("example-plugin", name)
         target.write_text(text, encoding="utf-8")
 
-    # 更新 __init__.py 里的 import
-    init = dst_dir / "__init__.py"
-    if init.exists():
-        text = init.read_text(encoding="utf-8")
-        text = text.replace("example_tool", f"{name}_tool")
-        text = text.replace("example", name)
-        init.write_text(text, encoding="utf-8")
+    # skills/example-usage → skills/<name>-usage，SKILL.md 的 name 同步改
+    skills_dir = dst_dir / "skills"
+    example_skill = skills_dir / "example-usage"
+    if example_skill.is_dir():
+        skill_dst = skills_dir / f"{name}-usage"
+        example_skill.rename(skill_dst)
+        sk = skill_dst / "SKILL.md"
+        if sk.exists():
+            text = sk.read_text(encoding="utf-8")
+            text = text.replace("name: example-usage", f"name: {name}-usage")
+            sk.write_text(text, encoding="utf-8")
 
-    print(f"✅ 已创建新工具: {dst_dir}")
-    print(f"   模块文件: {target}")
-    print(f"\n下一步:")
-    print(f"  1. 在 {target} 里实现 build_tool()")
-    print(f"  2. 写个简单测试: tests/test_{name}.py")
-    print(f"  3. 自动发现机制会在下一次 import crawagent.tools 时收录它")
+    # manifest：name 落成真实插件名
+    manifest_path = dst_dir / "plugin.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["name"] = name
+            manifest["description"] = f"{name} 插件（add-tool 脚手架生成，待实现）"
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    print(f"✅ 已创建插件: {dst_dir}")
+    print(f"   工具模块: {tools_dir / f'{name}_tool.py'}")
+    print("\n下一步:")
+    print(f"  1. 在 tools/{name}_tool.py 里实现你的工具（@tool / @register_tool）")
+    print(f"  2. 按需在 skills/{name}-usage/SKILL.md 写站点攻略")
+    print(f"  3. 重启后端 — 插件工具自动进 Agent 工具表，技能自动进索引")
+    print(f"  4. uv run crawagent plugins 可查看插件加载情况")
+    return 0
+
+
+def _cmd_add_plugin(args: argparse.Namespace) -> int:
+    """从本地路径或 git URL 接入第三方插件到 plugins/。"""
+    source = args.source.strip().rstrip("/\\")
+    if not source:
+        print("❌ 请给插件来源：本地目录路径或 git 仓库 URL")
+        return 2
+
+    plugins = _plugins_root()
+
+    # 1. 拿到源目录（git URL 就地 clone 到临时目录）
+    if re.match(r"^https?://|\.git$", source) or source.startswith("git@"):
+        tmp = plugins / "_tmp_clone"
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        plugins.mkdir(parents=True, exist_ok=True)
+        print(f"⏳ 克隆 {source} ...")
+        r = subprocess.run(["git", "clone", "--depth", "1", source, str(tmp)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"❌ git clone 失败:\n{r.stderr[:500]}")
+            shutil.rmtree(tmp, ignore_errors=True)
+            return 2
+        src_dir = tmp
+    else:
+        src_dir = Path(source).expanduser().resolve()
+        if not src_dir.is_dir():
+            print(f"❌ 本地目录不存在: {src_dir}")
+            return 2
+
+    # 2. 校验 manifest，确定插件目录名
+    manifest_path = src_dir / "plugin.json"
+    if not manifest_path.exists():
+        print(f"❌ 不是合法的 CrawAgent 插件：缺 plugin.json（{src_dir}）")
+        if src_dir.name == "_tmp_clone":
+            shutil.rmtree(src_dir, ignore_errors=True)
+        return 2
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"❌ plugin.json 解析失败: {e}")
+        if src_dir.name == "_tmp_clone":
+            shutil.rmtree(src_dir, ignore_errors=True)
+        return 2
+
+    plugin_name = re.sub(r"[^0-9A-Za-z_-]", "_", str(manifest.get("name") or Path(source).stem))
+    dst_dir = plugins / plugin_name
+    if dst_dir.exists():
+        print(f"❌ 已存在同名插件: {dst_dir}（先删除或改名再装）")
+        if src_dir.name == "_tmp_clone":
+            shutil.rmtree(src_dir, ignore_errors=True)
+        return 2
+
+    # 3. 安装
+    plugins.mkdir(parents=True, exist_ok=True)
+    if src_dir.name == "_tmp_clone":
+        src_dir.rename(dst_dir)
+    else:
+        shutil.copytree(src_dir, dst_dir)
+
+    print(f"✅ 插件已安装: {dst_dir}")
+    deps = manifest.get("dependencies", [])
+    req = dst_dir / "requirements.txt"
+    if req.exists():
+        print(f"   ⚠ 该插件声明了 requirements.txt，请手动安装: uv pip install -r {req}")
+    elif deps:
+        print(f"   ⚠ 声明依赖: {', '.join(map(str, deps))}（缺什么装什么: uv pip install ...）")
+    print("   重启后端生效。uv run crawagent plugins 查看状态。")
+    return 0
+
+
+def _cmd_plugins(args: argparse.Namespace) -> int:
+    """列出已安装插件与各自的工具/技能数量。"""
+    from crawagent.tools.registry import list_plugins
+
+    plugins = list_plugins()
+    print("\n🧩 CrawAgent 插件")
+    print("=" * 60)
+    if not plugins:
+        print("  （plugins/ 目录为空。用 crawagent add-tool <name> 创建，")
+        print("    或 crawagent add-plugin <路径|git URL> 接入第三方插件）")
+        print("=" * 60)
+        return 0
+    valid = 0
+    for p in plugins:
+        if not p["valid"]:
+            print(f"  ❌ {p['name']:<24} {p['error']}  [{p['dir']}]")
+            continue
+        valid += 1
+        tdir = Path(p["dir"]) / "tools"
+        sdir = Path(p["dir"]) / "skills"
+        tools = [t for t in sorted(tdir.glob("*.py")) if not t.stem.startswith("_")] if tdir.is_dir() else []
+        skills = [s for s in sorted(sdir.iterdir()) if s.is_dir()] if sdir.is_dir() else []
+        ver = f" v{p['version']}" if p["version"] else ""
+        deps = f" deps={','.join(p['dependencies'])}" if p["dependencies"] else ""
+        print(f"  ✅ {p['name']:<24}{ver}  tools={len(tools)} skills={len(skills)}{deps}")
+        if p["description"]:
+            print(f"      {p['description'][:80]}")
+    print("=" * 60)
+    print(f"  共 {len(plugins)} 个插件，{valid} 个有效。重启后端生效。")
     return 0
 
 
@@ -173,8 +309,13 @@ def main() -> int:
 
     p_d = sub.add_parser("doctor", help="环境健康检查")
 
-    p_a = sub.add_parser("add-tool", help="从脚手架创建新爬虫工具")
-    p_a.add_argument("name", help="工具名（如 douban_reader）")
+    p_a = sub.add_parser("add-tool", help="从脚手架创建新插件包（plugins/<name>/）")
+    p_a.add_argument("name", help="插件名（如 douban_reader）")
+
+    p_ap = sub.add_parser("add-plugin", help="从本地路径或 git URL 一键接入第三方插件")
+    p_ap.add_argument("source", help="插件来源：本地目录路径或 git 仓库 URL")
+
+    sub.add_parser("plugins", help="列出已安装插件")
 
     args = parser.parse_args()
 
@@ -184,6 +325,10 @@ def main() -> int:
         return _cmd_doctor(args)
     elif args.command == "add-tool":
         return _cmd_add_tool(args)
+    elif args.command == "add-plugin":
+        return _cmd_add_plugin(args)
+    elif args.command == "plugins":
+        return _cmd_plugins(args)
     return 2
 
 

@@ -63,15 +63,30 @@ def test_register_tool_category_deps_logged():
 # —— 2. discover_tools 扫描能力 ——
 
 def test_discover_tools_finds_core_count():
-    """discover_tools 应该发现 20 个工具（不含 MCP — 动态装配）。"""
+    """discover_tools 应发现 20 个内置工具；插件工具另计（P2-9 插件规范）。"""
     # 清缓存，强制重新扫描
     import crawagent.tools.registry as reg
     reg._DISCOVERY_CACHE = None
     specs = reg.discover_tools()
     names = [s.name for s in specs]
 
-    # 期望 20 个（原 21 去掉 2 个 MCP，加 recommend_scripts）
-    assert len(names) == 20, f"discover_tools 应该发现 20 个，实际 {len(names)}: {names}"
+    # 内置（源码在 crawagent/ 下）= 20；插件（source_file 以 plugins/ 开头）另计
+    builtin = [s for s in specs if not s.source_file.startswith("plugins")]
+    assert len(builtin) == 20, f"内置工具应为 20 个，实际 {len(builtin)}: {[s.name for s in builtin]}"
+    assert len(names) == len(set(names)), f"工具名有重复: {names}"
+
+
+def test_discover_tools_includes_plugins():
+    """plugins/ 下的插件工具应被发现（example-rss 示例插件带 1 个工具）。"""
+    import crawagent.tools.registry as reg
+    reg._DISCOVERY_CACHE = None
+    specs = reg.discover_tools()
+    names = {s.name for s in specs}
+    assert "fetch_rss_feed" in names, "示例插件 example-rss 的 fetch_rss_feed 工具应被发现"
+    plugin_spec = next(s for s in specs if s.name == "fetch_rss_feed")
+    assert plugin_spec.source_file.startswith("plugins/"), (
+        f"插件工具 source_file 应以 plugins/ 开头: {plugin_spec.source_file}"
+    )
 
 
 def test_discover_tools_no_mcp():
