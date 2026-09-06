@@ -93,14 +93,14 @@ body::before {
 html.bg-active body::before { opacity: .25; } /* 丝绸纹理在照片上减淡 */
 
 html.bg-active .msg.ai {
-  background: color-mix(in srgb, var(--panel) 72%, transparent);
-  backdrop-filter: blur(14px) saturate(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  background: color-mix(in srgb, var(--panel) 45%, transparent);
+  backdrop-filter: blur(18px) saturate(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(1.1);
 }
 html.bg-active .msg.user {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  backdrop-filter: blur(14px) saturate(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  backdrop-filter: blur(18px) saturate(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(1.1);
 }
 html.bg-active .err {
   background: color-mix(in srgb, var(--bg) 62%, transparent);
