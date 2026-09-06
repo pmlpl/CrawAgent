@@ -2,31 +2,41 @@
 // 「高级」页签：抓取参数（超时/节流）、产物目录（展示+打开）、保留清理策略。
 // 值都存 .env，保存即生效（抓取参数）；目录本身走 .env 的 OUTPUT_DIR/DOWNLOADS_DIR 改（重启生效），
 // 这里只展示与直达；清理在每次后端启动时执行，本页只编辑策略数值。
+// 每张卡有自己的保存提示（saveTip 本地化，避免跨卡串显）。
+import { ref } from 'vue'
 import { useSettings } from '../../composables/useSettings'
 
 const { state, saveSettingsFields, openEcoFolder } = useSettings()
 
+const crawlTip = ref(null)    // {ok, msg}
+const retainTip = ref(null)
+
 // 空 input ↔ null（不清理/不设上限）互转
 const toNumOrNull = (v, kind = Number) => (v === '' || v === null || v === undefined ? null : kind(v))
 
+function _tip(res, okMsg) {
+  return res.ok ? { ok: true, msg: okMsg } : { ok: false, msg: '保存失败：' + (res.error || '未知错误') }
+}
+
 async function saveCrawl() {
-  await saveSettingsFields(
-    { request_timeout: toNumOrNull(state.adv.timeout), request_delay: toNumOrNull(state.adv.delay) },
-    '✓ 抓取参数已保存并生效'
-  )
+  state.saveTip = ''
+  const res = await saveSettingsFields({
+    request_timeout: toNumOrNull(state.adv.timeout),
+    request_delay: toNumOrNull(state.adv.delay),
+  })
+  crawlTip.value = _tip(res, '✓ 抓取参数已保存并生效')
 }
 
 async function saveRetention() {
-  await saveSettingsFields(
-    {
-      logs_retention_days: toNumOrNull(state.adv.logsDays, parseInt),
-      output_retention_days: toNumOrNull(state.adv.outputDays, parseInt),
-      downloads_retention_days: toNumOrNull(state.adv.downloadsDays, parseInt),
-      output_max_size_gb: toNumOrNull(state.adv.outputCapGb),
-      downloads_max_size_gb: toNumOrNull(state.adv.downloadsCapGb),
-    },
-    '✓ 保留策略已保存（下次启动清理时应用）'
-  )
+  state.saveTip = ''
+  const res = await saveSettingsFields({
+    logs_retention_days: toNumOrNull(state.adv.logsDays, parseInt),
+    output_retention_days: toNumOrNull(state.adv.outputDays, parseInt),
+    downloads_retention_days: toNumOrNull(state.adv.downloadsDays, parseInt),
+    output_max_size_gb: toNumOrNull(state.adv.outputCapGb),
+    downloads_max_size_gb: toNumOrNull(state.adv.downloadsCapGb),
+  })
+  retainTip.value = _tip(res, '✓ 保留策略已保存（下次启动清理时应用）')
 }
 </script>
 
@@ -49,6 +59,7 @@ async function saveRetention() {
           <span v-if="state.saving" class="spin" />保存
         </button>
       </div>
+      <div v-if="crawlTip" class="result" :class="crawlTip.ok ? 'ok' : 'err'" style="margin-top: 8px">{{ crawlTip.msg }}</div>
     </div>
   </section>
 
@@ -101,6 +112,7 @@ async function saveRetention() {
         <span v-if="state.saving" class="spin" />保存
       </button>
     </div>
+    <div v-if="retainTip" class="result" :class="retainTip.ok ? 'ok' : 'err'" style="margin-top: 8px">{{ retainTip.msg }}</div>
   </section>
 </template>
 

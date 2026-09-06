@@ -18,6 +18,7 @@ const BROWSER_OPTIONS = [
 const { bgImage, bgOpacity, setBg, setBgOpacity } = useBg()
 const bgFile = ref(null)
 const bgUploading = ref(false)
+const bgClearing = ref(false)
 const bgError = ref('') // 上传/压缩/保存失败的显式提示（失败必须报出来，不许静默吞掉）
 
 // 压缩参数：最长边 1920px + JPEG q0.82 → 产物 ~200-400KB，控制上传请求体与磁盘占用
@@ -88,8 +89,13 @@ async function onBgPick(e) {
 }
 
 async function clearBg() {
-  await setBg('')
-  bgError.value = ''
+  bgClearing.value = true
+  try {
+    await setBg('')
+    bgError.value = ''
+  } finally {
+    bgClearing.value = false
+  }
   if (bgFile.value) bgFile.value.value = ''
 }
 </script>
@@ -121,7 +127,9 @@ async function clearBg() {
           class="file-input"
           @change="onBgPick"
         />
-        <button v-if="bgImage" type="button" class="btn-ghost" @click="clearBg">清除背景</button>
+        <button v-if="bgImage" type="button" class="btn-ghost" :disabled="bgClearing" @click="clearBg">
+          <span v-if="bgClearing" class="spin" />清除背景
+        </button>
       </div>
       <div v-if="bgUploading" class="hint">处理中…</div>
       <div v-if="bgError" class="result err" style="margin-top:6px">{{ bgError }}</div>

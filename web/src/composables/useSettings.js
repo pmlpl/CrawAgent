@@ -16,6 +16,7 @@ const state = reactive({
   startBrowser: '',        // start 自动弹窗浏览器：'' 系统默认 / chrome / msedge / firefox
   testResult: null,        // {ok: bool, msg: string}
   saveTip: '',             // 操作提示文案
+  saveTipOk: null,         // 与 saveTip 配对的成功/失败分级（true=成功绿 / false=失败红 / null=中性）
   mcpAutostart: false,     // MCP 自动启动开关
   mcpStartCommand: '',     // MCP 服务拉起命令（高级：自定义，留空则用内置 anything-analyzer 启动）
   mcpConfigured: false,    // .env 里是否配置了 MCP_SERVERS
@@ -156,12 +157,17 @@ async function updateModel(form) { // {origProvider, origName, provider, model, 
   return false
 }
 
+function _tip(msg, ok) {
+  state.saveTip = msg
+  state.saveTipOk = ok
+}
+
 function _applyResult(data) {
   if (data.ok) {
     _applySnapshot(data)
     return true
   }
-  state.saveTip = data.error || '未知错误'
+  _tip(data.error || '未知错误', false)
   return false
 }
 
@@ -195,13 +201,14 @@ async function saveMcp() {
     })
     if (data.ok) {
       state.mcpStatus = data.mcp_status || ''
-      state.saveTip = {
+      const ok = state.mcpStatus === 'started' || state.mcpStatus === 'disabled'
+      _tip({
         started: '✓ MCP 服务已启动并接入 Agent',
         failed: '✗ 启动失败：命令已执行但服务 120 秒内未就绪，查看 logs/mcp_autostart.log 定位原因',
         disabled: 'MCP 自动启动已关闭',
-      }[state.mcpStatus] || '已保存'
+      }[state.mcpStatus] || '已保存', ok)
     } else {
-      state.saveTip = '保存失败：' + (data.error || '未知错误')
+      _tip('保存失败：' + (data.error || '未知错误'), false)
     }
   } catch (e) {
     state.saveTip = '保存失败：' + (e?.message || e)
@@ -267,9 +274,9 @@ async function startAA() {
     const res = await fetch('/api/mcp/start', { method: 'POST' })
     const data = await res.json()
     if (data.ok) {
-      state.saveTip = data.already_running ? 'anything-analyzer 已在运行 ✓' : 'anything-analyzer 已启动 ✓'
+      _tip(data.already_running ? 'anything-analyzer 已在运行 ✓' : 'anything-analyzer 已启动 ✓', true)
     } else {
-      state.saveTip = '启动失败: ' + (data.error || '未知错误')
+      _tip('启动失败: ' + (data.error || '未知错误'), false)
     }
   } catch (e) {
     state.saveTip = '请求失败: ' + e.message
@@ -304,10 +311,10 @@ async function saveMcpServers(servers) {
     if (data.ok) {
       state.ecoMcpServers = data.mcp_servers || []
       state.ecoMcpStatus = data.mcp_status || []
-      state.saveTip = '✓ MCP 配置已保存并生效（下一轮对话使用新工具列表）'
+      _tip('✓ MCP 配置已保存并生效（下一轮对话使用新工具列表）', true)
       return true
     }
-    state.saveTip = '保存失败：' + (data.error || '未知错误')
+    _tip('保存失败：' + (data.error || '未知错误'), false)
   } catch (e) {
     state.saveTip = '保存失败：' + (e?.message || e)
   } finally {
@@ -347,29 +354,24 @@ async function addMcpServer() {
 async function openEcoFolder(folder) {
   try {
     const data = await _post('/api/ecosystem/open-folder', { folder })
-    if (!data.ok) state.saveTip = data.error || '打开失败'
+    if (!data.ok) _tip(data.error || '打开失败', false)
   } catch (e) {
-    state.saveTip = '请求失败：' + e.message
+    _tip('请求失败：' + e.message, false)
   }
 }
 
-// 高级页通用保存：payload 直传 /api/settings，成功后写显式提示
-async function saveSettingsFields(payload, tip) {
+// 通用保存：payload 直传 /api/settings。返回 {ok, error}，提示由调用方就地分级展示
+// （不写全局 saveTip，避免跨卡片串显）
+async function saveSettingsFields(payload) {
   state.saving = true
-  state.saveTip = ''
   try {
     const data = await _post('/api/settings', payload)
-    if (data.ok) {
-      state.saveTip = tip || '已保存'
-      return true
-    }
-    state.saveTip = '保存失败：' + (data.error || '未知错误')
+    return { ok: !!data.ok, error: data.error || '' }
   } catch (e) {
-    state.saveTip = '保存失败：' + (e?.message || e)
+    return { ok: false, error: e?.message || String(e) }
   } finally {
     state.saving = false
   }
-  return false
 }
 
 export function useSettings() {

@@ -84,7 +84,6 @@ function mcpStatusClass(srv) {
       >
         <span v-if="state.saving" class="spin" />📂 打开启动脚本文件夹
       </button>
-      <p class="hint" v-if="state.saveTip" style="margin-top: 6px">{{ state.saveTip }}</p>
 
       <!-- 高级模式：自定义命令 -->
       <div v-if="state.mcpConfigured" class="field">
@@ -109,7 +108,7 @@ function mcpStatusClass(srv) {
       >
         {{ state.saving ? '启动中…' : '保存并启动' }}
       </button>
-      <p class="hint" v-if="state.saveTip">{{ state.saveTip }}</p>
+      <div v-if="state.saveTip" class="result" :class="state.saveTipOk === false ? 'err' : 'ok'" style="margin-top: 8px">{{ state.saveTip }}</div>
 
       <!-- ===== MCP 服务列表：开关 / 增删 / 状态 ===== -->
       <div class="field" style="margin-top:16px">
