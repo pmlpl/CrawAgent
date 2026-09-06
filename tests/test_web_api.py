@@ -274,3 +274,109 @@ def test_session_export_empty_session(client, monkeypatch):
     body = r.json()
     assert body["messages"] == []
     assert body["message_count"] == 0
+
+
+# ============================================================
+# 生态面板（P2-9 后补 UI）：GET /api/ecosystem + POST /api/mcp/servers/save
+# ============================================================
+
+ECO_MCP_SERVERS = [
+    {"name": "anything", "transport": "streamable_http", "url": "http://127.0.0.1:23816/mcp",
+     "headers": {"Authorization": "Bearer real-token-value-123456"}},
+    {"name": "fetch", "transport": "stdio", "command": "python", "args": ["-m", "mcp_server_fetch"]},
+]
+
+
+@pytest.fixture()
+def eco_client(tmp_path, monkeypatch):
+    """生态面板专用：隔离 .env + 隔离 skills 目录 + 假 skills 模块 get_settings。"""
+    import json as _json
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "THINKING_DEPTH=off\n"
+        f"MCP_SERVERS={_json.dumps(ECO_MCP_SERVERS, ensure_ascii=False)}\n",
+        encoding="utf-8",
+    )
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "demo-skill").mkdir(parents=True)
+    (skills_dir / "demo-skill" / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: 测试技能描述\n---\n正文\n", encoding="utf-8"
+    )
+
+    def fake_get_settings():
+        data = _parse_env(env_file)
+        return SimpleNamespace(
+            thinking_depth=data.get("THINKING_DEPTH", "off"),
+            MCP_AUTOSTART=False,
+            MCP_START_COMMAND="",
+            mcp_servers=data.get("MCP_SERVERS", ""),
+            skills_dirs=str(skills_dir),
+            project_root=tmp_path,
+        )
+
+    from crawagent.web.routers import settings as settings_router
+    from crawagent.graph import skills as skills_mod
+
+    monkeypatch.setattr(settings_router, "ENV_FILE", env_file)
+    monkeypatch.setattr(settings_router, "get_settings", fake_get_settings)
+    monkeypatch.setattr(skills_mod, "get_settings", fake_get_settings)
+
+    from fastapi.testclient import TestClient
+    from crawagent.web.server import app
+
+    c = TestClient(app)
+    c._eco_env_file = env_file  # 供用例直接读磁盘 .env 断言
+    yield c
+
+
+def test_ecosystem_snapshot_masks_token_and_lists_skills(eco_client):
+    """生态快照：技能列表含名称与来源；MCP 鉴权头脱敏（不出完整 token）。"""
+    data = eco_client.get("/api/ecosystem").json()
+    names = [s["name"] for s in data["skills"]]
+    assert "demo-skill" in names
+    demo = next(s for s in data["skills"] if s["name"] == "demo-skill")
+    assert demo["source"] == "builtin" and demo["description"] == "测试技能描述"
+    # MCP：掩码后不出现完整 token，且状态字段齐备
+    anything = next(s for s in data["mcp_servers"] if s["name"] == "anything")
+    assert anything["headers"]["Authorization"].endswith("***")
+    assert "real-token-value" not in anything["headers"]["Authorization"]
+    status = {s["name"]: s for s in data["mcp_status"]}
+    assert "disabled" in status["anything"] and "running" in status["anything"]
+
+
+def test_mcp_save_roundtrip_preserves_masked_token(eco_client):
+    """保存回写：掩码 header 不覆盖真实 token；disabled 标记落盘并生效。"""
+    eco = eco_client.get("/api/ecosystem").json()
+    servers = eco["mcp_servers"]
+    servers[1]["disabled"] = True  # 停用 fetch
+
+    r = eco_client.post("/api/mcp/servers/save", json={"servers": servers}).json()
+    assert r["ok"] is True
+    saved = next(s for s in r["mcp_servers"] if s["name"] == "fetch")
+    assert saved["disabled"] is True
+
+    # 磁盘 .env：真实 token 不被掩码覆盖（历史 Key 覆盖 Bug 的回归防线）+ disabled 落盘
+    disk_line = next(
+        ln for ln in eco_client._eco_env_file.read_text(encoding="utf-8").splitlines()
+        if ln.startswith("MCP_SERVERS=")
+    )
+    import json as _json
+    disk_servers = _json.loads(disk_line.split("=", 1)[1])
+    disk_anything = next(s for s in disk_servers if s["name"] == "anything")
+    assert disk_anything["headers"]["Authorization"] == "Bearer real-token-value-123456"
+    assert "***" not in disk_anything["headers"]["Authorization"]
+    assert next(s for s in disk_servers if s["name"] == "fetch")["disabled"] is True
+
+    # 出口永远脱敏：再 GET 一次，token 仍是掩码形态
+    again = eco_client.get("/api/ecosystem").json()
+    out_anything = next(s for s in again["mcp_servers"] if s["name"] == "anything")
+    assert out_anything["headers"]["Authorization"].endswith("***")
+
+
+def test_mcp_save_rejects_duplicate_names(eco_client):
+    """同名 server 拒绝保存。"""
+    eco = eco_client.get("/api/ecosystem").json()
+    servers = eco["mcp_servers"] + [dict(eco["mcp_servers"][0])]
+    r = eco_client.post("/api/mcp/servers/save", json={"servers": servers}).json()
+    assert r["ok"] is False and "重复" in r["error"]

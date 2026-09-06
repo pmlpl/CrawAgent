@@ -24,6 +24,15 @@ const state = reactive({
   aaBuiltinPath: '',
   aaBuiltinPort: 0,
   advancedMode: false,     // 是否展示自定义命令 textarea
+  // ---- 生态面板（P2-9）：技能 / MCP servers / 插件 ----
+  ecoSkills: [],           // [{name, description, source: builtin|plugin}]
+  ecoMcpServers: [],       // [{name, transport, url|command+args, headers(脱敏), disabled}]
+  ecoMcpStatus: [],        // [{name, transport, endpoint, disabled, running, tools}]
+  ecoPlugins: [],          // [{name, version, description, valid, error, dependencies}]
+  ecoSkillsDirs: '',
+  ecoLoading: false,
+  showMcpForm: false,
+  mcpForm: { name: '', transport: 'streamable_http', url: '', command: '', args: '' },
 })
 
 // 简化视图：给 App.vue/Header 等只读场景用
@@ -229,10 +238,86 @@ async function startAA() {
   }
 }
 
+// ---------- 生态面板（技能 / MCP servers / 插件）----------
+
+async function loadEcosystem() {
+  state.ecoLoading = true
+  try {
+    const r = await fetch('/api/ecosystem')
+    if (!r.ok) return
+    const d = await r.json()
+    state.ecoSkills = d.skills || []
+    state.ecoMcpServers = d.mcp_servers || []
+    state.ecoMcpStatus = d.mcp_status || []
+    state.ecoPlugins = d.plugins || []
+    state.ecoSkillsDirs = d.skills_dirs || ''
+  } catch (e) { /* 面板加载失败不打断设置页 */ } finally {
+    state.ecoLoading = false
+  }
+}
+
+async function saveMcpServers(servers) {
+  state.saving = true
+  state.saveTip = ''
+  try {
+    const data = await _post('/api/mcp/servers/save', { servers })
+    if (data.ok) {
+      state.ecoMcpServers = data.mcp_servers || []
+      state.ecoMcpStatus = data.mcp_status || []
+      state.saveTip = '✓ MCP 配置已保存并生效（下一轮对话使用新工具列表）'
+      return true
+    }
+    state.saveTip = '保存失败：' + (data.error || '未知错误')
+  } catch (e) {
+    state.saveTip = '保存失败：' + (e?.message || e)
+  } finally {
+    state.saving = false
+  }
+  return false
+}
+
+async function toggleServer(srv) {
+  const next = state.ecoMcpServers.map(s =>
+    s.name === srv.name ? { ...s, disabled: !s.disabled } : s
+  )
+  await saveMcpServers(next)
+}
+
+async function removeServer(srv) {
+  if (!confirm(`移除 MCP 服务「${srv.name}」？（可随时重新添加）`)) return
+  await saveMcpServers(state.ecoMcpServers.filter(s => s.name !== srv.name))
+}
+
+async function addMcpServer() {
+  const f = state.mcpForm
+  const entry = { name: f.name.trim(), transport: f.transport, disabled: false }
+  if (f.transport === 'stdio') {
+    entry.command = f.command.trim()
+    entry.args = f.args.trim() ? f.args.trim().split(/\s+/) : []
+  } else {
+    entry.url = f.url.trim()
+  }
+  const ok = await saveMcpServers([...state.ecoMcpServers, entry])
+  if (ok) {
+    state.showMcpForm = false
+    state.mcpForm = { name: '', transport: 'streamable_http', url: '', command: '', args: '' }
+  }
+}
+
+async function openEcoFolder(folder) {
+  try {
+    const data = await _post('/api/ecosystem/open-folder', { folder })
+    if (!data.ok) state.saveTip = data.error || '打开失败'
+  } catch (e) {
+    state.saveTip = '请求失败：' + e.message
+  }
+}
+
 export function useSettings() {
   return {
     state, config,
     load, addModel, updateModel, deleteModel,
     saveThinking, saveMcp, startAA, test, open, close, setSelectedModel,
+    loadEcosystem, saveMcpServers, toggleServer, removeServer, addMcpServer, openEcoFolder,
   }
 }

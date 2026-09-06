@@ -316,8 +316,161 @@ async def test_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
         return {"ok": False, "error": str(e) or e.__class__.__name__}
 
 
-@router.post("/api/mcp/start")
-async def start_mcp_route() -> dict[str, Any]:
+def _mask_mcp_headers(servers: list[dict]) -> list[dict]:
+    """MCP server 配置出前端前的鉴权头脱敏：值只留前 10 字符 + ***。
+
+    历史教训（Key 覆盖 Bug）：回写时含 * 的值视为掩码、还原为已存原值，
+    绝不把掩码写回 .env（见 _unmask_mcp_headers）。
+    """
+    out: list[dict] = []
+    for srv in servers:
+        s2 = {k: v for k, v in srv.items() if k != "headers"}
+        headers = srv.get("headers") or {}
+        if isinstance(headers, dict) and headers:
+            s2["headers"] = {
+                k: (str(v)[:10] + "***") if len(str(v)) > 12 else str(v)
+                for k, v in headers.items()
+            }
+        out.append(s2)
+    return out
+
+
+def _unmask_mcp_headers(incoming: list[dict], current: list[dict]) -> list[dict]:
+    """回写还原：头值含 *** 的视为掩码，用当前 .env 里的原值顶回（按 name+header key 对位）。"""
+    cur_by_name = {str(s.get("name")): s for s in current if isinstance(s, dict)}
+    out: list[dict] = []
+    for srv in incoming:
+        s2 = dict(srv)
+        headers = srv.get("headers")
+        if isinstance(headers, dict) and headers:
+            fixed = dict(headers)
+            old = (cur_by_name.get(str(srv.get("name"))) or {}).get("headers") or {}
+            for k, v in fixed.items():
+                if isinstance(v, str) and "***" in v and isinstance(old.get(k), str):
+                    fixed[k] = old[k]
+            s2["headers"] = fixed
+        out.append(s2)
+    return out
+
+
+@router.get("/api/ecosystem")
+async def get_ecosystem_route() -> dict[str, Any]:
+    """生态面板快照：技能索引 / MCP server 列表（脱敏+状态）/ 已装插件。"""
+    from crawagent.graph.skills import load_skill_index, mcp_servers_status
+    from crawagent.tools.registry import list_plugins
+
+    s = get_settings()
+    try:
+        raw_servers = json.loads(s.mcp_servers) if s.mcp_servers.strip() else []
+    except json.JSONDecodeError:
+        raw_servers = []
+
+    skills = []
+    for item in load_skill_index():
+        dir_norm = str(item["dir"]).replace("\\", "/")
+        is_plugin = "/plugins/" in dir_norm and "/skills/" in dir_norm
+        skills.append({
+            "name": item["name"],
+            "description": item["description"],
+            "source": "plugin" if is_plugin else "builtin",
+        })
+
+    return {
+        "skills": skills,
+        "skills_dirs": s.skills_dirs,
+        "mcp_servers": _mask_mcp_headers(raw_servers),
+        "mcp_status": mcp_servers_status(),
+        "plugins": list_plugins(),
+    }
+
+
+@router.post("/api/mcp/servers/save")
+async def save_mcp_servers_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """整表保存 MCP server 列表（设置页生态面板：开关/增删/编辑）。
+
+    - 含 *** 的 header 值视为脱敏掩码，还原为 .env 里的原值
+    - 保存后清 settings/MCP/Agent 三层缓存，并在后台预热一次握手
+      （stdio server 冷启动需数秒，前端保存按钮期间完成）
+    """
+    incoming = payload.get("servers")
+    if not isinstance(incoming, list):
+        return {"ok": False, "error": "servers 必须是数组"}
+
+    s = get_settings()
+    try:
+        current = json.loads(s.mcp_servers) if s.mcp_servers.strip() else []
+    except json.JSONDecodeError:
+        current = []
+
+    cleaned: list[dict] = []
+    seen_names: set[str] = set()
+    for srv in incoming:
+        if not isinstance(srv, dict):
+            continue
+        name = str(srv.get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "每个 server 都需要 name"}
+        if name in seen_names:
+            return {"ok": False, "error": f"server 名重复: {name}"}
+        seen_names.add(name)
+        entry = {
+            "name": name,
+            "transport": str(srv.get("transport") or "stdio"),
+            "disabled": bool(srv.get("disabled")),
+        }
+        if entry["transport"] == "stdio":
+            cmd = str(srv.get("command") or "").strip()
+            if not cmd:
+                return {"ok": False, "error": f"stdio server '{name}' 缺 command"}
+            entry["command"] = cmd
+            args = srv.get("args")
+            if isinstance(args, list) and args:
+                entry["args"] = [str(a) for a in args]
+        else:
+            url = str(srv.get("url") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                return {"ok": False, "error": f"server '{name}' 的 url 必须以 http(s):// 开头"}
+            entry["url"] = url
+        headers = srv.get("headers")
+        if isinstance(headers, dict) and headers:
+            entry["headers"] = headers
+        cleaned.append(entry)
+
+    cleaned = _unmask_mcp_headers(cleaned, current)
+    _save_env_updates({"MCP_SERVERS": json.dumps(cleaned, ensure_ascii=False)})
+    get_settings.cache_clear() if hasattr(get_settings, "cache_clear") else None
+
+    from crawagent.graph.skills import get_mcp_tools, reset_mcp_cache
+    from crawagent.web.state import reset_agent_cache
+
+    reset_mcp_cache()
+    reset_agent_cache()
+    # 预热握手：让保存完立刻能看到各 server 工具数（失败也不阻塞保存本身）
+    try:
+        await asyncio.to_thread(get_mcp_tools)
+    except Exception:
+        pass
+
+    from crawagent.graph.skills import mcp_servers_status
+    try:
+        raw = json.loads(get_settings().mcp_servers)
+    except json.JSONDecodeError:
+        raw = []
+    return {"ok": True, "mcp_servers": _mask_mcp_headers(raw), "mcp_status": mcp_servers_status()}
+
+
+@router.post("/api/ecosystem/open-folder")
+async def open_ecosystem_folder_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """在资源管理器中打开 skills/ 或 plugins/ 目录（本地部署，便于用户放文件）。"""
+    folder = str(payload.get("folder") or "").strip()
+    if folder not in ("skills", "plugins"):
+        return {"ok": False, "error": "folder 只支持 skills / plugins"}
+    root = Path(__file__).resolve().parents[3] / folder
+    root.mkdir(exist_ok=True)
+    import os
+
+    os.startfile(str(root)) if hasattr(os, "startfile") else None
+    return {"ok": True, "path": str(root)}
     """打开启动脚本文件夹，让用户双击 bat 启动 anything-analyzer。"""
     from crawagent.graph.skills import _port_listening, _find_anything_analyzer, _find_pnpm_cmd, _build_autostart_command
     from pathlib import Path

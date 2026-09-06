@@ -251,7 +251,12 @@ def ensure_mcp_started(wait: bool = True, force: bool = False) -> bool:
     if not s.mcp_servers.strip() or not (force or s.MCP_AUTOSTART):
         return False
     try:
-        first = json.loads(s.mcp_servers)[0]
+        # 取第一个未停用的 http 型 server 作为拉起目标（stdio 型由工具调用自动拉起）
+        first = next(
+            (s_ for s_ in json.loads(s.mcp_servers)
+             if not s_.get("disabled") and s_.get("transport", "stdio") != "stdio"),
+            {},
+        )
         url = first.get("url", "")
         host, port = "127.0.0.1", 0
         if url:
@@ -392,6 +397,54 @@ def _mcp_config_signature() -> str:
     return os.environ.get("MCP_SERVERS", "")
 
 
+def mcp_servers_status() -> list[dict]:
+    """每个 MCP server 的展示快照（设置页生态面板用）。
+
+    返回 [{name, transport, endpoint, disabled, running, tools}]：
+    - endpoint: http 型 = url；stdio 型 = command + args 摘要
+    - running:  http 型 = 端口在监听；stdio 型 = 命令文件存在（每次调用自动拉起）
+    - tools:    上次握手成功缓存的工具数（未握手过为 None）
+    """
+    s = get_settings()
+    try:
+        servers = json.loads(s.mcp_servers) if s.mcp_servers.strip() else []
+    except json.JSONDecodeError:
+        servers = []
+    result: list[dict] = []
+    for srv in servers:
+        if not isinstance(srv, dict) or not srv.get("name"):
+            continue
+        transport = srv.get("transport", "stdio")
+        endpoint, running = "", None
+        if transport == "stdio":
+            cmd = str(srv.get("command", ""))
+            args = " ".join(str(a) for a in srv.get("args", []))
+            endpoint = (cmd + " " + args).strip()
+            # 只做静态存在性检查（路径存在或 PATH 可解析），不 spawn 子进程
+            import shutil as _shutil
+            from pathlib import Path as _P
+            cmd_path = _P(cmd.replace("{project_root}", str(s.project_root)))
+            running = cmd_path.exists() or bool(cmd and _shutil.which(cmd))
+        else:
+            endpoint = str(srv.get("url", ""))
+            from urllib.parse import urlparse
+
+            parsed = urlparse(endpoint)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            running = _port_listening(host, port) if host in ("127.0.0.1", "localhost") else None
+        cached_tools = _mcp_tools_cache.get(str(srv.get("name"))) if _mcp_tools_cache else None
+        result.append({
+            "name": str(srv.get("name")),
+            "transport": transport,
+            "endpoint": endpoint,
+            "disabled": bool(srv.get("disabled")),
+            "running": running,
+            "tools": len(cached_tools) if cached_tools is not None else None,
+        })
+    return result
+
+
 def _expand_path_token(value: str) -> str:
     """展开 {project_root} 占位符（stdio command/args 里引用项目 venv 解释器等）。"""
     if "{project_root}" in value:
@@ -465,8 +518,10 @@ def get_mcp_tools() -> list:
     merged: dict[str, list] = {}
     for srv in servers:
         name = srv.get("name")
+        if not name or srv.get("disabled"):
+            continue  # 设置页生态面板按 server 开关：disabled = 跳过装载
         conn_entry = _server_conn(srv)
-        if not name or not conn_entry:
+        if not conn_entry:
             continue
         if name in _mcp_tools_cache and sig == _mcp_cache_signature:
             merged[name] = _mcp_tools_cache[name]  # 命中缓存，不再握手
