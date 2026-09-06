@@ -1,6 +1,6 @@
 # CrawAgent
 
-LLM 驱动的智能爬虫 Agent 框架。基于 LangChain + LangGraph，内置 20 个爬虫工具、6 个攻略技能、浏览器渲染、MCP 协议扩展（fetch / playwright / 抓包分析）与第三方插件规范（plugins/），支持会话持久化。
+LLM 驱动的智能爬虫 Agent 框架。基于 LangChain + LangGraph，内置 21 个爬虫工具、6 个攻略技能、浏览器渲染、MCP 协议扩展（fetch / playwright / 抓包分析）与第三方插件规范（plugins/），支持会话持久化。
 
 ## 快速开始
 
@@ -60,7 +60,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8006
 
 ## 工具列表
 
-Agent 默认装配以下工具（共 20 个）：
+Agent 默认装配以下工具（共 21 个）：
 
 ### 爬虫核心
 
@@ -70,6 +70,7 @@ Agent 默认装配以下工具（共 20 个）：
 | `browse_and_crawl` | Playwright 无头浏览器，处理 SPA/JS 动态页面 |
 | `extract_content` | HTML → Markdown 正文提取 |
 | `extract_list` | 列表页/索引页条目提取（标题+URL 配对） |
+| `extract_list_paged` | 静态多页列表一次抓全：自动翻页（下一页链接 + page/p/pageNum 参数）+ 跨页去重合并 |
 | `web_search` | 联网搜索第三方站点 |
 
 ### 数据持久化
