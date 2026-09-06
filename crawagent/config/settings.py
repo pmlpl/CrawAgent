@@ -108,9 +108,8 @@ class Settings(BaseSettings):
     # [{"name":"anything","transport":"sse","url":"http://127.0.0.1:23816/sse"}]
     # [{"name":"fs","transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","D:/data"]}]
     # 留空 = 不启用 MCP。构建 Agent 时把这些 server 的工具并入工具列表。
+    # 不做自动启动：AI 需要时经 ask_user 询问用户，同意后才拉起（check_mcp_status force 路径）。
     mcp_servers: str = ""
-    # True = MCP server 未运行时自动在后台拉起 MCP_START_COMMAND（前端开关）
-    MCP_AUTOSTART: bool = False
     # 拉起 MCP 服务的命令（shell 执行，如 bootstrap 脚本或 docker start ...）
     MCP_START_COMMAND: str = ""
     # ------------------------------------------------------------------

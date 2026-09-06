@@ -91,9 +91,6 @@ def _settings_snapshot() -> dict[str, Any]:
         ],
         "thinking_depth": s.thinking_depth,
         "start_browser": s.start_browser,
-        "mcp_autostart": s.MCP_AUTOSTART,
-        "mcp_start_command": s.MCP_START_COMMAND,
-        "mcp_configured": bool(s.mcp_servers.strip()),
         # 内置 anything-analyzer 检测状态（前端据此决定 UI：显示内置状态还是 textarea）
         "aa_builtin_found": _aa_status()["found"],
         "aa_builtin_path": _aa_status()["path"],
@@ -254,7 +251,7 @@ def _parse_opt_number(v: Any, *, kind: type, lo: float, hi: float, label: str) -
 
 @router.post("/api/settings")
 async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
-    """保存思考深度 / 启动浏览器 / MCP 开关 / 抓取参数 / 保留清理策略到 .env"""
+    """保存思考深度 / 启动浏览器 / 抓取参数 / 保留清理策略到 .env（MCP 自动启动已废除）"""
     updates: dict[str, str] = {}
     depth = payload.get("thinking_depth")
     if isinstance(depth, str) and depth.strip():
@@ -267,13 +264,6 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
             return {"ok": False, "error": f"不支持的浏览器: {val}（可选：chrome / msedge / firefox）"}
         updates["START_BROWSER"] = val
 
-    mcp_changed = False
-    if "mcp_autostart" in payload:
-        updates["MCP_AUTOSTART"] = "true" if payload["mcp_autostart"] else "false"
-        mcp_changed = True
-    if "mcp_start_command" in payload:
-        updates["MCP_START_COMMAND"] = str(payload["mcp_start_command"]).strip()
-        mcp_changed = True
 
     # ---- 高级页：产物/下载目录（解析为绝对路径并当场创建；工具层每次调用现读配置，保存即生效）----
     for key, env, label in (
@@ -322,31 +312,10 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
     if updates:
         _save_env_updates(updates)
 
-    mcp_status = None
-    if mcp_changed:
-        # 重读配置；开关打开时立即在后台拉起 MCP 服务，并清掉 Agent 缓存
-        # 让下一轮对话重建工具列表（含 MCP 工具），无需重启后端
-        get_settings.cache_clear() if hasattr(get_settings, "cache_clear") else None
-        from crawagent.graph.skills import ensure_mcp_started
-        from crawagent.web.state import reset_agent_cache
-
-        s = get_settings()
-        if s.MCP_AUTOSTART and s.mcp_servers.strip():
-            # 同步等到出结果：就绪 = started；120 秒超时 = failed（不再有中间态）
-            started = await asyncio.to_thread(ensure_mcp_started, True)
-            mcp_status = "started" if started else "failed"
-        else:
-            mcp_status = "disabled"
-        # 任何 MCP 配置变化都清 Agent 缓存，下一轮对话按新工具列表重建
-        try:
-            reset_agent_cache()
-        except Exception:
-            pass
     return {
         "ok": True, "saved": list(updates.keys()),
         "thinking_depth": get_settings().thinking_depth,
         "start_browser": get_settings().start_browser,
-        "mcp_status": mcp_status,
     }
 
 

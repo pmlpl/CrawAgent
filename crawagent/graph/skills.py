@@ -238,17 +238,17 @@ def _build_autostart_command(port: int, custom_cmd: str) -> tuple[str, str]:
     return "", ""
 
 
-def ensure_mcp_started(wait: bool = True, force: bool = False) -> bool:
-    """MCP server 未运行时自动拉起 anything-analyzer（内置）或执行自定义命令。
+def ensure_mcp_started(wait: bool = True, force: bool = True) -> bool:
+    """显式拉起 MCP server（anything-analyzer 内置 / 自定义命令）。
 
-    force=True：绕过 MCP_AUTOSTART 开关——AI 在对话里显式检查 MCP 状态时
-    视为用户授权拉起（仍受配置存在性与进程级一次守卫约束）。
+    自动启动已废除：只有显式调用才会拉起（AI 在对话里经 ask_user 询问用户、
+    用户同意后走 check_mcp_status 到这里），不存在后台静默自动启动。
 
     Returns: True = 服务已就绪（本来就活着或拉起成功）。
     """
     global _mcp_spawned
     s = get_settings()
-    if not s.mcp_servers.strip() or not (force or s.MCP_AUTOSTART):
+    if not s.mcp_servers.strip():
         return False
     try:
         # 取第一个未停用的 http 型 server 作为拉起目标（stdio 型由工具调用自动拉起）

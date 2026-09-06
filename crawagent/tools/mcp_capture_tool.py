@@ -426,10 +426,9 @@ def build_mcp_tools() -> list:
     final = [check_mcp_status, wait_capture_ready]
 
     if mcp_enabled:
-        # 开关开着但服务可能没起：按设置里的 MCP_AUTOSTART 自动拉起。
-        # 内部有守卫：已在运行 / 开关没开（立即返回不阻塞）/ 本进程已拉起过。
-        # 拉起成功 → 下面的原生 MCP 工具就能正常装进本轮工具箱。
-        ensure_mcp_started(wait=True)
+        # 不做启动期自动拉起（双开根源）：MCP server 没运行时其工具本轮装不进来，
+        # AI 需要时会经 ask_user 询问用户，同意后走 check_mcp_status(force) 拉起
+        # 并重建 Agent 工具箱。这里只做装配，绝不启动服务。
         try:
             raw_tools = _get_raw_mcp_tools()
             for t in raw_tools:
