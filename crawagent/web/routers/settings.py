@@ -275,6 +275,25 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
         updates["MCP_START_COMMAND"] = str(payload["mcp_start_command"]).strip()
         mcp_changed = True
 
+    # ---- 高级页：产物/下载目录（解析为绝对路径并当场创建；工具层每次调用现读配置，保存即生效）----
+    for key, env, label in (
+        ("output_dir", "OUTPUT_DIR", "文本产物目录"),
+        ("downloads_dir", "DOWNLOADS_DIR", "媒体下载目录"),
+    ):
+        if key not in payload:
+            continue
+        raw = str(payload.get(key) or "").strip().strip('"').strip("'")
+        if not raw:
+            return {"ok": False, "error": f"{label}不能为空"}
+        p = Path(raw)
+        if not p.is_absolute():
+            p = Path(__file__).resolve().parents[3] / p
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return {"ok": False, "error": f"{label}创建失败：{e}"}
+        updates[env] = str(p)
+
     # ---- 高级页（T2）：抓取参数 + 保留清理策略，统一数值表 ----
     # nullable=True 的字段 None → 落盘 "null"（= 不清理/不设上限，见 Settings.env_parse_none_str）；
     # 必填字段（超时/间隔）清空直接拒绝，避免落盘 "None" 炸掉下次启动的配置解析

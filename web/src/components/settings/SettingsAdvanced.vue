@@ -1,17 +1,19 @@
 <script setup>
-// 「高级」页签：抓取参数（超时/节流）、产物目录（展示+打开）、保留清理策略。
-// 值都存 .env，保存即生效（抓取参数）；目录本身走 .env 的 OUTPUT_DIR/DOWNLOADS_DIR 改（重启生效），
-// 这里只展示与直达；清理在每次后端启动时执行，本页只编辑策略数值。
+// 「高级」页签：抓取参数（超时/节流）、产物目录（可改存放位置 + 打开）、保留清理策略。
+// 值都存 .env：抓取参数保存即生效；目录保存即解析绝对路径并创建，下一次抓取立即生效（无需重启）；
+// 清理在每次后端启动时执行，本页只编辑策略数值。
 // 每张卡有自己的保存提示（saveTip 本地化，避免跨卡串显）。
 import { ref } from 'vue'
 import { useSettings } from '../../composables/useSettings'
 
-const { state, saveSettingsFields, openEcoFolder } = useSettings()
+const { state, load, saveSettingsFields, openEcoFolder } = useSettings()
 
 const crawlTip = ref(null)    // {ok, msg}
 const retainTip = ref(null)
+const dirTip = ref(null)
 const savingCrawl = ref(false)
 const savingRetain = ref(false)
+const savingDirs = ref(false)
 
 // 空 input ↔ null（不清理/不设上限）互转
 const toNumOrNull = (v, kind = Number) => (v === '' || v === null || v === undefined ? null : kind(v))
@@ -50,6 +52,21 @@ async function saveRetention() {
     savingRetain.value = false
   }
 }
+
+async function saveDirs() {
+  if (savingDirs.value) return
+  savingDirs.value = true
+  try {
+    const res = await saveSettingsFields({
+      output_dir: state.adv.outputDir.trim(),
+      downloads_dir: state.adv.downloadsDir.trim(),
+    })
+    dirTip.value = _toTip(res, '✓ 目录已保存并生效（下一次抓取即用新位置）')
+    if (res.ok) await load() // 回读快照，把可能填的相对路径规范成服务端解析后的绝对路径
+  } finally {
+    savingDirs.value = false
+  }
+}
 </script>
 
 <template>
@@ -79,19 +96,25 @@ async function saveRetention() {
     <h2 class="card-title">产物目录</h2>
     <div class="field" style="margin-bottom: 14px">
       <div class="list-head">
-        <span class="label">文本产物（md / txt / json）</span>
-        <button type="button" class="btn-ghost" style="height: 32px" @click="openEcoFolder('output')">打开目录</button>
+        <span class="label">文本产物（md / txt / json）存放位置</span>
+        <button type="button" class="btn-ghost btn-sm" @click="openEcoFolder('output')">打开目录</button>
       </div>
-      <p class="mono dir-path">{{ state.adv.outputDir || '（未获取）' }}</p>
+      <input v-model="state.adv.outputDir" placeholder="项目根/output" spellcheck="false" autocomplete="off" />
     </div>
-    <div class="field">
+    <div class="field" style="margin-bottom: 14px">
       <div class="list-head">
-        <span class="label">媒体下载（图片 / 视频 / 音频）</span>
-        <button type="button" class="btn-ghost" style="height: 32px" @click="openEcoFolder('downloads')">打开目录</button>
+        <span class="label">媒体下载（图片 / 视频 / 音频）存放位置</span>
+        <button type="button" class="btn-ghost btn-sm" @click="openEcoFolder('downloads')">打开目录</button>
       </div>
-      <p class="mono dir-path">{{ state.adv.downloadsDir || '（未获取）' }}</p>
+      <input v-model="state.adv.downloadsDir" placeholder="项目根/downloads" spellcheck="false" autocomplete="off" />
     </div>
-    <p class="hint">要改目录位置：编辑 .env 的 OUTPUT_DIR / DOWNLOADS_DIR 后重启后端。爬取产物请勿手动删改正在写入的文件。</p>
+    <div class="actions" style="justify-content: flex-start">
+      <button type="button" class="btn-primary" :disabled="savingDirs" @click="saveDirs">
+        <span v-if="savingDirs" class="spin" />保存目录
+      </button>
+    </div>
+    <div v-if="dirTip" class="result" :class="dirTip.ok ? 'ok' : 'err'" style="margin-top: 8px">{{ dirTip.msg }}</div>
+    <p class="hint">可填绝对路径或相对项目根的路径；保存即写入 .env、自动创建目录，下一次抓取立即生效（无需重启）。「打开目录」始终跟随最新设置。</p>
   </section>
 
   <section class="card">
@@ -129,15 +152,6 @@ async function saveRetention() {
 </template>
 
 <style scoped>
-.dir-path {
-  font-size: 12px;
-  color: var(--dim);
-  word-break: break-all;
-  padding: 8px 12px;
-  background: var(--panel-2);
-  border-radius: 8px;
-  border: 1px solid var(--line);
-}
 .adv-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

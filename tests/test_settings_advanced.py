@@ -104,3 +104,34 @@ def test_open_folder_whitelist_includes_artifacts(client, monkeypatch):
     assert r.json()["ok"] is True
     r = client.post("/api/ecosystem/open-folder", json={"folder": "c:/windows"})
     assert r.json()["ok"] is False
+
+
+def test_save_dirs_roundtrip_creates_and_writes(client, tmp_path):
+    out = tmp_path / "产物" / "output"
+    dl = tmp_path / "媒体" / "downloads"
+    r = client.post("/api/settings", json={"output_dir": str(out), "downloads_dir": str(dl)})
+    assert r.json()["ok"] is True
+    assert out.is_dir() and dl.is_dir()  # 目录当场创建，「打开目录」按钮立刻可用
+    text = _env_text()
+    assert f"OUTPUT_DIR={out}" in text
+    assert f"DOWNLOADS_DIR={dl}" in text
+
+
+def test_save_dirs_rejects_empty(client):
+    r = client.post("/api/settings", json={"output_dir": ""})
+    body = r.json()
+    assert body["ok"] is False and "不能为空" in body["error"]
+
+
+def test_save_dirs_resolves_relative_against_project_root(client):
+    import shutil
+    from pathlib import Path
+    name = "output_dir_relative_test_tmp"
+    root = Path(settings_mod.__file__).resolve().parents[3]
+    try:
+        r = client.post("/api/settings", json={"output_dir": name})
+        assert r.json()["ok"] is True
+        line = [l for l in _env_text().splitlines() if l.startswith("OUTPUT_DIR=")][0]
+        assert line == f"OUTPUT_DIR={root / name}"  # 相对路径已解析为项目根下绝对路径
+    finally:
+        shutil.rmtree(root / name, ignore_errors=True)
