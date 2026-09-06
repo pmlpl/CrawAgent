@@ -13,7 +13,7 @@ import { useBg } from './composables/useBg'
 const chat = useChat()
 const { theme } = useTheme()
 const settings = useSettings()
-useBg() // 启动即恢复自定义背景（CSS 变量），否则刷新进聊天页背景会丢
+useBg() // 启动即从服务端恢复自定义背景（CSS 变量），否则刷新进聊天页背景会丢
 const route = useRoute()
 const router = useRouter()
 

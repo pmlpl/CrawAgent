@@ -86,14 +86,13 @@ async function remove(m) {
   await deleteModel(m.provider, m.name)
 }
 
-// ---------- 背景图（useBg 组合式：localStorage 持久化，App.vue 启动时恢复） ----------
+// ---------- 背景图（useBg 组合式：服务端 data/ 持久化 [ADR-0001]，App.vue 启动时恢复） ----------
 const { bgImage, bgOpacity, setBg, setBgOpacity } = useBg()
 const bgFile = ref(null)
 const bgUploading = ref(false)
-const bgError = ref('') // 上传/压缩/持久化失败的显式提示（此前配额超限被静默吞掉，用户以为"格式不支持"）
+const bgError = ref('') // 上传/压缩/保存失败的显式提示（失败必须报出来，不许静默吞掉）
 
-// 压缩参数：最长边 1920px + JPEG q0.82 → 产物 ~200-400KB，任何来源的图都能塞进
-// localStorage ~5MB 配额（base64 按 UTF-16 计费 ≈ 原始字节的 2.7 倍）
+// 压缩参数：最长边 1920px + JPEG q0.82 → 产物 ~200-400KB，控制上传请求体与磁盘占用
 const BG_MAX_DIM = 1920
 const BG_QUALITY = 0.82
 
@@ -148,9 +147,9 @@ async function onBgPick(e) {
     const rawUrl = await _readAsDataURL(f)
     // 统一走 canvas 压缩：不限制来源体积，顺带把 webp/avif 等转码成通用 JPEG
     const compressed = await compressImage(rawUrl)
-    const ok = setBg(compressed)
+    const ok = await setBg(compressed)
     if (!ok) {
-      bgError.value = '背景已应用，但压缩后仍超出本地存储上限，刷新后会丢失（请换一张更小的图）'
+      bgError.value = '背景已应用，但保存到服务端失败，刷新后会丢失（请检查后端是否在运行）'
     }
   } catch (err) {
     bgError.value = '设置背景失败：' + (err?.message || err)
@@ -160,8 +159,8 @@ async function onBgPick(e) {
   }
 }
 
-function clearBg() {
-  setBg('')
+async function clearBg() {
+  await setBg('')
   bgError.value = ''
   if (bgFile.value) bgFile.value.value = ''
 }
@@ -332,7 +331,7 @@ onMounted(async () => {
 
       <div class="field">
         <span class="label">背景图</span>
-        <p class="hint">上传一张图片作为聊天页背景板（仅本地保存，不上传服务器）。大图自动压缩到 1920px 内再存，jpg/png/webp/gif/bmp/avif 均可</p>
+        <p class="hint">上传一张图片作为聊天页背景板（保存到本机服务端 data/，localhost 与 127.0.0.1、不同浏览器均共享同一份）。大图自动压缩到 1920px 内再上传，jpg/png/webp/gif/bmp/avif 均可</p>
         <div class="bg-row">
           <input
             ref="bgFile"
