@@ -10,33 +10,45 @@ const { state, saveSettingsFields, openEcoFolder } = useSettings()
 
 const crawlTip = ref(null)    // {ok, msg}
 const retainTip = ref(null)
+const savingCrawl = ref(false)
+const savingRetain = ref(false)
 
 // 空 input ↔ null（不清理/不设上限）互转
 const toNumOrNull = (v, kind = Number) => (v === '' || v === null || v === undefined ? null : kind(v))
 
-function _tip(res, okMsg) {
+function _toTip(res, okMsg) {
   return res.ok ? { ok: true, msg: okMsg } : { ok: false, msg: '保存失败：' + (res.error || '未知错误') }
 }
 
 async function saveCrawl() {
-  state.saveTip = ''
-  const res = await saveSettingsFields({
-    request_timeout: toNumOrNull(state.adv.timeout),
-    request_delay: toNumOrNull(state.adv.delay),
-  })
-  crawlTip.value = _tip(res, '✓ 抓取参数已保存并生效')
+  if (savingCrawl.value) return
+  savingCrawl.value = true
+  try {
+    const res = await saveSettingsFields({
+      request_timeout: toNumOrNull(state.adv.timeout),
+      request_delay: toNumOrNull(state.adv.delay),
+    })
+    crawlTip.value = _toTip(res, '✓ 抓取参数已保存并生效')
+  } finally {
+    savingCrawl.value = false
+  }
 }
 
 async function saveRetention() {
-  state.saveTip = ''
-  const res = await saveSettingsFields({
-    logs_retention_days: toNumOrNull(state.adv.logsDays, parseInt),
-    output_retention_days: toNumOrNull(state.adv.outputDays, parseInt),
-    downloads_retention_days: toNumOrNull(state.adv.downloadsDays, parseInt),
-    output_max_size_gb: toNumOrNull(state.adv.outputCapGb),
-    downloads_max_size_gb: toNumOrNull(state.adv.downloadsCapGb),
-  })
-  retainTip.value = _tip(res, '✓ 保留策略已保存（下次启动清理时应用）')
+  if (savingRetain.value) return
+  savingRetain.value = true
+  try {
+    const res = await saveSettingsFields({
+      logs_retention_days: toNumOrNull(state.adv.logsDays, parseInt),
+      output_retention_days: toNumOrNull(state.adv.outputDays, parseInt),
+      downloads_retention_days: toNumOrNull(state.adv.downloadsDays, parseInt),
+      output_max_size_gb: toNumOrNull(state.adv.outputCapGb),
+      downloads_max_size_gb: toNumOrNull(state.adv.downloadsCapGb),
+    })
+    retainTip.value = _toTip(res, '✓ 保留策略已保存（下次启动清理时应用）')
+  } finally {
+    savingRetain.value = false
+  }
 }
 </script>
 
@@ -55,8 +67,8 @@ async function saveRetention() {
         <span class="hint">两次请求之间的强制间隔，防高频被封（0-60，默认 1）</span>
       </label>
       <div class="actions" style="justify-content: flex-start">
-        <button type="button" class="btn-primary" :disabled="state.saving" @click="saveCrawl">
-          <span v-if="state.saving" class="spin" />保存
+        <button type="button" class="btn-primary" :disabled="savingCrawl" @click="saveCrawl">
+          <span v-if="savingCrawl" class="spin" />保存
         </button>
       </div>
       <div v-if="crawlTip" class="result" :class="crawlTip.ok ? 'ok' : 'err'" style="margin-top: 8px">{{ crawlTip.msg }}</div>
@@ -108,8 +120,8 @@ async function saveRetention() {
       </label>
     </div>
     <div class="actions" style="justify-content: flex-start">
-      <button type="button" class="btn-primary" :disabled="state.saving" @click="saveRetention">
-        <span v-if="state.saving" class="spin" />保存
+      <button type="button" class="btn-primary" :disabled="savingRetain" @click="saveRetention">
+        <span v-if="savingRetain" class="spin" />保存
       </button>
     </div>
     <div v-if="retainTip" class="result" :class="retainTip.ok ? 'ok' : 'err'" style="margin-top: 8px">{{ retainTip.msg }}</div>

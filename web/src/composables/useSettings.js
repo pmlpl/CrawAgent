@@ -132,7 +132,7 @@ async function addModel(form) { // {provider, model, apiKey, baseUrl}
     })
     if (_applyResult(data)) return true
   } catch (e) {
-    state.saveTip = '添加失败：' + (e?.message || e)
+    _tip('添加失败：' + (e?.message || e), false)
   } finally {
     state.saving = false
   }
@@ -150,7 +150,7 @@ async function updateModel(form) { // {origProvider, origName, provider, model, 
     })
     if (_applyResult(data)) return true
   } catch (e) {
-    state.saveTip = '保存失败：' + (e?.message || e)
+    _tip('保存失败：' + (e?.message || e), false)
   } finally {
     state.saving = false
   }
@@ -176,7 +176,7 @@ async function deleteModel(provider, name) {
     const data = await _post('/api/models/delete', { provider, name })
     return _applyResult(data)
   } catch (e) {
-    state.saveTip = '删除失败：' + (e?.message || e)
+    _tip('删除失败：' + (e?.message || e), false)
     return false
   }
 }
@@ -184,10 +184,10 @@ async function deleteModel(provider, name) {
 async function saveThinking() {
   try {
     const data = await _post('/api/settings', { thinking_depth: state.thinkingDepth })
-    if (data.ok) state.saveTip = '思考深度已保存'
-    else state.saveTip = '保存失败：' + (data.error || '未知错误')
+    if (data.ok) _tip('思考深度已保存', true)
+    else _tip('保存失败：' + (data.error || '未知错误'), false)
   } catch (e) {
-    state.saveTip = '保存失败：' + (e?.message || e)
+    _tip('保存失败：' + (e?.message || e), false)
   }
 }
 
@@ -211,7 +211,7 @@ async function saveMcp() {
       _tip('保存失败：' + (data.error || '未知错误'), false)
     }
   } catch (e) {
-    state.saveTip = '保存失败：' + (e?.message || e)
+    _tip('保存失败：' + (e?.message || e), false)
   } finally {
     state.saving = false
   }
@@ -224,9 +224,9 @@ async function saveStartBrowser(val) {
       state.startBrowser = data.start_browser ?? val
       return true
     }
-    state.saveTip = '保存失败：' + (data.error || '未知错误')
+    _tip('保存失败：' + (data.error || '未知错误'), false)
   } catch (e) {
-    state.saveTip = '保存失败：' + (e?.message || e)
+    _tip('保存失败：' + (e?.message || e), false)
   }
   return false
 }
@@ -279,7 +279,7 @@ async function startAA() {
       _tip('启动失败: ' + (data.error || '未知错误'), false)
     }
   } catch (e) {
-    state.saveTip = '请求失败: ' + e.message
+    _tip('请求失败: ' + e.message, false)
   } finally {
     state.saving = false
   }
@@ -316,7 +316,7 @@ async function saveMcpServers(servers) {
     }
     _tip('保存失败：' + (data.error || '未知错误'), false)
   } catch (e) {
-    state.saveTip = '保存失败：' + (e?.message || e)
+    _tip('保存失败：' + (e?.message || e), false)
   } finally {
     state.saving = false
   }
@@ -360,17 +360,14 @@ async function openEcoFolder(folder) {
   }
 }
 
-// 通用保存：payload 直传 /api/settings。返回 {ok, error}，提示由调用方就地分级展示
-// （不写全局 saveTip，避免跨卡片串显）
+// 通用保存：payload 直传 /api/settings。返回 {ok, error}，提示与加载态由调用方就地管理
+// （不写全局 saveTip/saving，避免跨卡片串显）
 async function saveSettingsFields(payload) {
-  state.saving = true
   try {
     const data = await _post('/api/settings', payload)
     return { ok: !!data.ok, error: data.error || '' }
   } catch (e) {
     return { ok: false, error: e?.message || String(e) }
-  } finally {
-    state.saving = false
   }
 }
 

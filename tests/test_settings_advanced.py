@@ -17,7 +17,7 @@ def client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
-def _env_text(tmp_path):
+def _env_text():
     return settings_mod.ENV_FILE.read_text(encoding="utf-8")
 
 
@@ -32,9 +32,17 @@ def test_snapshot_contains_advanced_fields(client):
 def test_save_crawl_params_roundtrip(client):
     r = client.post("/api/settings", json={"request_timeout": 45, "request_delay": 2.5})
     assert r.json()["ok"] is True
-    text = _env_text(client)
+    text = _env_text()
     assert "REQUEST_TIMEOUT=45" in text
     assert "REQUEST_DELAY=2.5" in text
+
+
+def test_save_crawl_params_rejects_empty(client):
+    # 必填参数清空必须拒绝：落盘 "None" 会让下次启动的 pydantic 解析直接崩
+    for empty in ("", None):
+        r = client.post("/api/settings", json={"request_timeout": empty})
+        body = r.json()
+        assert body["ok"] is False and "不能为空" in body["error"], (empty, body)
 
 
 def test_save_crawl_params_rejects_out_of_range(client):
@@ -53,7 +61,7 @@ def test_save_retention_days_and_caps(client):
         "downloads_max_size_gb": 10,
     })
     assert r.json()["ok"] is True
-    text = _env_text(client)
+    text = _env_text()
     assert "LOGS_RETENTION_DAYS=7" in text
     assert "DOWNLOADS_RETENTION_DAYS=90" in text
     assert "DOWNLOADS_MAX_SIZE_GB=10" in text
@@ -64,7 +72,7 @@ def test_save_retention_days_and_caps(client):
 def test_retention_null_means_never_clean(client):
     r = client.post("/api/settings", json={"output_retention_days": None})
     assert r.json()["ok"] is True
-    assert "OUTPUT_RETENTION_DAYS=null" in _env_text(client)
+    assert "OUTPUT_RETENTION_DAYS=null" in _env_text()
 
 
 def test_retention_rejects_out_of_range(client):

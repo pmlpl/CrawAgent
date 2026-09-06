@@ -275,40 +275,30 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
         updates["MCP_START_COMMAND"] = str(payload["mcp_start_command"]).strip()
         mcp_changed = True
 
-    # ---- 高级页（T2）：抓取参数 ----
-    if "request_timeout" in payload:
-        v, err = _parse_opt_number(payload["request_timeout"], kind=int, lo=5, hi=300, label="抓取超时（秒）")
+    # ---- 高级页（T2）：抓取参数 + 保留清理策略，统一数值表 ----
+    # nullable=True 的字段 None → 落盘 "null"（= 不清理/不设上限，见 Settings.env_parse_none_str）；
+    # 必填字段（超时/间隔）清空直接拒绝，避免落盘 "None" 炸掉下次启动的配置解析
+    _ADV_NUMERIC = (
+        ("request_timeout", "REQUEST_TIMEOUT", int, 5, 300, "抓取超时（秒）", False),
+        ("request_delay", "REQUEST_DELAY", float, 0, 60, "请求间隔（秒）", False),
+        ("logs_retention_days", "LOGS_RETENTION_DAYS", int, 1, 3650, "日志保留天数", True),
+        ("output_retention_days", "OUTPUT_RETENTION_DAYS", int, 1, 3650, "产物保留天数", True),
+        ("downloads_retention_days", "DOWNLOADS_RETENTION_DAYS", int, 1, 3650, "下载保留天数", True),
+        ("output_max_size_gb", "OUTPUT_MAX_SIZE_GB", float, 0.1, 1024, "产物容量上限（GB）", True),
+        ("downloads_max_size_gb", "DOWNLOADS_MAX_SIZE_GB", float, 0.1, 1024, "下载容量上限（GB）", True),
+    )
+    for key, env, kind, lo, hi, label, nullable in _ADV_NUMERIC:
+        if key not in payload:
+            continue
+        v, err = _parse_opt_number(payload[key], kind=kind, lo=lo, hi=hi, label=label)
         if err:
             return {"ok": False, "error": err}
-        updates["REQUEST_TIMEOUT"] = str(v)
-    if "request_delay" in payload:
-        v, err = _parse_opt_number(payload["request_delay"], kind=float, lo=0, hi=60, label="请求间隔（秒）")
-        if err:
-            return {"ok": False, "error": err}
-        updates["REQUEST_DELAY"] = str(v)
-
-    # ---- 高级页（T2）：保留清理策略（None = 该维度不清理 / 不设上限，落盘为 null）----
-    _RETENTION_INTS = (
-        ("logs_retention_days", "LOGS_RETENTION_DAYS", "日志保留天数"),
-        ("output_retention_days", "OUTPUT_RETENTION_DAYS", "产物保留天数"),
-        ("downloads_retention_days", "DOWNLOADS_RETENTION_DAYS", "下载保留天数"),
-    )
-    for key, env, label in _RETENTION_INTS:
-        if key in payload:
-            v, err = _parse_opt_number(payload[key], kind=int, lo=1, hi=3650, label=label)
-            if err:
-                return {"ok": False, "error": err}
-            updates[env] = "null" if v is None else str(v)
-    _SIZE_CAPS = (
-        ("output_max_size_gb", "OUTPUT_MAX_SIZE_GB", "产物容量上限（GB）"),
-        ("downloads_max_size_gb", "DOWNLOADS_MAX_SIZE_GB", "下载容量上限（GB）"),
-    )
-    for key, env, label in _SIZE_CAPS:
-        if key in payload:
-            v, err = _parse_opt_number(payload[key], kind=float, lo=0.1, hi=1024, label=label)
-            if err:
-                return {"ok": False, "error": err}
-            updates[env] = "null" if v is None else str(v)
+        if v is None:
+            if not nullable:
+                return {"ok": False, "error": f"{label}不能为空"}
+            updates[env] = "null"
+        else:
+            updates[env] = str(v)
 
     if updates:
         _save_env_updates(updates)
