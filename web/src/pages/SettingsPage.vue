@@ -85,23 +85,27 @@ onMounted(async () => {
 .settings-tabs {
   display: flex;
   gap: 4px;
-  border-bottom: 1px solid var(--line);
+  width: fit-content;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
 }
 .settings-tab {
   appearance: none;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: 7px;
   color: var(--dim);
   font-size: 13.5px;
   font-weight: 500;
-  padding: 10px 14px;
+  padding: 8px 16px;
   cursor: pointer;
-  margin-bottom: -1px;
-  transition: color .15s, border-color .15s;
+  transition: color .15s, background .15s;
 }
 .settings-tab:hover { color: var(--accent); }
-.settings-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.settings-tab.active { background: var(--accent-soft); color: var(--accent); }
+.settings-tab.active:hover { color: var(--accent); }
 
 @media (max-width: 640px) {
   .page { padding: 20px 14px 24px; }

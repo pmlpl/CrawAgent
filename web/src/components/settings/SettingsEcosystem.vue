@@ -115,7 +115,7 @@ function mcpStatusClass(srv) {
       <div class="field" style="margin-top:16px">
         <div class="list-head">
           <span class="label">已配置的 MCP 服务（{{ state.ecoMcpServers.length }}）</span>
-          <button type="button" class="btn-ghost" style="height:32px" @click="state.showMcpForm = !state.showMcpForm">
+          <button type="button" class="btn-ghost btn-sm" @click="state.showMcpForm = !state.showMcpForm">
             {{ state.showMcpForm ? '收起表单' : '添加服务' }}
           </button>
         </div>
@@ -149,7 +149,7 @@ function mcpStatusClass(srv) {
             </label>
           </template>
           <div class="actions" style="justify-content:flex-start">
-            <button type="submit" class="btn-primary" style="height:34px" :disabled="state.saving || !state.mcpForm.name">
+            <button type="submit" class="btn-primary btn-sm" :disabled="state.saving || !state.mcpForm.name">
               <span v-if="state.saving" class="spin" />保存并接入
             </button>
           </div>
@@ -172,7 +172,7 @@ function mcpStatusClass(srv) {
               <td class="mono endpoint-cell">{{ s.transport === 'stdio' ? s.command : s.url }}</td>
               <td><span class="srv-status" :class="mcpStatusClass(s)">{{ mcpStatusText(s) }}</span></td>
               <td class="row-actions">
-                <button type="button" class="btn-ghost" style="height:28px; padding:0 10px; font-size:12px" @click="toggleServer(s)">
+                <button type="button" class="btn-ghost btn-sm" @click="toggleServer(s)">
                   {{ s.disabled ? '启用' : '停用' }}
                 </button>
                 <button type="button" class="icon-btn danger" aria-label="移除" title="移除" @click="removeServer(s)">
@@ -191,7 +191,7 @@ function mcpStatusClass(srv) {
     <h2 class="card-title">技能（SKILL.md）</h2>
     <div class="list-head" style="margin-bottom:8px">
       <span class="label">已加载 {{ state.ecoSkills.length }} 个技能 · Agent 按任务自动调用（read_skill）</span>
-      <button type="button" class="btn-ghost" style="height:32px" @click="openEcoFolder('skills')">打开 skills 目录</button>
+      <button type="button" class="btn-ghost btn-sm" @click="openEcoFolder('skills')">打开 skills 目录</button>
     </div>
     <ul class="eco-list">
       <li v-for="sk in state.ecoSkills" :key="sk.name" class="eco-item">
@@ -210,7 +210,7 @@ function mcpStatusClass(srv) {
     <h2 class="card-title">插件（plugins/）</h2>
     <div class="list-head" style="margin-bottom:8px">
       <span class="label">已安装 {{ state.ecoPlugins.length }} 个插件 · 工具与技能随插件自动生效</span>
-      <button type="button" class="btn-ghost" style="height:32px" @click="openEcoFolder('plugins')">打开 plugins 目录</button>
+      <button type="button" class="btn-ghost btn-sm" @click="openEcoFolder('plugins')">打开 plugins 目录</button>
     </div>
     <ul v-if="state.ecoPlugins.length" class="eco-list">
       <li v-for="p in state.ecoPlugins" :key="p.name" class="eco-item">

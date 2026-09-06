@@ -148,6 +148,11 @@ html.bg-active .card {
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
 }
+html.bg-active .settings-tabs {
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
 
 /* ---------- 全局滚动条：纤细圆角半透明 ----------
    只定制过 .stream/.list-wrap 的滚动条，设置页/站点页等容器漏网，
