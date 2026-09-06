@@ -14,7 +14,7 @@ beforeEach(() => {
       this.readyState = 0
       MockWebSocket.instances.push(this)
     }
-    send() {}
+    send(payload) { this.__lastSent = payload }
     close() {}
   }
   vi.stubGlobal('WebSocket', MockWebSocket)
@@ -126,5 +126,32 @@ describe('useChat 事件分发', () => {
     expect(chat.items.length).toBe(0)
     // 新会话建了新连接
     expect(MockWebSocket.instances.at(-1)).not.toBe(ws)
+  })
+
+  it('用例 6：ask 选择题 → 卡片渲染，answerAsk 经 WS 回传，ask_answered 锁定所选项', async () => {
+    const { chat, ws } = await setup()
+    emit(ws, { type: 'ask', ask_id: 'ask_1', question: '要打开 anything-analyzer 吗？', options: ['打开', '暂不'] })
+
+    const card = chat.items.find(i => i.kind === 'ask')
+    expect(card).toBeTruthy()
+    expect(card.question).toBe('要打开 anything-analyzer 吗？')
+    expect(card.options).toEqual(['打开', '暂不'])
+    expect(card.answered).toBeUndefined()
+
+    expect(chat.answerAsk('ask_1', '打开')).toBe(true)
+    const sent = MockWebSocket.instances.at(-1).__lastSent
+    expect(JSON.parse(sent)).toEqual({ type: 'ask_answer', ask_id: 'ask_1', value: '打开' })
+
+    emit(ws, { type: 'ask_answered', ask_id: 'ask_1', value: '打开' })
+    expect(card.answered).toBe('打开')
+  })
+
+  it('用例 7：ask 超时（ask_answered value=null）→ 卡片标记为未答', async () => {
+    const { chat, ws } = await setup()
+    emit(ws, { type: 'ask', ask_id: 'ask_2', question: '授权批量下载？', options: ['继续', '取消'] })
+    emit(ws, { type: 'ask_answered', ask_id: 'ask_2', value: null })
+
+    const card = chat.items.find(i => i.kind === 'ask')
+    expect(card.answered).toBeNull()
   })
 })

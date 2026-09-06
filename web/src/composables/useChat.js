@@ -265,6 +265,36 @@ function createChat() {
     items.push({ kind: 'error', content: `⚠ ${message}${suffix}`, _id: nextItemId() })
   }
 
+  // ---------- ask_user：AI 发起的选择题（human-in-the-loop） ----------
+
+  function pushAsk(e) {
+    currentTrace = null
+    items.push({
+      kind: 'ask',
+      askId: e.ask_id,
+      question: e.question,
+      options: e.options || [],
+      answered: undefined, // undefined=待答，字符串=用户已选，null=超时/未答
+      _id: nextItemId(),
+    })
+  }
+
+  function markAnswered(e) {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i]
+      if (it.kind === 'ask' && it.askId === e.ask_id) {
+        it.answered = e.value === undefined ? null : e.value
+        break
+      }
+    }
+  }
+
+  function answerAsk(askId, value) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    ws.send(JSON.stringify({ type: 'ask_answer', ask_id: askId, value }))
+    return true
+  }
+
   function handleEvent(e) {
     switch (e.type) {
       case 'tool_call': pushToolCall(e.name, e.args, e.tool_call_id); break
@@ -272,6 +302,8 @@ function createChat() {
       case 'ai_thinking': pushThinking(e.content); break
       case 'ai_delta': pushAiDelta(e.id, e.delta); break
       case 'progress': pushProgress(e); break
+      case 'ask': pushAsk(e); break
+      case 'ask_answered': markAnswered(e); break
       case 'ai_done': finishAiStream(e.id); break
       case 'ai': pushAi(e.content); break
       case 'status':
@@ -519,6 +551,6 @@ function createChat() {
     items, busy, connected, typing, session, lastDraft, lastStatus, sessions, draft, currentProgress, runningElapsed,
     // actions
     connect, loadHistory, send, stop, newSession, switchSession, fetchSessions, reconnect, deleteSession,
-    archiveSession, batchDeleteSessions, renameSession,
+    archiveSession, batchDeleteSessions, renameSession, answerAsk,
   }
 }

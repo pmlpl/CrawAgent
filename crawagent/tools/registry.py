@@ -145,6 +145,7 @@ _TOOL_META: dict[str, dict[str, Any]] = {
     "save_site_profile":      {"category": "site",    "deps": ["json"]},
     "recommend_scripts":      {"category": "site",    "deps": ["json", "re"]},
     "run_custom_script":      {"category": "script",  "deps": ["subprocess"]},
+    "ask_user":               {"category": "general", "deps": []},
     "video_site_expert":      {"category": "site",    "deps": ["langgraph"]},
     "read_skill":             {"category": "skill",   "deps": ["yaml"]},
 }

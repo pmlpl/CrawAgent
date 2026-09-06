@@ -155,6 +155,12 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 await ws.send_text(json.dumps({"type": "done"}, ensure_ascii=False))
                 continue
 
+            # ---- 用户回答 ask_user 选择题（无 pending 时幂等忽略） ----
+            if payload.get("type") == "ask_answer":
+                from crawagent.tools.ask_user_tool import resolve_ask
+                resolve_ask(str(payload.get("ask_id") or ""), str(payload.get("value") or ""))
+                continue
+
             if payload.get("type") != "message":
                 continue
             text = str(payload.get("content", "")).strip()

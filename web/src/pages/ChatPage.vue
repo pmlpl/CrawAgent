@@ -5,6 +5,7 @@ import DOMPurify from 'dompurify'
 import EmptyState from '../components/EmptyState.vue'
 import CrawlTrace from '../components/CrawlTrace.vue'
 import Thinking from '../components/Thinking.vue'
+import AskCard from '../components/AskCard.vue'
 import ChatComposer from '../components/ChatComposer.vue'
 import { useChat } from '../composables/useChat'
 
@@ -159,6 +160,7 @@ onMounted(() => {
           <div v-if="item.kind === 'ai'" class="msg ai md" :class="{ streaming: item.streaming }" v-html="md(item.content)"></div>
           <CrawlTrace v-if="item.kind === 'trace'" :steps="item.steps" :expanded="item._expanded" :round-id="item.roundId" />
           <Thinking v-if="item.kind === 'thinking'" :content="item.content" />
+          <AskCard v-if="item.kind === 'ask'" :item="item" />
           <div v-if="item.kind === 'error'" class="err">{{ item.content }}</div>
         </template>
 

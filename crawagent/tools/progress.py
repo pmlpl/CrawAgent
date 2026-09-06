@@ -193,6 +193,50 @@ def consume_new() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# 轮次事件出口 — ask_user 等工具需要把结构化事件推进当前轮次的事件日志
+# （事件日志重连会重放，保证刷新页面后选择按钮仍可见）。turn_engine._run_turn
+# 启动时 set_turn_emitter()，finally 时 clear；工具线程与轮次同线程，
+# ctx_session_id（graph.agent）可直接读出当前会话。
+# ---------------------------------------------------------------------------
+
+_turn_emitters: dict[str, Any] = {}
+
+
+def set_turn_emitter(session_id: str, fn) -> None:
+    with _LOCK:
+        _turn_emitters[session_id] = fn
+
+
+def clear_turn_emitter(session_id: str) -> None:
+    with _LOCK:
+        _turn_emitters.pop(session_id, None)
+
+
+def emit_turn_event(event: dict[str, Any]) -> bool:
+    """把结构化 UI 事件推进当前轮次事件日志（可重放）。无活动轮次时静默失败。
+
+    与 report_progress 的区别：progress 是一次性轨迹行（不重放），
+    这里是 UI 状态事件（ask 选择题），必须在页面刷新后依然可见。
+    """
+    try:
+        from crawagent.graph.agent import ctx_session_id
+        sid = ctx_session_id.get(None)
+    except Exception:
+        return False
+    if not sid:
+        return False
+    with _LOCK:
+        fn = _turn_emitters.get(sid)
+    if fn is None:
+        return False
+    try:
+        fn(event)
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # 工具包装器 — agent.py 用它给长耗时工具套上自动 start/finish
 # ---------------------------------------------------------------------------
 

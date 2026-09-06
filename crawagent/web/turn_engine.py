@@ -241,6 +241,10 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
         from crawagent.graph.agent import ctx_session_id
         ctx_session_id.set(session_id)
 
+        # 注册轮次事件出口：ask_user 等工具据此把结构化事件（选择题）推进事件日志
+        from crawagent.tools.progress import clear_turn_emitter, set_turn_emitter
+        set_turn_emitter(session_id, lambda ev: _emit(session_id, q, loop, ev))
+
         # 双模式流：messages 给 token 级增量，values 给工具调用/结果与最终状态
         for mode, payload in agent.stream(
             {"messages": [HumanMessage(content=text)]},
@@ -408,7 +412,12 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
         except Exception:
             pass
     finally:
-        # 任务结束后清理 _active_turns，允许新的任务或重连接管
+        # 注销轮次事件出口（ask_user 等），再清理 _active_turns，允许新的任务或重连接管
+        try:
+            from crawagent.tools.progress import clear_turn_emitter
+            clear_turn_emitter(session_id)
+        except Exception:
+            pass
         loop.call_soon_threadsafe(lambda sid=session_id: _active_turns.pop(sid, None))
 
 
