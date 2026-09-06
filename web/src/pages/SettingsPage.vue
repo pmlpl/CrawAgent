@@ -90,29 +90,79 @@ async function remove(m) {
 const { bgImage, bgOpacity, setBg, setBgOpacity } = useBg()
 const bgFile = ref(null)
 const bgUploading = ref(false)
+const bgError = ref('') // 上传/压缩/持久化失败的显式提示（此前配额超限被静默吞掉，用户以为"格式不支持"）
+
+// 压缩参数：最长边 1920px + JPEG q0.82 → 产物 ~200-400KB，任何来源的图都能塞进
+// localStorage ~5MB 配额（base64 按 UTF-16 计费 ≈ 原始字节的 2.7 倍）
+const BG_MAX_DIM = 1920
+const BG_QUALITY = 0.82
+
+function compressImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, BG_MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight))
+        const w = Math.max(1, Math.round(img.naturalWidth * scale))
+        const h = Math.max(1, Math.round(img.naturalHeight * scale))
+        const canvas = document.createElement('canvas')
+        canvas.width = w
+        canvas.height = h
+        const ctx = canvas.getContext('2d')
+        ctx.fillStyle = '#ffffff' // 透明底垫白，避免 JPEG 转码后透明区变黑
+        ctx.fillRect(0, 0, w, h)
+        ctx.drawImage(img, 0, 0, w, h)
+        resolve(canvas.toDataURL('image/jpeg', BG_QUALITY))
+      } catch (e) {
+        reject(e)
+      }
+    }
+    img.onerror = () => reject(new Error('图片解码失败（文件可能已损坏）'))
+    img.src = dataUrl
+  })
+}
 
 function onOpacityInput(e) {
   setBgOpacity(e.target.value)
 }
 
-function onBgPick(e) {
+function _readAsDataURL(f) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('读取文件失败'))
+    reader.readAsDataURL(f)
+  })
+}
+
+async function onBgPick(e) {
   const f = e.target.files?.[0]
   if (!f) return
+  bgError.value = ''
   if (!f.type.startsWith('image/')) {
-    bgUploading.value = false
+    bgError.value = `不支持的文件：${f.type || '浏览器无法识别该扩展名的类型'}。支持 jpg / png / webp / gif / bmp / avif 等常见图片格式`
     return
   }
   bgUploading.value = true
-  const reader = new FileReader()
-  reader.onload = () => {
-    setBg(String(reader.result || ''))
+  try {
+    const rawUrl = await _readAsDataURL(f)
+    // 统一走 canvas 压缩：不限制来源体积，顺带把 webp/avif 等转码成通用 JPEG
+    const compressed = await compressImage(rawUrl)
+    const ok = setBg(compressed)
+    if (!ok) {
+      bgError.value = '背景已应用，但压缩后仍超出本地存储上限，刷新后会丢失（请换一张更小的图）'
+    }
+  } catch (err) {
+    bgError.value = '设置背景失败：' + (err?.message || err)
+  } finally {
     bgUploading.value = false
+    if (bgFile.value) bgFile.value.value = ''
   }
-  reader.onerror = () => { bgUploading.value = false }
-  reader.readAsDataURL(f)
 }
+
 function clearBg() {
   setBg('')
+  bgError.value = ''
   if (bgFile.value) bgFile.value.value = ''
 }
 
@@ -282,7 +332,7 @@ onMounted(async () => {
 
       <div class="field">
         <span class="label">背景图</span>
-        <p class="hint">上传一张图片作为聊天页背景板（仅本地保存，不上传服务器）</p>
+        <p class="hint">上传一张图片作为聊天页背景板（仅本地保存，不上传服务器）。大图自动压缩到 1920px 内再存，jpg/png/webp/gif/bmp/avif 均可</p>
         <div class="bg-row">
           <input
             ref="bgFile"
@@ -294,6 +344,7 @@ onMounted(async () => {
           <button v-if="bgImage" type="button" class="btn-ghost" @click="clearBg">清除背景</button>
         </div>
         <div v-if="bgUploading" class="hint">处理中…</div>
+        <div v-if="bgError" class="result err" style="margin-top:6px">{{ bgError }}</div>
         <div v-if="bgImage" class="bg-preview" :style="{ backgroundImage: `url(${bgImage})` }" />
         <div v-if="bgImage" class="bg-opacity-row">
           <span class="label">遮罩浓度 <b class="mono">{{ bgOpacity }}%</b></span>

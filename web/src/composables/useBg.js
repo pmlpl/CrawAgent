@@ -37,12 +37,18 @@ export function useBg() {
   }
 
   function setBg(dataUrl) {
+    // 返回 false = 本地存储配额超限（图片过大）：背景本轮内存生效、刷新即丢。
+    // 正常路径上传侧会先压缩（SettingsPage.compressImage），这里只兜底，失败不再静默。
     bgImage.value = dataUrl || ''
+    let ok = true
     try {
       if (bgImage.value) localStorage.setItem(BG_KEY, bgImage.value)
       else localStorage.removeItem(BG_KEY)
-    } catch (e) { /* ignore quota */ }
+    } catch (e) {
+      ok = false
+    }
     applyBg()
+    return ok
   }
 
   function setBgOpacity(v) {
