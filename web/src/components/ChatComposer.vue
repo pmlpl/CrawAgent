@@ -410,8 +410,8 @@ textarea::placeholder {
 .think-toggle.spinning svg { animation: think-pulse 1.4s ease-in-out infinite; }
 .think-toggle .orbit {
   position: absolute;
-  inset: 2px;
-  border-radius: 9px;
+  inset: 1px;
+  border-radius: 50%;
   border: 1.5px solid transparent;
   border-top-color: var(--accent);
   animation: think-spin 1.2s linear infinite;
