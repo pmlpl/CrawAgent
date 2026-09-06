@@ -15,19 +15,10 @@ import re
 from collections import Counter
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
-HEADERS = {
-    "User-Agent": UA,
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-}
+from crawagent.tools.pagination import http_get, walk_pages
 
 # 排除这些路径模式（导航/功能链接，不是详情页）
 _EXCLUDE_PATH_RE = re.compile(
@@ -40,12 +31,6 @@ _INCLUDE_PATH_RE = re.compile(
     r"/(detail|view|wallpaper|look|item|post|show|read|pic|photo|image|w)/",
     re.I,
 )
-
-
-def _get(url: str, timeout: int = 20) -> str:
-    r = requests.get(url, headers=HEADERS, timeout=timeout)
-    r.raise_for_status()
-    return r.text
 
 
 def _extract_card_links(html: str, base_url: str) -> list[str]:
@@ -79,51 +64,21 @@ def _extract_card_links(html: str, base_url: str) -> list[str]:
 
 
 def _auto_paginate(base_url: str, target_count: int) -> tuple[list[str], int]:
-    """自动翻页收集详情页链接。
-
-    尝试 ?page=N、&page=N、?p=N 分页参数，检测是否有新链接出现。
-    最多翻 20 页。
+    """自动翻页收集详情页链接（翻页逻辑在 pagination.walk_pages：下一页链接 + page/p/pageNum）。
 
     Returns:
         (detail_urls, pages_scanned)
     """
     all_links: list[str] = []
-    seen: set[str] = set()
-    max_pages = 20
-
-    for page in range(1, max_pages + 1):
-        if page == 1:
-            urls_to_try = [base_url]
-        else:
-            sep = "&" if "?" in base_url else "?"
-            urls_to_try = [
-                f"{base_url}{sep}page={page}",
-                f"{base_url}{sep}p={page}",
-                f"{base_url}{sep}pageNum={page}",
-            ]
-
-        fresh: list[str] = []
-        for u in urls_to_try:
-            try:
-                html = _get(u)
-                links = _extract_card_links(html, u)
-                fresh = [l for l in links if l not in seen]
-                if fresh:
-                    break
-            except Exception:
-                continue
-
-        if not fresh:
-            break
-
-        for l in fresh:
-            seen.add(l)
-            all_links.append(l)
-
+    pages = 0
+    for _page_url, _html, fresh in walk_pages(
+        base_url, max_pages=20, extract_urls=_extract_card_links,
+    ):
+        pages += 1
+        all_links.extend(fresh)
         if len(all_links) >= target_count:
             break
-
-    return all_links, min(page, max_pages)
+    return all_links, pages
 
 
 def _parse_title(title_str: str) -> tuple[str, str]:
@@ -280,7 +235,7 @@ def extract_wallpaper_list(url: str, limit: int = 10, exclude_dynamic: bool = Fa
     entries: list[dict] = []
     for detail_url in detail_urls:
         try:
-            html = _get(detail_url)
+            html = http_get(detail_url)
         except Exception as e:
             entries.append({"detail": detail_url, "error": str(e)})
             continue
@@ -334,7 +289,7 @@ def wallpaper_detail(url: str) -> str:
         格式化详情：类型（静态/动态）、标题、分辨率、所有图片 URL、视频 URL。
     """
     try:
-        html = _get(url)
+        html = http_get(url)
     except Exception as e:
         return f"wallpaper_detail failed: {e}"
 

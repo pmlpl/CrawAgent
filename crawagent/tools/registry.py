@@ -130,6 +130,7 @@ _TOOL_META: dict[str, dict[str, Any]] = {
     "browse_and_crawl":       {"category": "crawl",   "deps": ["playwright", "bs4", "html2text"]},
     "extract_content":        {"category": "extract", "deps": ["bs4", "html2text"]},
     "extract_list":           {"category": "extract", "deps": ["bs4"]},
+    "extract_list_paged":     {"category": "extract", "deps": ["requests", "bs4"]},
     "save_record":            {"category": "save",    "deps": ["sqlite3"]},
     "list_crawled_resources": {"category": "save",    "deps": ["sqlite3"]},
     "save_to_file":           {"category": "save",    "deps": ["pathlib"]},

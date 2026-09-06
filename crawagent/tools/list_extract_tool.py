@@ -19,6 +19,8 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 from langchain_core.tools import tool
 
+from crawagent.tools.pagination import walk_pages
+
 
 # 导航/页脚常见关键词（统一小写），用于过滤明显非内容链接
 _NAV_FOOTER_KEYWORDS = {
@@ -346,7 +348,11 @@ def extract_list(html: str, url: str = "") -> str:
     if not items:
         return "List extraction failed: no items found (tried regex, LLM, DOM depth)"
 
-    lines = [f"List ({len(items)} items, strategy={strategy}):"]
+    return _format_list(items, f"List ({len(items)} items, strategy={strategy}):")
+
+
+def _format_list(items: list[dict], header: str) -> str:
+    lines = [header]
     for i, item in enumerate(items, 1):
         title = item.get("title", "")
         url_val = item.get("url", "")
@@ -355,5 +361,54 @@ def extract_list(html: str, url: str = "") -> str:
             img_short = item["image"][:60] + ("..." if len(item["image"]) > 60 else "")
             extra = f" [img: {img_short}]"
         lines.append(f"{i}. [{title}]({url_val}){extra}")
-
     return "\n".join(lines)
+
+
+# =============================================================
+# 翻页版：静态多页列表一次性抓全（ADR-0002，翻页逻辑在 pagination.py）
+# =============================================================
+
+@tool
+def extract_list_paged(url: str, limit: int = 30, max_pages: int = 10) -> str:
+    """静态多页列表一次性抓全：自动翻页 + 每页抽取（标题+URL 配对）。
+
+    适合「每一页 / 全部」类需求且站点是**静态分页**（URL 带 ?page=N，或有「下一页」链接）。
+    翻页策略：下一页链接追踪（rel=next / class 含 next / 「下一页」文案）→ URL 参数猜测
+    （page/p/pageNum，首个有效参数被沿用）。单页任务请用 extract_list。
+
+    参数：
+        url: 列表页第一页 URL。
+        limit: 最多返回条目数（默认 30）。
+        max_pages: 最多翻几页（默认 10，防止失控）。
+
+    返回：
+        "List (N items, pages=M): 1. [标题](链接) ..."
+        注意：JS 渲染分页（加载更多/无限滚动）抓不到，翻完静态能翻的就停——
+        那是 browse_and_crawl / run_custom_script 的活。
+    """
+    merged: list[dict] = []
+    seen: set[str] = set()
+    pages = 0
+    try:
+        for page_url, html, _fresh in walk_pages(
+            url, max_pages=max_pages,
+            extract_urls=lambda h, u: [i["url"] for i in _stage1_regex(h, u)],
+        ):
+            pages += 1
+            for item in _stage1_regex(html, page_url):
+                u = item.get("url", "")
+                if u and u not in seen:
+                    seen.add(u)
+                    merged.append(item)
+            if len(merged) >= limit:
+                break
+    except Exception as e:
+        return f"List extraction failed: {e} (after {pages} page(s))"
+
+    if not merged:
+        return (
+            f"List extraction failed: no repeated <a> link pattern found across {pages} page(s) in {url}. "
+            "The list is likely JS-rendered or needs the 3-stage strategy → "
+            "crawl_webpage + extract_list (single page) or run_custom_script."
+        )
+    return _format_list(merged[:limit], f"List ({len(merged[:limit])} items, pages={pages}):")
