@@ -47,6 +47,9 @@ class Settings(BaseSettings):
         env_file=_PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Optional 字段（如 *_retention_days / *_max_size_gb）在 .env 里写 null = None（不清理/不设上限）；
+        # 默认行为下 "null" 只是个字符串、会让 int 解析直接崩，设置页保存路径依赖这个语义
+        env_parse_none_str="null",
     )
 
     # ---- 模型层（变量名与 .env 一致） ----

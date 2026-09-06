@@ -77,6 +77,7 @@ def _model_exists(providers: list[dict], model: str, exclude_provider: str = "")
 
 def _settings_snapshot() -> dict[str, Any]:
     """GET /api/settings 响应：模型条目列表 + 服务商（含是否已配 Key），不含明文 Key"""
+    s = get_settings()
     providers = load_providers()
     return {
         "models": [
@@ -88,15 +89,25 @@ def _settings_snapshot() -> dict[str, Any]:
             {"name": p.get("name", ""), "base_url": p.get("base_url", ""), "key_set": bool(p.get("api_key"))}
             for p in providers
         ],
-        "thinking_depth": get_settings().thinking_depth,
-        "start_browser": get_settings().start_browser,
-        "mcp_autostart": get_settings().MCP_AUTOSTART,
-        "mcp_start_command": get_settings().MCP_START_COMMAND,
-        "mcp_configured": bool(get_settings().mcp_servers.strip()),
+        "thinking_depth": s.thinking_depth,
+        "start_browser": s.start_browser,
+        "mcp_autostart": s.MCP_AUTOSTART,
+        "mcp_start_command": s.MCP_START_COMMAND,
+        "mcp_configured": bool(s.mcp_servers.strip()),
         # 内置 anything-analyzer 检测状态（前端据此决定 UI：显示内置状态还是 textarea）
         "aa_builtin_found": _aa_status()["found"],
         "aa_builtin_path": _aa_status()["path"],
         "aa_builtin_port": _aa_status()["port"],
+        # ---- 高级页（T2）：抓取参数 / 产物目录 / 保留清理策略 ----
+        "request_timeout": s.request_timeout,
+        "request_delay": s.request_delay,
+        "output_dir": str(s.output_dir),
+        "downloads_dir": str(s.downloads_dir),
+        "logs_retention_days": s.logs_retention_days,
+        "output_retention_days": s.output_retention_days,
+        "downloads_retention_days": s.downloads_retention_days,
+        "output_max_size_gb": s.output_max_size_gb,
+        "downloads_max_size_gb": s.downloads_max_size_gb,
     }
 
 
@@ -228,9 +239,22 @@ async def delete_model_route(payload: dict = Body(...)) -> dict[str, Any]:
     return {"ok": True, **_settings_snapshot()}
 
 
+def _parse_opt_number(v: Any, *, kind: type, lo: float, hi: float, label: str) -> tuple[Any, str]:
+    """可选数值解析：None/'' → None（不限制）；否则校验类型与范围。返回 (value, error)。"""
+    if v is None or v == "":
+        return None, ""
+    try:
+        n = kind(v)
+    except (TypeError, ValueError):
+        return None, f"{label} 必须是数字"
+    if not lo <= n <= hi:
+        return None, f"{label} 需在 {lo} - {hi} 之间"
+    return n, ""
+
+
 @router.post("/api/settings")
 async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
-    """保存思考深度 / MCP 自动启动开关到 .env"""
+    """保存思考深度 / 启动浏览器 / MCP 开关 / 抓取参数 / 保留清理策略到 .env"""
     updates: dict[str, str] = {}
     depth = payload.get("thinking_depth")
     if isinstance(depth, str) and depth.strip():
@@ -250,6 +274,41 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
     if "mcp_start_command" in payload:
         updates["MCP_START_COMMAND"] = str(payload["mcp_start_command"]).strip()
         mcp_changed = True
+
+    # ---- 高级页（T2）：抓取参数 ----
+    if "request_timeout" in payload:
+        v, err = _parse_opt_number(payload["request_timeout"], kind=int, lo=5, hi=300, label="抓取超时（秒）")
+        if err:
+            return {"ok": False, "error": err}
+        updates["REQUEST_TIMEOUT"] = str(v)
+    if "request_delay" in payload:
+        v, err = _parse_opt_number(payload["request_delay"], kind=float, lo=0, hi=60, label="请求间隔（秒）")
+        if err:
+            return {"ok": False, "error": err}
+        updates["REQUEST_DELAY"] = str(v)
+
+    # ---- 高级页（T2）：保留清理策略（None = 该维度不清理 / 不设上限，落盘为 null）----
+    _RETENTION_INTS = (
+        ("logs_retention_days", "LOGS_RETENTION_DAYS", "日志保留天数"),
+        ("output_retention_days", "OUTPUT_RETENTION_DAYS", "产物保留天数"),
+        ("downloads_retention_days", "DOWNLOADS_RETENTION_DAYS", "下载保留天数"),
+    )
+    for key, env, label in _RETENTION_INTS:
+        if key in payload:
+            v, err = _parse_opt_number(payload[key], kind=int, lo=1, hi=3650, label=label)
+            if err:
+                return {"ok": False, "error": err}
+            updates[env] = "null" if v is None else str(v)
+    _SIZE_CAPS = (
+        ("output_max_size_gb", "OUTPUT_MAX_SIZE_GB", "产物容量上限（GB）"),
+        ("downloads_max_size_gb", "DOWNLOADS_MAX_SIZE_GB", "下载容量上限（GB）"),
+    )
+    for key, env, label in _SIZE_CAPS:
+        if key in payload:
+            v, err = _parse_opt_number(payload[key], kind=float, lo=0.1, hi=1024, label=label)
+            if err:
+                return {"ok": False, "error": err}
+            updates[env] = "null" if v is None else str(v)
 
     if updates:
         _save_env_updates(updates)
@@ -472,11 +531,15 @@ async def save_mcp_servers_route(payload: dict = Body(...)) -> dict[str, Any]:
 
 @router.post("/api/ecosystem/open-folder")
 async def open_ecosystem_folder_route(payload: dict = Body(...)) -> dict[str, Any]:
-    """在资源管理器中打开 skills/ 或 plugins/ 目录（本地部署，便于用户放文件）。"""
+    """在资源管理器中打开 skills/ / plugins/ / 产物 / 下载目录（本地部署，便于用户放文件与查产物）。"""
     folder = str(payload.get("folder") or "").strip()
-    if folder not in ("skills", "plugins"):
-        return {"ok": False, "error": "folder 只支持 skills / plugins"}
-    root = Path(__file__).resolve().parents[3] / folder
+    if folder in ("output", "downloads"):
+        s = get_settings()
+        root = Path(s.output_dir if folder == "output" else s.downloads_dir)
+    elif folder in ("skills", "plugins"):
+        root = Path(__file__).resolve().parents[3] / folder
+    else:
+        return {"ok": False, "error": "folder 只支持 skills / plugins / output / downloads"}
     root.mkdir(exist_ok=True)
     import os
 

@@ -34,6 +34,18 @@ const state = reactive({
   ecoLoading: false,
   showMcpForm: false,
   mcpForm: { name: '', transport: 'streamable_http', url: '', command: '', args: '' },
+  // ---- 高级页（T2）：抓取参数 / 产物目录 / 保留清理策略 ----
+  adv: {
+    timeout: 30,           // 抓取超时（秒）
+    delay: 1.0,            // 请求间隔（秒）
+    outputDir: '',         // 文本产物目录（展示 + 打开，改目录走 .env）
+    downloadsDir: '',      // 媒体下载目录（展示 + 打开）
+    logsDays: null,        // 日志保留天数（null = 不清理）
+    outputDays: null,      // 产物保留天数
+    downloadsDays: null,   // 下载保留天数
+    outputCapGb: null,     // 产物容量上限（GB，null = 不限）
+    downloadsCapGb: null,  // 下载容量上限（GB）
+  },
 })
 
 // 简化视图：给 App.vue/Header 等只读场景用
@@ -82,6 +94,18 @@ async function load() {
     state.aaBuiltinFound = !!data.aa_builtin_found
     state.aaBuiltinPath = data.aa_builtin_path || ''
     state.aaBuiltinPort = data.aa_builtin_port || 0
+    // 高级页字段（T2）
+    state.adv = {
+      timeout: data.request_timeout ?? 30,
+      delay: data.request_delay ?? 1.0,
+      outputDir: data.output_dir || '',
+      downloadsDir: data.downloads_dir || '',
+      logsDays: data.logs_retention_days ?? null,
+      outputDays: data.output_retention_days ?? null,
+      downloadsDays: data.downloads_retention_days ?? null,
+      outputCapGb: data.output_max_size_gb ?? null,
+      downloadsCapGb: data.downloads_max_size_gb ?? null,
+    }
     // 有自定义命令时默认展开高级模式
     state.advancedMode = !!state.mcpStartCommand
   } finally {
@@ -329,12 +353,31 @@ async function openEcoFolder(folder) {
   }
 }
 
+// 高级页通用保存：payload 直传 /api/settings，成功后写显式提示
+async function saveSettingsFields(payload, tip) {
+  state.saving = true
+  state.saveTip = ''
+  try {
+    const data = await _post('/api/settings', payload)
+    if (data.ok) {
+      state.saveTip = tip || '已保存'
+      return true
+    }
+    state.saveTip = '保存失败：' + (data.error || '未知错误')
+  } catch (e) {
+    state.saveTip = '保存失败：' + (e?.message || e)
+  } finally {
+    state.saving = false
+  }
+  return false
+}
+
 export function useSettings() {
   return {
     state, config,
     load, addModel, updateModel, deleteModel,
     saveThinking, saveMcp, startAA, test, open, close, setSelectedModel,
     loadEcosystem, saveMcpServers, toggleServer, removeServer, addMcpServer, openEcoFolder,
-    saveStartBrowser,
+    saveStartBrowser, saveSettingsFields,
   }
 }

@@ -56,6 +56,16 @@ def client(tmp_path, monkeypatch):
             MCP_AUTOSTART=False,
             MCP_START_COMMAND="",
             mcp_servers="",
+            # 高级页字段（T2 快照会读）：给一组确定性默认值
+            request_timeout=30,
+            request_delay=1.0,
+            output_dir=tmp_path / "output",
+            downloads_dir=tmp_path / "downloads",
+            logs_retention_days=30,
+            output_retention_days=90,
+            downloads_retention_days=60,
+            output_max_size_gb=None,
+            downloads_max_size_gb=5.0,
         )
 
     # settings 路由与 registry 各持有一份 get_settings 引用，都要替换

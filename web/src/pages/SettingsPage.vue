@@ -8,15 +8,17 @@ import { useSettings } from '../composables/useSettings'
 import SettingsModels from '../components/settings/SettingsModels.vue'
 import SettingsAppearance from '../components/settings/SettingsAppearance.vue'
 import SettingsEcosystem from '../components/settings/SettingsEcosystem.vue'
+import SettingsAdvanced from '../components/settings/SettingsAdvanced.vue'
 import '../components/settings/settings.css'
 
 const { load, loadEcosystem } = useSettings()
 
-// 页签表：「高级」页由后续票挂载
+// 页签表
 const TABS = [
   { key: 'models', label: '对话模型' },
   { key: 'appearance', label: '界面外观' },
   { key: 'eco', label: '生态扩展' },
+  { key: 'advanced', label: '高级' },
 ]
 const tab = ref('models')
 
@@ -49,6 +51,7 @@ onMounted(async () => {
     <div v-show="tab === 'models'" class="tab-pane"><SettingsModels /></div>
     <div v-show="tab === 'appearance'" class="tab-pane"><SettingsAppearance /></div>
     <div v-show="tab === 'eco'" class="tab-pane"><SettingsEcosystem /></div>
+    <div v-show="tab === 'advanced'" class="tab-pane"><SettingsAdvanced /></div>
   </div>
 </template>
 
