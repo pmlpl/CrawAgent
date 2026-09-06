@@ -131,7 +131,7 @@ function createChat() {
       currentTrace = reactive({
         kind: 'trace',
         steps: [],
-        _expanded: true,
+        _expanded: false,
         roundId: traceRoundId,
         _id: nextItemId(),
       })

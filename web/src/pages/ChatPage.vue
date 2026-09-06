@@ -168,7 +168,7 @@ onMounted(() => {
             <i class="dot" style="--i:0" /><i class="dot" style="--i:1" /><i class="dot" style="--i:2" /><i class="dot" style="--i:3" /><i class="dot" style="--i:4" />
           </span>
           <span class="typing-label">
-            <span class="dig-brand">dig deep</span>
+            <span class="dig-brand">deeply exploring</span>
             <!-- 工具运行中：前端每秒实时计时的已耗时（后端心跳文本是静态快照会冻结，不用于计时） -->
             <template v-if="chat.runningElapsed.value != null">
               <span class="dig-sep">·</span>

@@ -5,7 +5,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 const props = defineProps({
   steps: { type: Array, required: true }, // [{ name, args, result, done }]
-  expanded: { type: Boolean, default: true },
+  expanded: { type: Boolean, default: false },
   roundId: { type: Number, default: 0 },
 })
 
@@ -16,12 +16,6 @@ watch(() => props.expanded, (val) => {
   collapsed.value = !val
 })
 
-// 当 steps 从空变为有内容时自动展开
-watch(() => props.steps?.length, (n, old) => {
-  if (n > 0 && (!old || old === 0)) {
-    collapsed.value = false
-  }
-})
 
 // 进度日志新增行时自动滚到底部
 watch(
