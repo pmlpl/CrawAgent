@@ -31,6 +31,18 @@ function createChat() {
   const typing = ref(false)
   // 当前子 Agent（video_site_expert 等）的最新进度里程碑，用于 typing 指示器实时显示
   const currentProgress = ref('')
+  // 工具运行实时计时：pushToolCall 记录 step.startedAt，nowTick 每秒跳动驱动 pill 实时显示。
+  // 后端心跳里的"已耗时 Xs"是注入时刻的静态快照（工具结束就冻结），所以耗时由前端自己算。
+  const nowTick = ref(0)
+  let tickTimer = null
+  function startTick() {
+    if (tickTimer) return
+    tickTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
+  }
+  function stopTick() {
+    if (tickTimer) { clearInterval(tickTimer); tickTimer = null }
+    nowTick.value = 0
+  }
   // 按会话独立记忆草稿：切换会话不丢输入
   const draftBySession = reactive({}) // session_id → string
   const lastDraft = ref('')
@@ -38,6 +50,28 @@ function createChat() {
   const statusBySession = reactive({})
   const lastStatus = computed(() => statusBySession[session.value] || null)
   const sessions = ref([]) // 侧栏会话列表 [{id, preview}]
+
+  // 正在执行的工具步：最后一个 trace 里最后一个未完成的 tool step
+  // （LangGraph 顺序执行工具，同一时刻最多一个在跑）
+  const runningTool = computed(() => {
+    if (!busy.value) return null
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i]
+      if (it.kind !== 'trace') continue
+      for (let j = it.steps.length - 1; j >= 0; j--) {
+        const s = it.steps[j]
+        if (s.kind !== 'thinking' && !s.done) return s
+      }
+      break
+    }
+    return null
+  })
+  // 实时已耗时秒数；无运行中工具 / 无起点 / 非 busy 时为 null
+  const runningElapsed = computed(() => {
+    const s = runningTool.value
+    if (!s || !s.startedAt || !nowTick.value) return null
+    return Math.max(0, Math.round((nowTick.value - s.startedAt) / 1000))
+  })
 
   let sessionId = null
   try { sessionId = localStorage.getItem('crawagent-session') } catch (e) { /* ignore */ }
@@ -108,7 +142,7 @@ function createChat() {
   }
 
   function pushToolCall(name, args, toolCallId) {
-    const step = { name, args, result: null, done: false }
+    const step = { name, args, result: null, done: false, startedAt: Date.now() }
     if (toolCallId) step.toolCallId = toolCallId
     ensureTrace().steps.push(step)
     console.log('[trace] pushToolCall', name, '→ total steps:', ensureTrace().steps.length)
@@ -129,6 +163,9 @@ function createChat() {
     }
     step.result = content
     step.done = true
+    // 工具结束，进度 pill 的里程碑随之失效 —— 否则 LLM 思考阶段会一直残留
+    // 上一工具的旧文案（"运行中… 已耗时 5.6s" 冻结 bug 的另一半根因）
+    currentProgress.value = ''
   }
 
   function pushStatus(line) {
@@ -214,8 +251,9 @@ function createChat() {
       // 避免完全相同的重复
       if (step.progress_lines[step.progress_lines.length - 1] === line) continue
       step.progress_lines.push(line)
-      // 同步更新全局最新进度，供 typing 指示器显示
-      currentProgress.value = line
+      // 后端的"运行中… 已耗时 Xs"心跳是静态快照，不进 pill（仍留在轨迹日志里）；
+      // pill 的耗时由前端 runningElapsed 实时计算
+      if (!/^运行中…\s*已耗时\s*[\d.]+s$/.test(line)) currentProgress.value = line
     }
     console.log('[progress] lines:', evt.lines.length, 'attached to tool step:', step.name || '(unknown)')
   }
@@ -243,6 +281,7 @@ function createChat() {
         // 刷新页面后重连，后端告知该会话仍有任务在跑 → 恢复红色停止按钮
         busy.value = true
         typing.value = true
+        startTick()
         startSessionPoll()
         break
       case 'done': endTurn(); fetchSessions();
@@ -262,6 +301,7 @@ function createChat() {
     currentProgress.value = ''
     currentTrace = null
     aiStreams.clear()
+    stopTick()
     if (sessionPoll) { clearInterval(sessionPoll); sessionPoll = null }
   }
 
@@ -334,6 +374,7 @@ function createChat() {
     pushUser(content)
     busy.value = true
     typing.value = true
+    startTick()
     startSessionPoll()
     ws.send(JSON.stringify({ type: 'message', content, model: settings.state.model }))
     return true
@@ -475,7 +516,7 @@ function createChat() {
 
   return {
     // state
-    items, busy, connected, typing, session, lastDraft, lastStatus, sessions, draft, currentProgress,
+    items, busy, connected, typing, session, lastDraft, lastStatus, sessions, draft, currentProgress, runningElapsed,
     // actions
     connect, loadHistory, send, stop, newSession, switchSession, fetchSessions, reconnect, deleteSession,
     archiveSession, batchDeleteSessions, renameSession,

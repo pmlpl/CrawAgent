@@ -169,7 +169,13 @@ onMounted(() => {
           </span>
           <span class="typing-label">
             <span class="dig-brand">dig deep</span>
-            <template v-if="chat.currentProgress.value">
+            <!-- 工具运行中：前端每秒实时计时的已耗时（后端心跳文本是静态快照会冻结，不用于计时） -->
+            <template v-if="chat.runningElapsed.value != null">
+              <span class="dig-sep">·</span>
+              <span class="dig-progress">运行中… 已耗时 {{ chat.runningElapsed.value }}s</span>
+            </template>
+            <!-- 工具间歇（LLM 思考等）：显示最后一个真实里程碑 -->
+            <template v-else-if="chat.currentProgress.value">
               <span class="dig-sep">·</span>
               <span class="dig-progress">{{ chat.currentProgress.value }}</span>
             </template>
