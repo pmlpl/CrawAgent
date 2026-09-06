@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # 映射为 reasoning_effort 参数传给 LLM（DeepSeek 官方合法值：none / low / medium / high / xhigh）
     # off 时不传 reasoning_effort，模型按默认行为执行
     thinking_depth: str = "off"
+    # crawagent start 自动弹窗用的浏览器："" = 系统默认；chrome / msedge / firefox
+    # 指定的浏览器找不到 exe 时回退系统默认（server._open_browser_later）
+    start_browser: str = ""
     # 多服务商模型注册表（WebUI 设置页维护）：JSON 数组，每项
     # {"name": 服务商名, "base_url": 接口地址, "api_key": 密钥, "models": [模型 ID...]}
     # 为空时回退到上面的旧全局 openai_* 配置

@@ -13,6 +13,7 @@ const state = reactive({
   providers: [],           // [{name, base_url, key_set}] 服务商（Key 不出后端）
   model: '',               // 当前对话选中的模型 ID（前端本地持久化）
   thinkingDepth: 'off',    // off / low / high / max
+  startBrowser: '',        // start 自动弹窗浏览器：'' 系统默认 / chrome / msedge / firefox
   testResult: null,        // {ok: bool, msg: string}
   saveTip: '',             // 操作提示文案
   mcpAutostart: false,     // MCP 自动启动开关
@@ -74,6 +75,7 @@ async function load() {
     const data = await res.json()
     _applySnapshot(data)
     state.thinkingDepth = data.thinking_depth || 'off'
+    state.startBrowser = data.start_browser || ''
     state.mcpAutostart = !!data.mcp_autostart
     state.mcpStartCommand = data.mcp_start_command || ''
     state.mcpConfigured = !!data.mcp_configured
@@ -182,6 +184,20 @@ async function saveMcp() {
   } finally {
     state.saving = false
   }
+}
+
+async function saveStartBrowser(val) {
+  try {
+    const data = await _post('/api/settings', { start_browser: val })
+    if (data.ok) {
+      state.startBrowser = data.start_browser ?? val
+      return true
+    }
+    state.saveTip = '保存失败：' + (data.error || '未知错误')
+  } catch (e) {
+    state.saveTip = '保存失败：' + (e?.message || e)
+  }
+  return false
 }
 
 async function test(form) { // {provider, model, apiKey, baseUrl}
@@ -319,5 +335,6 @@ export function useSettings() {
     load, addModel, updateModel, deleteModel,
     saveThinking, saveMcp, startAA, test, open, close, setSelectedModel,
     loadEcosystem, saveMcpServers, toggleServer, removeServer, addMcpServer, openEcoFolder,
+    saveStartBrowser,
   }
 }

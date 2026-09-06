@@ -87,6 +87,7 @@ def _settings_snapshot() -> dict[str, Any]:
             for p in providers
         ],
         "thinking_depth": get_settings().thinking_depth,
+        "start_browser": get_settings().start_browser,
         "mcp_autostart": get_settings().MCP_AUTOSTART,
         "mcp_start_command": get_settings().MCP_START_COMMAND,
         "mcp_configured": bool(get_settings().mcp_servers.strip()),
@@ -233,6 +234,13 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
     if isinstance(depth, str) and depth.strip():
         updates["THINKING_DEPTH"] = depth.strip()
 
+    browser = payload.get("start_browser")
+    if browser is not None:
+        val = str(browser).strip().lower()
+        if val not in ("", "chrome", "msedge", "firefox"):
+            return {"ok": False, "error": f"不支持的浏览器: {val}（可选：chrome / msedge / firefox）"}
+        updates["START_BROWSER"] = val
+
     mcp_changed = False
     if "mcp_autostart" in payload:
         updates["MCP_AUTOSTART"] = "true" if payload["mcp_autostart"] else "false"
@@ -267,6 +275,7 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
     return {
         "ok": True, "saved": list(updates.keys()),
         "thinking_depth": get_settings().thinking_depth,
+        "start_browser": get_settings().start_browser,
         "mcp_status": mcp_status,
     }
 

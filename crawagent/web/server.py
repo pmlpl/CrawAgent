@@ -216,9 +216,54 @@ def _silence_proactor_reset_noise() -> None:
         pass  # 静音失败不影响功能
 
 
-def _open_browser_later(url: str, delay: float = 2.0) -> None:
-    """服务开始监听后自动打开浏览器（CRAWAGENT_NO_OPEN=1 可禁用）。"""
+_BROWSER_EXE_CANDIDATES: dict[str, tuple[str, ...]] = {
+    # Windows 常见安装路径 + PATH 兜底（shutil.which）；Linux/macOS 也顺带覆盖
+    "chrome": (
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+        "/usr/bin/google-chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ),
+    "msedge": (
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        "/usr/bin/microsoft-edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ),
+    "firefox": (
+        r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+        "/usr/bin/firefox", "/Applications/Firefox.app/Contents/MacOS/firefox",
+    ),
+}
+
+
+def _resolve_browser_exe(choice: str) -> str | None:
+    """按设置解析用户选定的浏览器 exe 路径；找不到返回 None（回退系统默认）。"""
     import os
+    import shutil
+
+    choice = (choice or "").strip().lower()
+    candidates = _BROWSER_EXE_CANDIDATES.get(choice)
+    if not candidates:
+        return None
+    for c in candidates:
+        p = os.path.expandvars(os.path.expanduser(c))
+        if os.path.exists(p):
+            return p
+        w = shutil.which(c)
+        if w:
+            return w
+    return None
+
+
+def _open_browser_later(url: str, delay: float = 2.0) -> None:
+    """服务开始监听后自动打开浏览器（CRAWAGENT_NO_OPEN=1 可禁用）。
+
+    设置页选了浏览器（START_BROWSER=chrome/msedge/firefox）时用选定浏览器弹窗，
+    找不到 exe 回退系统默认。
+    """
+    import os
+    import subprocess
     import threading
     import webbrowser
 
@@ -227,7 +272,11 @@ def _open_browser_later(url: str, delay: float = 2.0) -> None:
 
     def _open() -> None:
         try:
-            webbrowser.open(url)
+            exe = _resolve_browser_exe(get_settings().start_browser)
+            if exe:
+                subprocess.Popen([exe, url])
+            else:
+                webbrowser.open(url)
         except Exception:
             pass  # 无 GUI 环境（Docker/服务器）打开失败不影响服务
 

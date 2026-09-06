@@ -51,6 +51,7 @@ def client(tmp_path, monkeypatch):
         data = _parse_env(env_file)
         return SimpleNamespace(
             thinking_depth=data.get("THINKING_DEPTH", "off"),
+            start_browser=data.get("START_BROWSER", ""),
             llm_providers=data.get("LLM_PROVIDERS", ""),
             MCP_AUTOSTART=False,
             MCP_START_COMMAND="",
@@ -178,6 +179,24 @@ def test_thinking_depth_roundtrip(client):
 
     r2 = client.get("/api/settings")
     assert r2.json()["thinking_depth"] == "max"
+
+
+def test_start_browser_roundtrip_and_whitelist(client):
+    """START_BROWSER：chrome 保存回读一致；非法值拒绝；空串恢复系统默认。"""
+    r = client.post("/api/settings", json={"start_browser": "chrome"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["start_browser"] == "chrome"
+
+    r2 = client.get("/api/settings")
+    assert r2.json()["start_browser"] == "chrome"
+
+    bad = client.post("/api/settings", json={"start_browser": "safari"})
+    assert bad.json()["ok"] is False
+
+    clear = client.post("/api/settings", json={"start_browser": ""})
+    assert clear.json()["ok"] is True
+    assert clear.json()["start_browser"] == ""
 
 
 def test_session_export_json(client, monkeypatch):

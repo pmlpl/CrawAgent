@@ -8,7 +8,16 @@ import { useSettings } from '../composables/useSettings'
 import { useBg } from '../composables/useBg'
 
 const { state, load, addModel, updateModel, deleteModel, test, saveMcp, startAA,
-        loadEcosystem, toggleServer, removeServer, addMcpServer, openEcoFolder } = useSettings()
+        loadEcosystem, toggleServer, removeServer, addMcpServer, openEcoFolder,
+        saveStartBrowser } = useSettings()
+
+// 浏览器选项（start 自动弹窗用；存 .env 的 START_BROWSER）
+const BROWSER_OPTIONS = [
+  { value: '', label: '系统默认' },
+  { value: 'chrome', label: '谷歌 Chrome' },
+  { value: 'msedge', label: '微软 Edge' },
+  { value: 'firefox', label: '火狐 Firefox' },
+]
 
 // ---------- 服务商预设：选服务商自动填 Base URL，自定义可手填 ----------
 const PROVIDER_PRESETS = [
@@ -258,6 +267,18 @@ onMounted(async () => {
 
     <section class="card">
       <h2 class="card-title">界面</h2>
+
+      <div class="field" style="margin-bottom:16px">
+        <span class="label">启动时自动打开的浏览器</span>
+        <select
+          :value="state.startBrowser"
+          style="max-width: 260px"
+          @change="saveStartBrowser($event.target.value)"
+        >
+          <option v-for="b in BROWSER_OPTIONS" :key="b.value" :value="b.value">{{ b.label }}</option>
+        </select>
+        <p class="hint">选择 <code class="mono">crawagent start</code> 启动时自动弹出的浏览器（保存即生效，下次启动时应用）；选定的浏览器未安装时回退系统默认</p>
+      </div>
 
       <div class="field">
         <span class="label">背景图</span>
