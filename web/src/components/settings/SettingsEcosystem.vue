@@ -1,9 +1,9 @@
 <script setup>
 // 「生态扩展」页签：MCP 服务（开关/增删/状态）+ 技能 + 插件（P2-9 生态面板归位）
-// 技能与插件为只读展示 + 目录直达；MCP 配置保存即清缓存免重启生效
+// 自动启动由 Agent 对话链路内置拉起（anything-analyzer），开关点击即保存，无历史脚手架
 import { useSettings } from '../../composables/useSettings'
 
-const { state, saveMcp, startAA, toggleServer, removeServer, addMcpServer, openEcoFolder } = useSettings()
+const { state, toggleAutostart, toggleServer, removeServer, addMcpServer, openEcoFolder } = useSettings()
 
 // ---------- MCP server 状态文案与配色 ----------
 function mcpStatusFor(srv) {
@@ -36,78 +36,20 @@ function mcpStatusClass(srv) {
         <span class="label">自动启动 MCP 服务</span>
         <button
           type="button"
-          class="btn-ghost"
-          :disabled="!state.mcpConfigured"
+          class="btn-ghost btn-sm"
+          :disabled="!state.mcpConfigured || state.saving"
           :style="state.mcpAutostart ? 'color: var(--accent); border-color: var(--accent)' : ''"
-          @click="state.mcpAutostart = !state.mcpAutostart"
+          @click="toggleAutostart"
         >
-          {{ state.mcpAutostart ? 'ON' : 'OFF' }}
+          <span v-if="state.saving" class="spin" />{{ state.mcpAutostart ? 'ON' : 'OFF' }}
         </button>
       </div>
       <p class="hint" v-if="!state.mcpConfigured">
-        未配置 MCP_SERVERS（.env），开关无效。配置示例：
-        [{"name":"anything","transport":"streamable_http","url":"http://127.0.0.1:23816/mcp","headers":{"Authorization":"Bearer xxx"}}]
-      </p>
-      <p class="hint" v-else-if="state.aaBuiltinFound">
-        打开后：Agent 检测到 anything-analyzer 未运行时，会自动在后台启动 Electron 应用（pnpm dev），无需手动开终端
+        还没有配置任何 MCP 服务：先在下方「添加服务」，这个开关才会生效
       </p>
       <p class="hint" v-else>
-        打开后：Agent 检测到 MCP 服务未运行时，会执行下方自定义命令拉起服务
+        开启后：对话时检测到 MCP 服务未运行会自动拉起（内置 anything-analyzer 支持），无需手动开终端
       </p>
-
-      <!-- 内置 anything-analyzer 状态展示 -->
-      <div v-if="state.mcpConfigured && state.aaBuiltinFound" class="builtin-hint">
-        <span class="builtin-dot">✓</span>
-        <span>已内置 anything-analyzer 启动支持</span>
-        <span class="builtin-path">{{ state.aaBuiltinPath }}</span>
-      </div>
-      <div v-else-if="state.mcpConfigured && !state.aaBuiltinFound && state.aaBuiltinPort === 23816" class="builtin-hint warn">
-        <span class="builtin-dot">!</span>
-        <span>没找到 anything-analyzer 项目路径</span>
-        <span class="builtin-path">请在 .env 里加 ANYTHING_ANALYZER_PATH=你的项目路径</span>
-      </div>
-
-      <!-- 启动脚本提示 -->
-      <div v-if="state.mcpConfigured" class="builtin-hint" style="margin-top:10px">
-        <span class="builtin-dot">ⓘ</span>
-        <span>首次启动请双击运行：</span>
-        <code class="mono">crawagent\scripts\start_anything_analyzer.bat</code>
-        <span>（或拖到浏览器窗口外手动双击）</span>
-      </div>
-      <button
-        v-if="state.mcpConfigured"
-        type="button"
-        class="btn-primary"
-        :disabled="state.saving"
-        style="margin-top: 8px"
-        @click="startAA"
-      >
-        <span v-if="state.saving" class="spin" />📂 打开启动脚本文件夹
-      </button>
-
-      <!-- 高级模式：自定义命令 -->
-      <div v-if="state.mcpConfigured" class="field">
-        <button type="button" class="btn-ghost ghost-link" @click="state.advancedMode = !state.advancedMode">
-          {{ state.advancedMode ? '收起自定义命令 ▲' : '高级：自定义启动命令 ▼' }}
-        </button>
-        <textarea
-          v-if="state.advancedMode"
-          v-model="state.mcpStartCommand"
-          rows="2"
-          class="mcp-cmd"
-          placeholder="留空 = 用内置 anything-analyzer 启动；填入 = 用你自己的命令"
-        />
-      </div>
-
-      <button
-        v-if="state.mcpConfigured"
-        type="button"
-        class="btn-ghost"
-        :disabled="state.saving"
-        @click="saveMcp"
-      >
-        {{ state.saving ? '启动中…' : '保存并启动' }}
-      </button>
       <div v-if="state.saveTip" class="result" :class="state.saveTipOk === false ? 'err' : 'ok'" style="margin-top: 8px">{{ state.saveTip }}</div>
 
       <!-- ===== MCP 服务列表：开关 / 增删 / 状态 ===== -->

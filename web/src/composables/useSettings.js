@@ -17,15 +17,8 @@ const state = reactive({
   testResult: null,        // {ok: bool, msg: string}
   saveTip: '',             // 操作提示文案
   saveTipOk: null,         // 与 saveTip 配对的成功/失败分级（true=成功绿 / false=失败红 / null=中性）
-  mcpAutostart: false,     // MCP 自动启动开关
-  mcpStartCommand: '',     // MCP 服务拉起命令（高级：自定义，留空则用内置 anything-analyzer 启动）
-  mcpConfigured: false,    // .env 里是否配置了 MCP_SERVERS
-  mcpStatus: '',           // started / not_ready / disabled / error
-  // 内置 anything-analyzer 自动检测
-  aaBuiltinFound: false,
-  aaBuiltinPath: '',
-  aaBuiltinPort: 0,
-  advancedMode: false,     // 是否展示自定义命令 textarea
+  mcpAutostart: false,     // MCP 自动启动开关（内置 anything-analyzer 拉起，无需手动配置命令）
+  mcpConfigured: false,    // 是否已配置 MCP_SERVERS
   // ---- 生态面板（P2-9）：技能 / MCP servers / 插件 ----
   ecoSkills: [],           // [{name, description, source: builtin|plugin}]
   ecoMcpServers: [],       // [{name, transport, url|command+args, headers(脱敏), disabled}]
@@ -90,11 +83,7 @@ async function load() {
     state.thinkingDepth = data.thinking_depth || 'off'
     state.startBrowser = data.start_browser || ''
     state.mcpAutostart = !!data.mcp_autostart
-    state.mcpStartCommand = data.mcp_start_command || ''
     state.mcpConfigured = !!data.mcp_configured
-    state.aaBuiltinFound = !!data.aa_builtin_found
-    state.aaBuiltinPath = data.aa_builtin_path || ''
-    state.aaBuiltinPort = data.aa_builtin_port || 0
     // 高级页字段（T2）
     state.adv = {
       timeout: data.request_timeout ?? 30,
@@ -191,30 +180,31 @@ async function saveThinking() {
   }
 }
 
-async function saveMcp() {
+// MCP 自动启动开关：点击即保存。开启时后端会顺带确保服务就绪（失败显式提示，下一轮对话自动再试）
+async function toggleAutostart() {
+  if (state.saving) return
+  const next = !state.mcpAutostart
   state.saving = true
   state.saveTip = ''
   try {
-    const data = await _post('/api/settings', {
-      mcp_autostart: state.mcpAutostart,
-      mcp_start_command: state.mcpStartCommand,
-    })
+    const data = await _post('/api/settings', { mcp_autostart: next })
     if (data.ok) {
-      state.mcpStatus = data.mcp_status || ''
-      const ok = state.mcpStatus === 'started' || state.mcpStatus === 'disabled'
+      state.mcpAutostart = next
+      const st = data.mcp_status || ''
       _tip({
-        started: '✓ MCP 服务已启动并接入 Agent',
-        failed: '✗ 启动失败：命令已执行但服务 120 秒内未就绪，查看 logs/mcp_autostart.log 定位原因',
-        disabled: 'MCP 自动启动已关闭',
-      }[state.mcpStatus] || '已保存', ok)
-    } else {
-      _tip('保存失败：' + (data.error || '未知错误'), false)
+        started: '✓ 已开启：MCP 服务就绪，未运行时会自动拉起',
+        failed: '✗ 已保存，但服务 120 秒内未就绪，下一轮对话会自动再试',
+        disabled: '已关闭自动启动',
+      }[st] || '已保存', st !== 'failed')
+      return true
     }
+    _tip('保存失败：' + (data.error || '未知错误'), false)
   } catch (e) {
     _tip('保存失败：' + (e?.message || e), false)
   } finally {
     state.saving = false
   }
+  return false
 }
 
 async function saveStartBrowser(val) {
@@ -265,24 +255,6 @@ function setSelectedModel(v) {
   if (!v) return
   state.model = v
   _persistSelectedModel(v)
-}
-
-async function startAA() {
-  state.saving = true
-  state.saveTip = ''
-  try {
-    const res = await fetch('/api/mcp/start', { method: 'POST' })
-    const data = await res.json()
-    if (data.ok) {
-      _tip(data.already_running ? 'anything-analyzer 已在运行 ✓' : 'anything-analyzer 已启动 ✓', true)
-    } else {
-      _tip('启动失败: ' + (data.error || '未知错误'), false)
-    }
-  } catch (e) {
-    _tip('请求失败: ' + e.message, false)
-  } finally {
-    state.saving = false
-  }
 }
 
 // ---------- 生态面板（技能 / MCP servers / 插件）----------
@@ -375,7 +347,7 @@ export function useSettings() {
   return {
     state, config,
     load, addModel, updateModel, deleteModel,
-    saveThinking, saveMcp, startAA, test, open, close, setSelectedModel,
+    saveThinking, toggleAutostart, test, open, close, setSelectedModel,
     loadEcosystem, saveMcpServers, toggleServer, removeServer, addMcpServer, openEcoFolder,
     saveStartBrowser, saveSettingsFields,
   }

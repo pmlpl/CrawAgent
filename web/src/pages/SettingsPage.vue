@@ -11,7 +11,7 @@ import SettingsEcosystem from '../components/settings/SettingsEcosystem.vue'
 import SettingsAdvanced from '../components/settings/SettingsAdvanced.vue'
 import '../components/settings/settings.css'
 
-const { load, loadEcosystem } = useSettings()
+const { state, load, loadEcosystem } = useSettings()
 
 // 页签表
 const TABS = [
@@ -23,6 +23,9 @@ const TABS = [
 const tab = ref('models')
 
 onMounted(async () => {
+  // 组合式是跨页单例：清掉对话页等残留的操作提示（如「思考深度已保存」），不污染设置页
+  state.saveTip = ''
+  state.saveTipOk = null
   await load()
   loadEcosystem()
 })
