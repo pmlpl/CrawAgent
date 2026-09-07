@@ -154,6 +154,32 @@ describe('useChat 事件分发', () => {
     expect(think.streaming).toBe(false) // pushToolCall 的安全网兜住了
   })
 
+  it('用例 4d：reasoning 双写 content 时，ai_thinking_done 移除与思考重复的 AI 卡片', async () => {
+    const { chat, ws } = await setup()
+    // 模拟供应商把同一推理文本同时写进 reasoning_content 与 content：
+    // ai_thinking_delta 建 thinking step，ai_delta 建了一张同文 AI 卡片
+    const events = [
+      { type: 'ai_thinking_delta', id: 'r3', delta: '我想想' },
+      { type: 'ai_delta', id: 'r3', delta: '我想想' }, // 双写：content 也喂了同一文本
+      { type: 'ai_thinking_done', id: 'r3' },
+      { type: 'ai_delta', id: 'r3', delta: '正经回答' }, // 思考结束后的真实回答
+      { type: 'ai_done', id: 'r3' },
+      { type: 'done' },
+    ]
+    for (const e of events) emit(ws, e)
+
+    const trace = chat.items.find(i => i.kind === 'trace')
+    const think = trace.steps.find(s => s.kind === 'thinking')
+    expect(think).toBeTruthy()
+    expect(think.content).toBe('我想想')
+    expect(think.streaming).toBe(false)
+    // 双写期间建的同文 AI 卡片应被 finishThinkingStream 移除；
+    // 真实回答卡片保留，且内容不含"我想想"
+    const aiItems = chat.items.filter(i => i.kind === 'ai')
+    expect(aiItems.length).toBe(1)
+    expect(aiItems[0].content).toBe('正经回答')
+  })
+
   it('用例 5：/new（newSession）→ sessionId 更换、messages 清空', async () => {
     const { chat, ws } = await setup()
     emit(ws, { type: 'ai', content: '旧消息' })

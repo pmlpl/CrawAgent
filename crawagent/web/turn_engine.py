@@ -268,6 +268,9 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                         metrics.on_llm_start()
                     # 推理模型的思考 token（reasoning_content）—— 逐块流式推送，
                     # 让前端在思考阶段就能看到推理过程，而不是干等"deeply exploring"转圈。
+                    # 注意用 elif：一个 chunk 若带 reasoning_content，它的 content 往往是同一推理
+                    # 文本的双写（部分供应商如此），不能再当回答推 ai_delta，否则思考 step 与
+                    # 正文气泡会重复显示同一段文本。
                     rdelta = (chunk.additional_kwargs or {}).get("reasoning_content", "")
                     if isinstance(rdelta, str) and rdelta:
                         streamed_thinking[chunk.id] = streamed_thinking.get(chunk.id, "") + rdelta
@@ -276,7 +279,7 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                             "id": chunk.id,
                             "delta": rdelta,
                         })
-                    if chunk.content:
+                    elif chunk.content:
                         delta = chunk.content if isinstance(chunk.content, str) else "".join(
                             p.get("text", "") for p in chunk.content if isinstance(p, dict)
                         )
@@ -344,14 +347,26 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
 
                     # 关键去重：如果 msg 有 tool_calls 且 content == plan（思考文本），
                     # 说明这段内容已经通过 ai_thinking 推了，不要再作为 AI 回答推一次。
-                    # 只有真正的最终 AI 回答（没 tool_calls，或 content 与 plan 不一致）
+                    # 同理，reasoning 非空且 content 与 reasoning 重合时，content 是同一推理
+                    # 文本的双写（部分供应商把推理同时塞进 content 与 reasoning_content），
+                    # 也不是独立回答 —— 丢弃 ai 重复推送，清掉流式残留避免"思考+正文"重复。
+                    # 只有真正的最终 AI 回答（没 tool_calls，或 content 与思考文本不一致）
                     # 才推送 ai 事件作为独立卡片。
-                    is_plan_content = bool(plan) and isinstance(msg.content, str) and (
-                        msg.content.strip() == plan
-                    )
-                    if msg.tool_calls and is_plan_content:
-                        # 这段已经是思考了，丢弃 ai 重复推送
-                        # 如果有流式缓存（ai_delta 推过），也要清掉以避免留空卡片
+                    def _content_dup_with_thinking(content, reasoning, plan):
+                        if not isinstance(content, str) or not content.strip():
+                            return False
+                        c = content.strip()
+                        if plan and c == plan:
+                            return True
+                        if reasoning:
+                            r = reasoning.strip()
+                            if r and (c == r or c.startswith(r)):
+                                return True
+                        return False
+                    is_thinking_dup = _content_dup_with_thinking(msg.content, reasoning, plan)
+                    if (msg.tool_calls and is_thinking_dup) or (reasoning and is_thinking_dup):
+                        # content 是思考文本的重复，丢弃 ai 推送
+                        # 若已通过 ai_delta 流式残留，前端 finishThinkingStream 会移除同内容卡片
                         if msg.id in streamed_ai:
                             streamed_ai.pop(msg.id, None)
                     elif msg.content:

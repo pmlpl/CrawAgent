@@ -234,7 +234,24 @@ function createChat() {
     const trace = currentTrace
     if (!trace) return
     const step = trace.steps.find(s => s.kind === 'thinking' && s._thinkId === id)
-    if (step) step.streaming = false
+    if (!step) return
+    step.streaming = false
+    // 该 id 的思考流结束；若正文里残留了同内容的 AI 卡片（部分供应商把推理同时
+    // 写进 content 与 reasoning_content，导致 ai_delta 也建了一张同文卡片），移除。
+    const cmp = (a, b) =>
+      (a || '').replace(/\s+/g, ' ').trim() === (b || '').replace(/\s+/g, ' ').trim()
+    while (items.length) {
+      const tail = items[items.length - 1]
+      if (tail.kind === 'ai' && cmp(tail.content, step.content)) {
+        items.splice(items.length - 1, 1)
+        // 注意 aiStreams 存的是原始对象，items 里是 reactive proxy，身份比较恒不等；
+        // 直接按 id 删映射，否则后续同 id 的 ai_delta 会复用孤儿条目而不建新卡。
+        aiStreams.delete(id)
+        console.log('[trace] finishThinkingStream: 移除与思考重复的尾部 AI 卡片')
+        break
+      }
+      break
+    }
   }
 
   function _finalizeOpenThinking() {
