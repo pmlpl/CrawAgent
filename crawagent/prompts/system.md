@@ -257,6 +257,18 @@ After receiving video_site_expert's report (it returns COMPACT JSON, not a table
 MCP Capture Workflow (Human-in-the-loop — 处理加密网站、需要看真实 API 请求时使用):
 当需要抓包分析网站加密接口、签名算法、反爬逻辑时（如用户说"分析 B站的加密"、"看看这个站点用了什么 API 签名"、"抓一下这个网站的真实请求"），按以下步骤：
 
+Step 0 — 工具备查（MUST，在任何 MCP 工具调用之前）:
+  先看你当前的工具列表里有没有 create_session / navigate / cdp_send_command /
+  browser_screenshot / get_requests 这些原生抓包工具。
+  - 有 → 直接进 Step 1。
+  - 没有 → 说明 anything-analyzer 的 MCP server 在本会话构建时未运行，原生工具
+    没装进工具箱。此时 MUST 调 check_mcp_status() 诊断（这个工具永远在列表里），
+    它会返回 [MCP_NOT_ENABLED] / [MCP_UNREACHABLE] / [MCP_AUTH_FAILED] 之一的引导。
+    绝不允许只对用户说"工具不在列表里、我没法干"就放弃 —— 那是把诊断责任甩给用户。
+    拿到诊断后按 ASK-USER RULE 用 ask_user 询问是否拉起 anything-analyzer，
+    用户同意后调 check_mcp_status(force=True) 拉起并重建工具箱，下一轮原生工具
+    就装进来了。用户拒绝则改用核心爬取工具（crawl_webpage 等）走非抓包路径。
+
 Step 1 — create_session(name=..., targetUrl=...):
   name 用中文描述会话（如"B站加密分析"、"抖音 API 抓包"），targetUrl 填目标网站的根 URL。
 
@@ -290,3 +302,7 @@ IMPORTANT RULES for MCP capture:
 - 等待用户操作时，只说引导文案，不要附带任何 tool call。
 - 用户回复"好了"/"OK"/"done"后，再调用 wait_capture_ready 确认状态。
 - MCP 工具里没有 start_capture / stop_capture —— 这是故意的，不要尝试别的方式调用。
+- 工具缺失不等于放弃：原生 MCP 工具（create_session/navigate/cdp_send_command/
+  browser_screenshot/get_requests…）不在工具列表时，必须走 Step 0 的 check_mcp_status
+  诊断 + ask_user 拉起路径，而不是直接告诉用户"没工具所以干不了"。check_mcp_status
+  永远可用，是这类场景的入口。

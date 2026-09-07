@@ -179,8 +179,18 @@ def _ensure_mcp_session(
             "clientInfo": {"name": "crawagent", "version": "1.0"},
         },
     }
-    with httpx.Client(trust_env=False, timeout=timeout) as c:
-        resp = c.post(url, json=init_body, headers=base_headers)
+    try:
+        with httpx.Client(trust_env=False, timeout=timeout) as c:
+            resp = c.post(url, json=init_body, headers=base_headers)
+    except httpx.TransportError as e:
+        # 连接被拒（WinError 10061）/ 端口未监听 / 服务未启动 → 返回错误字典，
+        # 让 check_mcp_status 的错误分支接管（自动拉起 / 引导用户），而不是裸异常漏到任务层
+        return None, {
+            "error": {
+                "kind": "connection_refused",
+                "message": f"MCP 连接失败: {e}（anything-analyzer 未启动或 MCP 端口未监听）",
+            }
+        }
 
     if resp.status_code != 200:
         err_text = _parse_sse_body(resp.text)
@@ -196,8 +206,12 @@ def _ensure_mcp_session(
 
     # 协议要求：initialize 之后必须发 notifications/initialized 通知
     notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-    with httpx.Client(trust_env=False, timeout=timeout) as c:
-        c.post(url, json=notif, headers={**base_headers, "mcp-session-id": sid})
+    try:
+        with httpx.Client(trust_env=False, timeout=timeout) as c:
+            c.post(url, json=notif, headers={**base_headers, "mcp-session-id": sid})
+    except httpx.TransportError as e:
+        # notif 失败不致命：session id 已拿到，后续请求仍可尝试
+        print(f"[MCP] notifications/initialized 发送失败（忽略）: {e}")
 
     _mcp_session_id = sid
     return sid, None
@@ -245,8 +259,18 @@ def _call_mcp(method: str, params: dict | None = None, timeout: float = 30.0) ->
             return err or {"error": {"message": "MCP session initialization failed"}}
         req_headers = {**headers, "mcp-session-id": sid}
 
-        with httpx.Client(trust_env=False, timeout=timeout) as c:
-            resp = c.post(url, json=body, headers=req_headers)
+        try:
+            with httpx.Client(trust_env=False, timeout=timeout) as c:
+                resp = c.post(url, json=body, headers=req_headers)
+        except httpx.TransportError as e:
+            # 服务中途掉线 / 连接被拒 → 重置 session 并返回错误，交给上层优雅处理
+            _reset_mcp_session()
+            return {
+                "error": {
+                    "kind": "connection_refused",
+                    "message": f"MCP 连接失败: {e}（anything-analyzer 未启动或中途退出）",
+                }
+            }
 
         # 会话过期 / 未识别 → 重置 session 重试一次
         if attempt == 0 and resp.status_code in (400, 406) and "session" in resp.text.lower():
