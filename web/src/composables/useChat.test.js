@@ -114,6 +114,46 @@ describe('useChat 事件分发', () => {
     expect(chat.busy.value).toBe(false)
   })
 
+  it('用例 4b：ai_thinking_delta 流式累积成一条 thinking step，done 收尾，tool_call 强制收尾', async () => {
+    const { chat, ws } = await setup()
+    const events = [
+      { type: 'ai_thinking_delta', id: 'r1', delta: '先想' },
+      { type: 'ai_thinking_delta', id: 'r1', delta: '一步' },
+      { type: 'ai_thinking_delta', id: 'r1', delta: '…' },
+      { type: 'ai_thinking_done', id: 'r1' },
+      { type: 'tool_call', name: 'crawl_webpage', args: '{}', tool_call_id: 't1' },
+      { type: 'tool_result', content: 'r1', tool_call_id: 't1' },
+      { type: 'done' },
+    ]
+    for (const e of events) emit(ws, e)
+
+    const traces = chat.items.filter(i => i.kind === 'trace')
+    expect(traces.length).toBe(1)
+    const thinkSteps = traces[0].steps.filter(s => s.kind === 'thinking')
+    // 多个 delta 只生成一条 step，内容累积
+    expect(thinkSteps.length).toBe(1)
+    expect(thinkSteps[0].content).toBe('先想一步…')
+    expect(thinkSteps[0].streaming).toBe(false) // done 已收尾
+    // tool_call 被收入同一条 trace
+    expect(traces[0].steps.filter(s => s.name === 'crawl_webpage').length).toBe(1)
+  })
+
+  it('用例 4c：流式中途收到 tool_call（无 done）也安全收尾，不残留 streaming', async () => {
+    const { chat, ws } = await setup()
+    const events = [
+      { type: 'ai_thinking_delta', id: 'r2', delta: '想' },
+      { type: 'tool_call', name: 'crawl_webpage', args: '{}', tool_call_id: 't2' },
+      { type: 'done' },
+    ]
+    for (const e of events) emit(ws, e)
+
+    const trace = chat.items.find(i => i.kind === 'trace')
+    const think = trace.steps.find(s => s.kind === 'thinking')
+    expect(think).toBeTruthy()
+    expect(think.content).toBe('想')
+    expect(think.streaming).toBe(false) // pushToolCall 的安全网兜住了
+  })
+
   it('用例 5：/new（newSession）→ sessionId 更换、messages 清空', async () => {
     const { chat, ws } = await setup()
     emit(ws, { type: 'ai', content: '旧消息' })

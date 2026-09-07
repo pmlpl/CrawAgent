@@ -78,9 +78,12 @@ function thinkSummary(text) {
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z" /></svg>
           </div>
           <span class="step-kind think-kind">thinking · 思考</span>
-          <details class="step-thinking">
-            <summary>{{ thinkSummary(step.content) }}</summary>
-            <pre class="thinking-pre">{{ step.content }}</pre>
+          <details class="step-thinking" :open="step.streaming || step._opened" @toggle="step._opened = $event.target.open">
+            <summary>
+              <span class="think-summary-text">{{ thinkSummary(step.content) }}</span>
+              <span v-if="step.streaming" class="think-live" aria-hidden="true">流式中…</span>
+            </summary>
+            <pre class="thinking-pre" :class="{ streaming: step.streaming }">{{ step.content }}</pre>
           </details>
         </template>
 
@@ -286,6 +289,23 @@ function thinkSummary(text) {
 .step-thinking summary::before { content: "▸ 思考："; color: var(--accent); font-weight: 600; }
 .step-thinking[open] summary::before { content: "▾ 思考："; }
 .step-thinking summary:hover { color: var(--accent); }
+.think-summary-text { vertical-align: middle; }
+.think-live {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 50%, transparent);
+  padding: 1px 6px;
+  border-radius: 8px;
+  animation: think-pulse 1.4s ease-in-out infinite;
+}
+@keyframes think-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.thinking-pre.streaming {
+  border-left-style: solid;
+}
 .thinking-pre {
   margin: 4px 0 0;
   padding: 8px 10px;

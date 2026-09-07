@@ -142,6 +142,7 @@ function createChat() {
   }
 
   function pushToolCall(name, args, toolCallId) {
+    _finalizeOpenThinking() // 工具调用开始 = 上一段思考（若有）已结束
     const step = { name, args, result: null, done: false, startedAt: Date.now() }
     if (toolCallId) step.toolCallId = toolCallId
     ensureTrace().steps.push(step)
@@ -172,11 +173,19 @@ function createChat() {
     statusBySession[session.value] = line
   }
 
-  function pushThinking(content) {
+  function pushThinking(content, id) {
     // 思考轨迹不生成独立卡片，而是作为 trace 的 thinking step 嵌入时间线
     // （放在 tool_call 之前，形成"我的计划 → 调用工具 → 拿到结果"的顺序）
     const trace = ensureTrace()
-    trace.steps.push({ kind: 'thinking', content, done: true })
+    // 若已有同 id 的流式 thinking step（后端理论上发 done 而非整块），防御性收尾、不重复建
+    if (id) {
+      const existing = trace.steps.find(s => s.kind === 'thinking' && s._thinkId === id)
+      if (existing) {
+        existing.streaming = false
+        return
+      }
+    }
+    trace.steps.push({ kind: 'thinking', content, done: true, _thinkId: id, streaming: false, _opened: false })
 
     // 关键去重：流式过程中，AI 会用 ai_delta 先把"工具调用前的计划"流式显示成一个
     // AI 卡片。等 ai_thinking 事件到来时，确认该尾部 AI 卡片内容就是这段思考，
@@ -204,6 +213,38 @@ function createChat() {
     }
 
     console.log('[trace] pushThinking → trace steps:', trace.steps.length)
+  }
+
+  function pushThinkingDelta(id, delta) {
+    // 推理模型思考 token 的流式增量：同 id 复用一条 thinking step，逐块追加。
+    // 让用户在思考阶段就能看到推理过程实时滚动，而不是干等转圈。
+    const trace = ensureTrace()
+    let step = trace.steps.find(s => s.kind === 'thinking' && s._thinkId === id)
+    if (!step) {
+      step = { kind: 'thinking', content: delta, done: true, _thinkId: id, streaming: true, _opened: false }
+      trace.steps.push(step)
+      console.log('[trace] pushThinkingDelta start id=' + id)
+    } else {
+      step.content += delta
+    }
+  }
+
+  function finishThinkingStream(id) {
+    // 后端发 ai_thinking_done：该条思考流结束，标记收尾（折叠容器由 CrawlTrace 据 streaming 渲染）
+    const trace = currentTrace
+    if (!trace) return
+    const step = trace.steps.find(s => s.kind === 'thinking' && s._thinkId === id)
+    if (step) step.streaming = false
+  }
+
+  function _finalizeOpenThinking() {
+    // 安全网：tool_call / ai_delta / 轮次结束时，强制收尾任何仍处于 streaming 的思考 step
+    // （后端异常未发 done、或非推理路径误建时兜底，避免折叠容器卡在展开态）
+    const trace = currentTrace
+    if (!trace) return
+    for (const s of trace.steps) {
+      if (s.kind === 'thinking' && s.streaming) s.streaming = false
+    }
   }
 
   function pushAiDelta(id, delta) {
@@ -299,7 +340,9 @@ function createChat() {
     switch (e.type) {
       case 'tool_call': pushToolCall(e.name, e.args, e.tool_call_id); break
       case 'tool_result': pushToolResult(e.content, e.tool_call_id); break
-      case 'ai_thinking': pushThinking(e.content); break
+      case 'ai_thinking': pushThinking(e.content, e.id); break
+      case 'ai_thinking_delta': pushThinkingDelta(e.id, e.delta); break
+      case 'ai_thinking_done': finishThinkingStream(e.id); break
       case 'ai_delta': pushAiDelta(e.id, e.delta); break
       case 'progress': pushProgress(e); break
       case 'ask': pushAsk(e); break
@@ -331,6 +374,7 @@ function createChat() {
     busy.value = false
     typing.value = false
     currentProgress.value = ''
+    _finalizeOpenThinking() // 轮次结束兜底：收尾任何残留流式思考
     currentTrace = null
     aiStreams.clear()
     stopTick()

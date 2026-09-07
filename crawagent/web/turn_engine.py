@@ -165,7 +165,9 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
     事件协议（JSON）：
         tool_call    {type, name, args}        一次工具调用请求
         tool_result  {type, content}           工具返回（截断预览）
-        ai_thinking  {type, id, content}       推理/思考内容（折叠块，默认收起）
+        ai_thinking         {type, id, content}  推理/思考内容整块（非流式兜底，或工具调用前的计划）
+        ai_thinking_delta   {type, id, delta}   推理模型思考 token 增量（流式，逐块推送）
+        ai_thinking_done    {type, id}           该条思考流结束（前端收尾、折叠）
         ai_delta     {type, id, delta}         最终回答的 token 增量（流式）
         ai_done      {type, id}                该条流式回复结束
         ai           {type, content}           最终回答（非流式兜底）
@@ -233,7 +235,8 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
     started_llm_ids: set[str] = set()  # 已 on_llm_start 过的 AIMessage.id
     pending_tool_starts: dict[str, float] = {}
     streamed_ai: dict[str, str] = {}  # msg.id → 已通过 ai_delta 推送的文本（防 values 快照重发）
-    thinking_sent: set[str] = set()  # msg.id → 已推送过 ai_thinking
+    thinking_sent: set[str] = set()  # msg.id → 已推送过 ai_thinking（整块或 done 信号）
+    streamed_thinking: dict[str, str] = {}  # msg.id → 已通过 ai_thinking_delta 流式推送的推理文本
     metrics.turn_begin()
 
     try:
@@ -263,6 +266,16 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                     if chunk.id not in started_llm_ids:
                         started_llm_ids.add(chunk.id)
                         metrics.on_llm_start()
+                    # 推理模型的思考 token（reasoning_content）—— 逐块流式推送，
+                    # 让前端在思考阶段就能看到推理过程，而不是干等"deeply exploring"转圈。
+                    rdelta = (chunk.additional_kwargs or {}).get("reasoning_content", "")
+                    if isinstance(rdelta, str) and rdelta:
+                        streamed_thinking[chunk.id] = streamed_thinking.get(chunk.id, "") + rdelta
+                        _emit(session_id, q, loop, {
+                            "type": "ai_thinking_delta",
+                            "id": chunk.id,
+                            "delta": rdelta,
+                        })
                     if chunk.content:
                         delta = chunk.content if isinstance(chunk.content, str) else "".join(
                             p.get("text", "") for p in chunk.content if isinstance(p, dict)
@@ -304,7 +317,13 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                         if end > 0:
                             reasoning = msg.content[7:end].strip()
                     thinking_text = reasoning or plan
-                    if thinking_text and msg.id not in thinking_sent:
+                    if msg.id in streamed_thinking:
+                        # 已流式推送过 reasoning：只发结束信号，不重发整块
+                        # （reasoning 模式的 plan 即 msg.content，由下方 ai/去重分支处理，不在此重复）
+                        _emit(session_id, q, loop, {"type": "ai_thinking_done", "id": msg.id})
+                        thinking_sent.add(msg.id)
+                        print(f"[THINKING] streamed done id={str(msg.id)[:8]} len={len(streamed_thinking[msg.id])}")
+                    elif thinking_text and msg.id not in thinking_sent:
                         thinking_sent.add(msg.id)
                         _emit(session_id, q, loop, {
                             "type": "ai_thinking",
