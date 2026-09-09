@@ -80,8 +80,46 @@ def _init_db() -> None:
                 conn.execute(f"ALTER TABLE crawl_records ADD COLUMN {col} TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
+
+    # ── FTS5 全文索引（变更 008）──────────────────────────────
+    # external-content 模式：FTS 只存索引不重复存正文，查询时 JOIN 回主表取 url 等。
+    # trigram 分词：英文按词、中文按 3-gram 子串（≥3 字短语命中；短词由 search_knowledge
+    # 的 LIKE 兜底）。触发器让主表 INSERT/UPDATE/DELETE 自动同步 FTS。
+    fts_available = _ensure_fts5_index(conn)
     conn.commit()
     conn.close()
+
+
+def _ensure_fts5_index(conn: sqlite3.Connection) -> bool:
+    """建 FTS5 虚表 + 触发器 + 回填存量（幂等）。FTS5 不可用则跳过返回 False。"""
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS crawl_records_fts USING fts5("
+            "title, content, content='crawl_records', content_rowid='id', tokenize='trigram')"
+        )
+        for stmt in (
+            "CREATE TRIGGER IF NOT EXISTS cr_fts_ai AFTER INSERT ON crawl_records "
+            "BEGIN INSERT INTO crawl_records_fts(rowid,title,content) "
+            "VALUES(new.id,new.title,new.content); END",
+            "CREATE TRIGGER IF NOT EXISTS cr_fts_ad AFTER DELETE ON crawl_records "
+            "BEGIN DELETE FROM crawl_records_fts WHERE rowid=old.id; END",
+            "CREATE TRIGGER IF NOT EXISTS cr_fts_au AFTER UPDATE ON crawl_records "
+            "BEGIN DELETE FROM crawl_records_fts WHERE rowid=old.id; "
+            "INSERT INTO crawl_records_fts(rowid,title,content) "
+            "VALUES(new.id,new.title,new.content); END",
+        ):
+            conn.execute(stmt)
+        # 回填存量（主表有但 FTS 没有的行；触发器只管新行，老库首次迁要补）
+        conn.execute(
+            "INSERT INTO crawl_records_fts(rowid, title, content) "
+            "SELECT id, title, content FROM crawl_records "
+            "WHERE id NOT IN (SELECT rowid FROM crawl_records_fts)"
+        )
+        return True
+    except sqlite3.OperationalError as e:
+        # FTS5 未编译进 sqlite（罕见）→ 降级，search_knowledge 走纯 LIKE
+        print(f"[save] FTS5 不可用，检索降级为 LIKE: {e}")
+        return False
 
 
 @tool

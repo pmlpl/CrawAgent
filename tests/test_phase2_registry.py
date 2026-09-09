@@ -63,16 +63,16 @@ def test_register_tool_category_deps_logged():
 # —— 2. discover_tools 扫描能力 ——
 
 def test_discover_tools_finds_core_count():
-    """discover_tools 应发现 26 个内置工具；插件工具另计（P2-9 插件规范）。"""
+    """discover_tools 应发现 27 个内置工具；插件工具另计（P2-9 插件规范）。"""
     # 清缓存，强制重新扫描
     import crawagent.tools.registry as reg
     reg._DISCOVERY_CACHE = None
     specs = reg.discover_tools()
     names = [s.name for s in specs]
 
-    # 内置（源码在 crawagent/ 下）= 26；插件（source_file 以 plugins/ 开头）另计
+    # 内置（源码在 crawagent/ 下）= 27；插件（source_file 以 plugins/ 开头）另计
     builtin = [s for s in specs if not s.source_file.startswith("plugins")]
-    assert len(builtin) == 26, f"内置工具应为 26 个，实际 {len(builtin)}: {[s.name for s in builtin]}"
+    assert len(builtin) == 27, f"内置工具应为 27 个，实际 {len(builtin)}: {[s.name for s in builtin]}"
     assert len(names) == len(set(names)), f"工具名有重复: {names}"
 
 

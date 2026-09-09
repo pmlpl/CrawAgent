@@ -133,6 +133,7 @@ _TOOL_META: dict[str, dict[str, Any]] = {
     "extract_list_paged":     {"category": "extract", "deps": ["requests", "bs4"]},
     "save_record":            {"category": "save",    "deps": ["sqlite3"]},
     "list_crawled_resources": {"category": "save",    "deps": ["sqlite3"]},
+    "search_knowledge":       {"category": "save",    "deps": ["sqlite3"]},
     "save_to_file":           {"category": "save",    "deps": ["pathlib"]},
     "download_images":        {"category": "save",    "deps": ["requests"]},
     "extract_social_media":   {"category": "site",    "deps": ["requests"]},

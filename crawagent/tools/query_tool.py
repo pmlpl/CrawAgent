@@ -115,3 +115,103 @@ def list_crawled_resources(
         lines.append(f"{i}. {plat_str} {title_str} | {url[:80]} | {time_str}{save_str}")
 
     return "\n".join(lines)
+
+
+def _fts_available() -> bool:
+    """探测 crawl_records_fts 虚表是否就绪（FTS5 不可用时 _init_db 会跳过建表）。"""
+    _init_db()
+    conn = sqlite3.connect(_get_db_path())
+    try:
+        r = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='crawl_records_fts'"
+        ).fetchone()
+        return r is not None
+    finally:
+        conn.close()
+
+
+@tool
+def search_knowledge(query: str, limit: int = 10, scope: str = "session") -> str:
+    """Full-text search the local knowledge base (crawled content stored via save_record).
+
+    THE RETRIEVE-FIRST TOOL: before crawling a URL/topic, call this. If a hit covers
+    what you need, answer from the KB — do NOT re-crawl. Only on miss (or insufficient)
+    do you go fetch, and after a successful fetch you save_record so the KB grows.
+
+    Searches title + content, ranks by relevance (bm25), returns a snippet of the
+    matching passage for each hit so you can cite the right segment.
+
+    Scope rules (same as list_crawled_resources):
+    - scope="session" (default): only the current conversation's records.
+    - scope="all": across ALL sessions — use when the user asks "之前/历史/有没有抓过".
+
+    Args:
+        query: search terms. Natural language works; for multi-term AND just space-separate.
+        limit: max hits (default 10).
+        scope: "session" (default) or "all".
+
+    Returns:
+        "Found N段 (scope=...):\n1. [平台] 标题 | url\n   …匹配文段摘录…\n2. ..."
+        Or "No match for '...'. 可出门抓取并 save_record 入库。"
+    """
+    _init_db()
+    db_path = _get_db_path()
+    conn = sqlite3.connect(db_path)
+    scope = "all" if str(scope).strip().lower() == "all" else "session"
+    current_sid = _current_session.get("")
+    scope_desc = f"scope=all" if scope == "all" else f"scope=session ({current_sid or '未指定'})"
+
+    rows: list = []
+    # 1) FTS5 trigram 主检索（英文按词、中文 ≥3 字短语命中）
+    if _fts_available():
+        try:
+            sql = (
+                "SELECT r.id, r.url, r.title, r.platform, "
+                "snippet(crawl_records_fts, 1, '[', ']', '...', 16) AS excerpt "
+                "FROM crawl_records_fts f JOIN crawl_records r ON r.id = f.rowid "
+                "WHERE crawl_records_fts MATCH ? "
+            )
+            params: list = [query]
+            if scope == "session":
+                sql += "AND r.session_id = ? "
+                params.append(current_sid)
+            sql += "ORDER BY bm25(crawl_records_fts) LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            rows = []  # FTS 查询语法异常（如纯符号）→ 走 LIKE 兜底
+
+    # 2) LIKE 兜底：FTS 无命中或查询过短（trigram 需 ≥3 字符）→ content LIKE 子串匹配
+    if not rows:
+        sql = ("SELECT id, url, title, platform, substr(content, "
+               "max(1, instr(content, ?) - 40), 120) FROM crawl_records "
+               "WHERE content LIKE ? ")
+        like_q = f"%{query}%"
+        params = [query, like_q]
+        if scope == "session":
+            sql += "AND session_id = ? "
+            params.append(current_sid)
+        sql += "ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    conn.close()
+
+    if not rows:
+        return (f"No match for '{query}' ({scope_desc}).\n"
+                "库中无相关内容 —— 可出门抓取（crawl_webpage / browse_and_crawl），"
+                "成功后用 save_record 入库，下次即可命中。")
+
+    lines = [f"Found {len(rows)}段 ({scope_desc}):"]
+    for i, row in enumerate(rows, 1):
+        rec_id, url, title, plat, excerpt = row
+        plat_str = f"[{plat}]" if plat else "[未知]"
+        title_str = (title[:50] + "...") if title and len(title) > 50 else (title or "(无标题)")
+        excerpt_str = (excerpt or "").replace("\n", " ").strip()
+        if len(excerpt_str) > 160:
+            excerpt_str = excerpt_str[:160] + "..."
+        lines.append(f"{i}. {plat_str} {title_str} | {url[:80]}")
+        lines.append(f"   …{excerpt_str}…")
+    return "\n".join(lines)
