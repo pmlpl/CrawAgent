@@ -117,6 +117,46 @@ _ZHIPU_EFFORT_MAP = {
 }
 
 
+def _ensure_no_proxy_for(base_url: str) -> None:
+    """若 LLM base_url 是 loopback/私网地址（含 CGNAT 100.64/10，Tailscale 走这个），
+    把 host 加进 NO_PROXY，避免 openai SDK 的 httpx 把本地/内网 LLM 请求塞进
+    系统代理（Privoxy 之类）转发失败（500 no-server-data）。公网域名不动——
+    那些可能本就需要代理才能到（用户的网络到 api.deepseek.com 直连 000）。
+    """
+    import ipaddress
+    import os
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except Exception:
+        return
+    if not host:
+        return
+    bypass = False
+    if host in ("localhost", "::1") or host.startswith("127."):
+        bypass = True
+    else:
+        try:
+            ip = ipaddress.ip_address(host)
+            # Python 3.13 起 is_private 不再含 CGNAT 100.64/10（Tailscale 走这段），显式补上
+            bypass = bool(
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or (ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"))
+            )
+        except ValueError:
+            bypass = False  # 公网域名，不自动 bypass
+    if not bypass:
+        return
+    cur = os.environ.get("NO_PROXY", "")
+    parts = [p.strip() for p in cur.split(",") if p.strip()]
+    if host not in parts:
+        parts.append(host)
+        os.environ["NO_PROXY"] = ",".join(parts)
+
+
 def get_llm(
     model: str | None = None,
     thinking: bool | None = None,
@@ -132,6 +172,7 @@ def get_llm(
         ChatOpenAI 实例，支持 tool calling + 自动重试（3 次）
     """
     model_name, base_url, api_key, adapter = resolve_model(model)
+    _ensure_no_proxy_for(base_url)
 
     # ── 基础 kwargs（所有 provider 共用） ──────────────────────────
     kwargs: dict = {
