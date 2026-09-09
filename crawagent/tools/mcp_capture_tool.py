@@ -79,12 +79,17 @@ def auto_sync_mcp_token() -> bool:
     port = int(electron_cfg.get("port", 23816))
     enabled = bool(electron_cfg.get("enabled", False))
 
-    # 如果 .env 里根本没配 MCP_SERVERS，我们也帮用户生成一份默认值
+    # 从权威源 get_settings().mcp_servers 读现有列表（.env 里的全部 server，含
+    # 用户手动加的 browser-harness 等）。不能读 os.environ——pydantic-settings 不
+    # 把 .env 导出进 os.environ，启动期 os.environ["MCP_SERVERS"] 是空的，从它读
+    # 会丢掉 .env 里除 anything-analyzer 外的所有 server。
     try:
-        raw = os.environ.get("MCP_SERVERS", "")
-        servers = json.loads(raw) if raw else []
-    except json.JSONDecodeError:
+        from crawagent.config.settings import get_settings
+        raw = get_settings().mcp_servers
+        servers = json.loads(raw) if raw.strip() else []
+    except (json.JSONDecodeError, Exception) as e:
         servers = []
+        print(f"[MCP] auto_sync 读取现有 MCP_SERVERS 失败，将只新建 anything-analyzer: {e}")
 
     # 找已有的 anything-analyzer server 或新建一个
     target = None
