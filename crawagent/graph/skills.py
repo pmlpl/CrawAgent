@@ -140,10 +140,15 @@ _mcp_spawned = False  # 本进程只自动拉起一次
 
 
 def reset_mcp_cache() -> None:
-    """清空 MCP 工具缓存（设置页改了 MCP 配置 / token 后调用）。"""
-    global _mcp_tools_cache, _mcp_cache_signature
+    """清空 MCP 工具缓存（设置页改了 MCP 配置 / token 后调用）。
+
+    同时清失败负缓存：让下一次 get_mcp_tools 重新探测所有 server
+    （服务拉起后调 check_mcp_status force 路径会触发 reset → 下轮重试装载）。
+    """
+    global _mcp_tools_cache, _mcp_cache_signature, _mcp_fail_cache
     _mcp_tools_cache = {}
     _mcp_cache_signature = ""
+    _mcp_fail_cache = {}
 
 
 def _port_listening(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -389,6 +394,10 @@ _mcp_spawned = False  # 本进程只自动拉起一次
 # 下次调用自动重试（用户可能刚把服务拉起来），且不拖累其它 server。
 _mcp_tools_cache: dict[str, list] = {}
 _mcp_cache_signature: str = ""
+# 失败负缓存：server name → 最近一次连接失败的时间戳。TTL 内不重复探测、不刷屏；
+# reset_mcp_cache / 配置指纹变化后清空，触发重新探测（服务拉起后下轮重试装载）。
+_mcp_fail_cache: dict[str, float] = {}
+_FAIL_TTL_SEC: float = 60.0
 
 
 def _mcp_config_signature() -> str:
@@ -516,10 +525,15 @@ def get_mcp_tools() -> list:
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
     merged: dict[str, list] = {}
+    import time as _time
     for srv in servers:
         name = srv.get("name")
         if not name or srv.get("disabled"):
             continue  # 设置页生态面板按 server 开关：disabled = 跳过装载
+        # 失败负缓存：TTL 内不重复探测，避免 enabled-but-down 的 server 每次构建都刷屏。
+        # 首次失败仍会打印一行（下方 except）；后续 60s 内静默跳过。
+        if name in _mcp_fail_cache and (_time.time() - _mcp_fail_cache[name]) < _FAIL_TTL_SEC:
+            continue
         conn_entry = _server_conn(srv)
         if not conn_entry:
             continue
@@ -532,6 +546,7 @@ def get_mcp_tools() -> list:
             tools = asyncio.run(client.get_tools())
             if tools:
                 merged[name] = tools
+                _mcp_fail_cache.pop(name, None)  # 成功 → 清失败标记
                 print(f"[MCP] '{name}' loaded {len(tools)} tools ({srv.get('transport', 'stdio')})")
             else:
                 print(f"[MCP] '{name}' 连接成功但 0 个工具")
@@ -540,7 +555,8 @@ def get_mcp_tools() -> list:
             root = e
             while hasattr(root, "exceptions") and root.exceptions:
                 root = root.exceptions[0]
-            print(f"[MCP] '{name}' 连接失败（跳过该 server，不影响其它）: {type(root).__name__}: {root}")
+            _mcp_fail_cache[name] = _time.time()  # 记失败时间戳，TTL 内不重试不刷屏
+            print(f"[MCP] '{name}' 连接失败（跳过该 server，不影响其它，{_FAIL_TTL_SEC:.0f}s 内不重试）: {type(root).__name__}: {root}")
 
     _mcp_tools_cache = merged
     _mcp_cache_signature = sig
