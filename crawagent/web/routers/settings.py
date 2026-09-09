@@ -432,15 +432,15 @@ async def get_ecosystem_route() -> dict[str, Any]:
     }
 
 
-@router.post("/api/mcp/servers/save")
-async def save_mcp_servers_route(payload: dict = Body(...)) -> dict[str, Any]:
-    """整表保存 MCP server 列表（设置页生态面板：开关/增删/编辑）。
+def save_mcp_servers(incoming: list[dict]) -> dict:
+    """整表保存 MCP server 列表（共用真源：设置页路由 + 聊天即加 @tool 都调它）。
 
-    - 含 *** 的 header 值视为脱敏掩码，还原为 .env 里的原值
-    - 保存后清 settings/MCP/Agent 三层缓存，并在后台预热一次握手
-      （stdio server 冷启动需数秒，前端保存按钮期间完成）
+    同步：校验 → _unmask_mcp_headers 保鉴权 → 写 .env → 清 settings/MCP/Agent
+    三层缓存。不做预热握手（async，留给调用方：路由 await to_thread(get_mcp_tools)；
+    @tool 用同步 mcp_servers_status 回告连通性即可）。
+
+    Returns: {"ok": bool, "error"?: str, "mcp_servers": list[dict]（脱敏后)}
     """
-    incoming = payload.get("servers")
     if not isinstance(incoming, list):
         return {"ok": False, "error": "servers 必须是数组"}
 
@@ -488,23 +488,42 @@ async def save_mcp_servers_route(payload: dict = Body(...)) -> dict[str, Any]:
     _save_env_updates({"MCP_SERVERS": json.dumps(cleaned, ensure_ascii=False)})
     get_settings.cache_clear() if hasattr(get_settings, "cache_clear") else None
 
-    from crawagent.graph.skills import get_mcp_tools, reset_mcp_cache
+    from crawagent.graph.skills import reset_mcp_cache
     from crawagent.web.state import reset_agent_cache
 
     reset_mcp_cache()
     reset_agent_cache()
+
+    try:
+        raw = json.loads(get_settings().mcp_servers)
+    except json.JSONDecodeError:
+        raw = []
+    return {"ok": True, "mcp_servers": _mask_mcp_headers(raw)}
+
+
+@router.post("/api/mcp/servers/save")
+async def save_mcp_servers_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """整表保存 MCP server 列表（设置页生态面板：开关/增删/编辑）。
+
+    - 含 *** 的 header 值视为脱敏掩码，还原为 .env 里的原值
+    - 保存后清 settings/MCP/Agent 三层缓存，并在后台预热一次握手
+      （stdio server 冷启动需数秒，前端保存按钮期间完成）
+    """
+    res = save_mcp_servers(payload.get("servers"))
+    if not res.get("ok"):
+        return res
+
     # 预热握手：让保存完立刻能看到各 server 工具数（失败也不阻塞保存本身）
     try:
+        from crawagent.graph.skills import get_mcp_tools
+
         await asyncio.to_thread(get_mcp_tools)
     except Exception:
         pass
 
     from crawagent.graph.skills import mcp_servers_status
-    try:
-        raw = json.loads(get_settings().mcp_servers)
-    except json.JSONDecodeError:
-        raw = []
-    return {"ok": True, "mcp_servers": _mask_mcp_headers(raw), "mcp_status": mcp_servers_status()}
+    res["mcp_status"] = mcp_servers_status()
+    return res
 
 
 @router.post("/api/ecosystem/open-folder")

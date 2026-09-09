@@ -16,7 +16,7 @@ def test_settings_load():
 
 
 def test_agent_builds():
-    """get_agent() 成功 = LLM + 17 个工具装配正确（构造期无网络请求）。"""
+    """get_agent() 成功 = LLM + 27 个工具装配正确（构造期无网络请求）。"""
     from crawagent.graph.agent import get_agent
     agent = get_agent()
     assert hasattr(agent, "stream") and hasattr(agent, "invoke")

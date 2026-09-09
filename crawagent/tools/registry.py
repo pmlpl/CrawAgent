@@ -148,6 +148,10 @@ _TOOL_META: dict[str, dict[str, Any]] = {
     "ask_user":               {"category": "general", "deps": []},
     "video_site_expert":      {"category": "site",    "deps": ["langgraph"]},
     "read_skill":             {"category": "skill",   "deps": ["yaml"]},
+    "list_mcp_servers":       {"category": "eco",     "deps": []},
+    "add_mcp_server":         {"category": "eco",     "deps": []},
+    "remove_mcp_server":      {"category": "eco",     "deps": []},
+    "disable_mcp_server":     {"category": "eco",     "deps": []},
 }
 
 # 内部模块黑名单：这些模块里的 BaseTool 不应该被 discover_tools 收集
@@ -501,6 +505,7 @@ def specs_to_prompt(specs: list[ToolSpec] | None = None, group_by_category: bool
             "script": "🔧 Script",
             "mcp": "🖥️ MCP",
             "skill": "📚 Skills",
+            "eco": "🔌 Ecosystem",
             "general": "General",
         }
         for cat, items in by_cat.items():
