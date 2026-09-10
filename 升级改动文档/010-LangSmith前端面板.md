@@ -83,3 +83,14 @@ P2-8 LangSmith 面板集成。后端早已铺好（`crawagent/config/settings.py
 - 勾追踪但 key 空 → 报红阻止保存
 - 保存成功后 tip 提示重启
 - 基线 214 pytest + 10 vitest 全绿（+4 新测试 → 218 pytest）
+
+## 实施记录（人话版，2026-09-10，commit f93c27d）
+
+实际 +6 测试（非规格预估的 +4）：拆出掩码回显、空 key 不覆盖两用例，共 220 pytest。
+
+- **后端**：`_settings_snapshot` 末尾加三字段 + 新增 `_mask_key` helper（空→""，否则 `****`+末4位）。`post_settings_route` 在数值表循环后加 langsmith 分支：`langsmith_api_key` 含 `*` 跳过、`langsmith_project` 默认 crawagent、`langsmith_tracing` bool→`"true"`/`"false"` 字符串。保存后 `get_settings.cache_clear()` 用 hasattr 守卫（`get_settings` 实际无 lru_cache，与 MCP save 路径同款兜底，未来若加缓存即生效）。
+- **前端**：`useSettings.state` 加 `langsmith` block；`load()` 从 snapshot 赋值。`SettingsAdvanced.vue` 末尾加 card（password 输入框 + 项目名 + checkbox），本地 `langTip`/`savingLang` 避免跨卡串显，`saveLangsmith()` 前端校验「勾追踪但 key 空」→报红阻止，保存成功提示「重启 CrawAgent 后追踪生效」。
+- **关键认知**：`get_settings()` 非 lru_cache，每次现读 .env；但 langchain 运行时在**进程启动**时读 `LANGSMITH_*` env（`get_settings` 用 `os.environ.setdefault` 导出，只设不覆盖），所以保存 `.env` 后跑着的进程不会热生效——必须重启。这与 LLM key/思考深度同款，UI 用重启 tip 体现，不引入「实时进程状态」端点。
+- **踩坑**：测试 fixture monkeypatch `settings_mod.ENV_FILE` 不够——`Settings.model_config.env_file` 钉死项目根 `.env`（line 47），且 pydantic env vars 优先于 .env。fixture 须额外 `setitem(Settings.model_config, "env_file", tmp)` + 清 `os.environ` 的 `LANGSMITH_*`，snapshot 值断言才准。`get_settings` 的 `os.environ.setdefault` 会污染进程 env，故 roundtrip 测试不可靠（保存后 os.environ 持旧值），改全文件级断言（与 `test_settings_advanced` 同款）。
+- **回归**：`test_web_api` 两个 `SimpleNamespace` 桩缺 langsmith 字段 → AttributeError，补上；`test_settings_get_does_not_leak_api_key` 的 `"api_key" not in json.dumps(body)` 过宽（`langsmith_api_key` 命中子串），收窄到 `body["providers"]`。
+- 基线 220 pytest + 10 vitest 全绿。
