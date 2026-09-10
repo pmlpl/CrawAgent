@@ -187,9 +187,10 @@ async function saveLangsmith() {
         <input type="text" v-model="state.langsmith.project" placeholder="crawagent" spellcheck="false" autocomplete="off" />
         <span class="hint">LangSmith 项目名，默认 crawagent</span>
       </label>
-      <label class="field" style="flex-direction: row; align-items: center; gap: 8px">
-        <input type="checkbox" v-model="state.langsmith.tracing" style="width: auto" />
-        <span class="label" style="margin: 0">启用链路追踪</span>
+      <label class="switch-field">
+        <input type="checkbox" v-model="state.langsmith.tracing" class="switch-input" />
+        <span class="switch-track"><span class="switch-knob" /></span>
+        <span class="label">启用链路追踪</span>
       </label>
       <div class="actions" style="justify-content: flex-start">
         <button type="button" class="btn-primary" :disabled="savingLang" @click="saveLangsmith">
@@ -207,5 +208,50 @@ async function saveLangsmith() {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
   margin-bottom: 4px;
+}
+
+/* 滑动开关（LangSmith 追踪）：checkbox 隐身，轨道+滑块呈现左右切换 */
+.switch-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  max-width: 360px;
+}
+.switch-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch-track {
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  background: rgba(128, 128, 128, 0.35);
+  position: relative;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s;
+}
+.switch-input:checked + .switch-track {
+  background: var(--accent);
+}
+.switch-input:checked + .switch-track .switch-knob {
+  transform: translateX(18px);
+}
+.switch-input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 </style>
