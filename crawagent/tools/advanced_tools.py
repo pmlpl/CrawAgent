@@ -53,7 +53,7 @@ def markitdown_convert(file_path: str) -> str:
 
 
 @tool
-def crawl4ai_deep_crawl(url: str, max_pages: int = 50) -> str:
+def crawl4ai_deep_crawl(url: str, max_pages: int = 50, lang: str = "") -> str:
     """Deep-crawl a whole site (DFS/BFS traversal) and return Markdown per page.
 
     Uses crawl4ai's AsyncWebCrawler + BestFirstCrawlingStrategy — handles JS rendering
@@ -66,9 +66,14 @@ def crawl4ai_deep_crawl(url: str, max_pages: int = 50) -> str:
     Heavy: spawns a Playwright browser + crawls up to max_pages. Defaults to 50 pages.
     Raises per-page failures are skipped (one bad page doesn't kill the whole crawl).
 
+    Language dedup: pass lang="zh" to DROP alternate-language variants of the same page
+    (e.g. /de/ /es/ /fr/ /en/ ...), keeping only the preferred language + language-neutral
+    URLs. Saves quota by not crawling the same content in 10 languages.
+
     Args:
         url: starting URL (site root or docs index).
         max_pages: cap on pages crawled (default 50; lower for quick tests).
+        lang: preferred language code (e.g. "zh", "en"). Empty = no language filter.
 
     Returns:
         "Crawled N pages:\n1. <url>\n   <markdown 前 200 字>...\n2. ..."
@@ -78,22 +83,37 @@ def crawl4ai_deep_crawl(url: str, max_pages: int = 50) -> str:
     try:
         from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
         from crawl4ai.deep_crawling import BestFirstCrawlingStrategy
+        from crawl4ai.deep_crawling.filters import FilterChain, URLPatternFilter
     except Exception as e:
         return f"[ERROR] crawl4ai 未安装或损坏: {type(e).__name__}: {e}"
 
+    # 语言变体去重：lang=zh 时 deny 其它语种的 /xx/ 路径段（语言中性 URL 保留）
+    filter_chain = FilterChain()
+    lang = (lang or "").strip().lower()
+    if lang:
+        # 常见语种；preferred 及其变体保留，其余 deny
+        ALL_LANGS = ["en", "de", "es", "fr", "it", "pt", "ru", "ja", "ko", "ar",
+                     "nl", "pl", "tr", "vi", "th", "id", "zh", "zh-cn", "zh-tw",
+                     "zh-hans", "zh-hant", "ja-jp", "ko-kr", "en-us", "en-gb"]
+        # preferred 的变体也保留（如 lang=zh → zh/zh-cn/zh-tw/zh-hans/zh-hant 都留）
+        keep = {c for c in ALL_LANGS if c == lang or c.startswith(lang + "-")}
+        deny = [c for c in ALL_LANGS if c not in keep]
+        patterns = [f"*/{c}/*" for c in deny] + [f"*/{c}" for c in deny]
+        # reverse=True = deny 模式：匹配的 URL 丢弃
+        filter_chain = FilterChain([URLPatternFilter(patterns, reverse=True)])
+
     async def _run() -> list:
-        # max_depth 控制爬多深（必填），max_pages 控制总页数上限
-        strat = BestFirstCrawlingStrategy(max_depth=3, max_pages=max_pages)
+        strat = BestFirstCrawlingStrategy(
+            max_depth=3, max_pages=max_pages, filter_chain=filter_chain
+        )
         cfg = CrawlerRunConfig(deep_crawl_strategy=strat, stream=False, cache_mode="BYPASS")
         results: list = []
         async with AsyncWebCrawler() as crawler:
             res = await crawler.arun(url=url, config=cfg)
-        # crawl4ai 深度抓取可能返回单个 CrawlResult（含子页）或 list；统一收口
         items = res if isinstance(res, (list, tuple)) else [res]
         for r in items:
             try:
                 md = getattr(r, "markdown", None) or getattr(r, "text_content", None) or ""
-                # 取正文 markdown（ crawl4ai 可能返回带 metadata 的 dict-like）
                 if not isinstance(md, str):
                     md = str(md)
                 results.append({"url": getattr(r, "url", "?"), "md": md})
@@ -108,7 +128,7 @@ def crawl4ai_deep_crawl(url: str, max_pages: int = 50) -> str:
     if not items:
         return f"[ERROR] 抓取 0 页（url={url} 可能不可达或全是 JS 空壳）"
 
-    lines = [f"Crawled {len(items)} pages (from {url}):"]
+    lines = [f"Crawled {len(items)} pages (from {url}" + (f", lang={lang}" if lang else "") + "):"]
     for i, it in enumerate(items, 1):
         preview = (it["md"] or "").replace("\n", " ").strip()[:200]
         lines.append(f"{i}. {it['url']}")
@@ -147,15 +167,32 @@ def browser_use_navigate(url: str, task: str) -> str:
     except Exception as e:
         return f"[ERROR] browser_use 未安装或损坏: {type(e).__name__}: {e}"
 
-    # 选项 A：复用 CrawAgent 的 LLM 配置（resolve_model 解析 .env 的 provider/key/base_url），
-    # 但包成 browser-use 0.13 的 ChatOpenAILike（它要 .provider 属性，裸 langchain ChatOpenAI 不行）。
+    # LLM 配置（三档，浏览器操作用便宜模型即可）：
+    #  1) BROWSER_USE_LLM_API_KEY（+ 可选 _BASE_URL/_MODEL）：独立 cheap key（推荐，如 OpenAI gpt-4o-mini）
+    #  2) 仅 BROWSER_USE_LLM_MODEL：复用 CrawAgent 的 provider base_url+key，但换便宜模型
+    #     （如 glm-5.3-flash / glm-5.3-free，同局域网免额外 key）
+    #  3) 都不设：默认用 CrawAgent 的主 LLM（glm-5.2，带思考，较贵——不推荐用于浏览器步骤）
     try:
         from crawagent.llm.registry import resolve_model
+        from crawagent.llm.model import _ensure_no_proxy_for
 
-        model_name, base_url, api_key, _adapter = resolve_model(None)
-        llm = ChatOpenAILike(model=model_name, api_key=api_key, base_url=base_url)
+        env_key = os.environ.get("BROWSER_USE_LLM_API_KEY", "").strip()
+        env_model = os.environ.get("BROWSER_USE_LLM_MODEL", "").strip()
+        env_base = os.environ.get("BROWSER_USE_LLM_BASE_URL", "").strip()
+
+        if env_key:
+            base = env_base or "https://api.openai.com/v1"
+            model = env_model or "gpt-4o-mini"
+            llm = ChatOpenAILike(model=model, api_key=env_key, base_url=base)
+            _ensure_no_proxy_for(base)
+        else:
+            # 复用 CrawAgent provider（.env LLM_PROVIDERS 解析）
+            model_name, base_url, api_key, _adapter = resolve_model(None)
+            model = env_model or model_name  # 允许只换模型不换 key
+            llm = ChatOpenAILike(model=model, api_key=api_key, base_url=base_url)
+            _ensure_no_proxy_for(base_url)
     except Exception as e:
-        return f"[ERROR] 无法构造 LLM（检查 .env 的 LLM_PROVIDERS）: {e}"
+        return f"[ERROR] 无法构造 LLM（检查 .env 的 LLM_PROVIDERS 或 BROWSER_USE_LLM_* 环境变量）: {e}"
 
     async def _run() -> str:
         # browser-use 0.13：Agent 直接接 browser=Browser(headless=...)
