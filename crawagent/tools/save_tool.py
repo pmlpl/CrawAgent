@@ -74,7 +74,7 @@ def _init_db() -> None:
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(crawl_records)")
     existing_cols = {row[1] for row in cursor.fetchall()}
-    for col in ("platform", "save_path", "session_id"):
+    for col in ("platform", "save_path", "session_id", "content_md5"):
         if col not in existing_cols:
             try:
                 conn.execute(f"ALTER TABLE crawl_records ADD COLUMN {col} TEXT DEFAULT ''")
@@ -123,11 +123,16 @@ def _ensure_fts5_index(conn: sqlite3.Connection) -> bool:
 
 
 @tool
-def save_record(url: str, title: str, content: str, extra_data: str = "", platform: str = "", save_path: str = "") -> str:
-    """把抽取到的内容保存进本地 SQLite 数据库。
+def save_record(url: str, title: str, content: str, extra_data: str = "", platform: str = "", save_path: str = "", html: str = "") -> str:
+    """把抽取到的内容保存进本地 SQLite 数据库（带五关质量过滤）。
 
     **必须在确认内容正确且完整后再调**。
     如果内容空、乱码、或被反爬挡住没抽出来 → 严禁调用它存一条垃圾记录。
+
+    五关质量过滤（不过关不入库，淘汰进 rejected_records 表）：
+    ① 长度 < 200 字 / ② 信噪比 正文/HTML < 15%（传了 html 才判）/ ③ md5(前500字) 去重
+    ④ 无标题或无结构 / ⑤ 链接文字比 > 25% 或 营销词多且代码密度低。
+    被拒时返回 [REJECTED] + 原因；与已有记录重复返回 [DUPLICATE]。
 
     参数：
         url: 被爬页面的 URL
@@ -136,9 +141,12 @@ def save_record(url: str, title: str, content: str, extra_data: str = "", platfo
         extra_data: 可选附加数据（JSON 字串），如链接列表、图片清单
         platform: 可选平台名，例 "番茄小说" / "抖音" / "B站"；为空则从 URL 推断
         save_path: 可选。如果内容也同时存了本地文件，这里填对应绝对路径
+        html: 可选原始 HTML。crawl_webpage 返回的原文传这里，让信噪比(②)与链接比(⑤)生效
 
     返回：
-        成功："保存成功! 记录 ID: <id>, URL: <url>, 标题: <title>, 内容长度: <N>字"
+        成功："Saved successfully! Record ID: <id>..."
+        淘汰："[REJECTED] <原因>（已记入 rejected_records）"
+        重复："[DUPLICATE] 与已有记录 ID X 相同，跳过入库"
         失败：数据库错误信息字串。
     """
     _init_db()
@@ -147,14 +155,27 @@ def save_record(url: str, title: str, content: str, extra_data: str = "", platfo
     if not platform:
         platform = _infer_platform(url)
 
+    from crawagent.tools.quality_filter import run_quality_gates, record_rejection
+
     conn = sqlite3.connect(db_path)
     try:
+        # 五关质量过滤（关③去重需要 conn 查 content_md5）
+        passed, fingerprint, reject_reason = run_quality_gates(conn, url, title, content, html)
+        if not passed:
+            # 关③去重命中的 reason 形如"与已有记录 ID X..."——语义是跳过不是淘汰
+            if reject_reason and reject_reason.startswith("与已有记录"):
+                return f"[DUPLICATE] {reject_reason}，跳过入库"
+            # 其余四关 → 淘汰进 rejected_records
+            record_rejection(conn, url, title, reject_reason or "未知原因", content, fingerprint)
+            conn.commit()
+            return f"[REJECTED] {reject_reason}（已记入 rejected_records，正文不入库）"
+
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO crawl_records (url, title, content, extra_data, created_at, platform, save_path, session_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO crawl_records (url, title, content, extra_data, created_at, platform, save_path, session_id, content_md5) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (url, title, content, extra_data, datetime.now().isoformat(), platform, save_path,
-             _current_session.get("")),
+             _current_session.get(""), fingerprint),
         )
         record_id = cursor.lastrowid
         conn.commit()

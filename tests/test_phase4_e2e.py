@@ -168,7 +168,7 @@ def test_e2e_browse_extract_save(html_server, monkeypatch, tmp_path):
                 "args": {
                     "url": fixture_url,
                     "title": "AI 爬虫框架 CrawAgent 发布 1.0",
-                    "content": "# AI 爬虫框架 CrawAgent 发布 1.0\n\n## 引言\n\nCrawAgent 是一个智能爬虫框架。",
+                    "content": "# AI 爬虫框架 CrawAgent 发布 1.0\n\n## 引言\n\nCrawAgent 是一个智能爬虫框架，基于 LangGraph 与 FastAPI 构建。它通过 LLM 自主决策调用工具，完成网页抓取、内容提取与存储。本文介绍其架构设计与核心能力。\n\n## 架构\n\n- 工具层：@tool 函数自动注册\n- Agent 层：LangGraph create_agent\n- 存储层：SQLite + FTS5 全文检索\n\n## 总结\n\nCrawAgent 把抓取、提取、存储串成闭环，配合本地知识库实现 retrieve-first。",
                     "platform": "example",
                 },
             }],

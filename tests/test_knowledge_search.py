@@ -113,7 +113,9 @@ def test_trigger_sync_on_insert(tmp_path, monkeypatch):
     st._init_db()
     st.set_current_session("s1")
     # 用 save_record 插（触发 AFTER INSERT 触发器）
-    st.save_record.func(url="http://d", title="新内容", content="一个全新主题的独特关键词组合")
+    # content ≥200 字（过 quality_filter 关①长度，否则会被拒不入库，FTS 也建不上索引）
+    long_content = ("这是一个用于验证触发器同步的全新主题文档，包含独特关键词组合。\n\n") * 8
+    st.save_record.func(url="http://d", title="新内容", content=long_content)
     res = qt.search_knowledge.func("独特关键词")
     assert "Found" in res
     assert "http://d" in res
