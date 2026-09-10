@@ -52,6 +52,33 @@ def markitdown_convert(file_path: str) -> str:
         return f"[ERROR] markitdown 转换失败 ({p.name}): {type(e).__name__}: {e}"
 
 
+# 常见 locale 路径段（文档站的语言前缀）。preferred 及其变体保留，其余 deny。
+_LOCALE_SEGMENTS = (
+    "en", "en-us", "en-gb", "en-au", "en-ca", "de", "es", "es-es", "es-mx", "fr",
+    "fr-ca", "it", "pt", "pt-br", "ru", "ja", "ja-jp", "ko", "ko-kr", "ar",
+    "nl", "pl", "tr", "vi", "th", "id", "zh", "zh-cn", "zh-tw", "zh-hans",
+    "zh-hant", "cs", "el", "fi", "sv", "da", "no", "hu", "ro", "uk", "hi",
+    "bn", "fa", "ms", "fil", "he",
+)
+
+
+def _lang_deny_patterns(lang: str) -> list[str]:
+    """lang="zh" → 返回 glob deny 模式：丢弃其它语种 /xx/ 路径段，
+    保留 preferred(+变体) + 语言中性 URL（无 locale 前缀的页面，如 /api/...）。
+
+    匹配"与起始语言前缀不一致"的语义：preferred 的变体（zh-cn/zh-tw/zh-hans/zh-hant）
+    也保留；只 deny 明确是其它语种的段。语言中性 URL 不命中任何 deny → 保留。
+    """
+    lang = (lang or "").strip().lower()
+    if not lang:
+        return []
+    # preferred 及其变体保留（lang=zh → zh/zh-cn/zh-tw/zh-hans/zh-hant 都留）
+    keep = {c for c in _LOCALE_SEGMENTS if c == lang or c.startswith(lang + "-")}
+    deny = [c for c in _LOCALE_SEGMENTS if c not in keep]
+    # glob：*/de/* 命中路径中段 /de/；*/de 命中末段（少见的纯语种路径）
+    return [f"*/{c}/*" for c in deny] + [f"*/{c}" for c in deny]
+
+
 @tool
 def crawl4ai_deep_crawl(url: str, max_pages: int = 50, lang: str = "") -> str:
     """Deep-crawl a whole site (DFS/BFS traversal) and return Markdown per page.
@@ -89,16 +116,8 @@ def crawl4ai_deep_crawl(url: str, max_pages: int = 50, lang: str = "") -> str:
 
     # 语言变体去重：lang=zh 时 deny 其它语种的 /xx/ 路径段（语言中性 URL 保留）
     filter_chain = FilterChain()
-    lang = (lang or "").strip().lower()
-    if lang:
-        # 常见语种；preferred 及其变体保留，其余 deny
-        ALL_LANGS = ["en", "de", "es", "fr", "it", "pt", "ru", "ja", "ko", "ar",
-                     "nl", "pl", "tr", "vi", "th", "id", "zh", "zh-cn", "zh-tw",
-                     "zh-hans", "zh-hant", "ja-jp", "ko-kr", "en-us", "en-gb"]
-        # preferred 的变体也保留（如 lang=zh → zh/zh-cn/zh-tw/zh-hans/zh-hant 都留）
-        keep = {c for c in ALL_LANGS if c == lang or c.startswith(lang + "-")}
-        deny = [c for c in ALL_LANGS if c not in keep]
-        patterns = [f"*/{c}/*" for c in deny] + [f"*/{c}" for c in deny]
+    patterns = _lang_deny_patterns(lang)
+    if patterns:
         # reverse=True = deny 模式：匹配的 URL 丢弃
         filter_chain = FilterChain([URLPatternFilter(patterns, reverse=True)])
 

@@ -66,6 +66,53 @@ def test_crawl4ai_bad_url():
     assert ("[ERROR]" in res) or ("0 页" in res) or ("Crawled" in res)
 
 
+# ── lang 语言变体去重（_lang_deny_patterns，fnmatch 验证 glob 行为，不起浏览器） ──
+
+from fnmatch import fnmatch  # crawl4ai URLPatternFilter(use_glob=True) 内部用 fnmatch
+
+
+def _is_denied(url: str, patterns: list[str]) -> bool:
+    """url 命中任一 deny 模式 → 被 URLPatternFilter(reverse=True) 丢弃。"""
+    return any(fnmatch(url, p) for p in patterns)
+
+
+def test_lang_zh_keeps_zh_and_neutral_drops_others():
+    """lang=zh：/zh/ 与变体 + 语言中性 URL 保留；/de/ /es/ /fr/ /en/ 丢弃。"""
+    from crawagent.tools.advanced_tools import _lang_deny_patterns
+
+    patterns = _lang_deny_patterns("zh")
+    # 保留
+    assert not _is_denied("https://x.com/zh/docs/intro", patterns)
+    assert not _is_denied("https://x.com/zh-cn/docs", patterns)
+    assert not _is_denied("https://x.com/zh-tw/docs", patterns)
+    assert not _is_denied("https://x.com/api/endpoint", patterns)  # 语言中性
+    assert not _is_denied("https://x.com/docs/intro", patterns)     # 语言中性
+    # 丢弃
+    assert _is_denied("https://x.com/de/docs/intro", patterns)
+    assert _is_denied("https://x.com/es/docs", patterns)
+    assert _is_denied("https://x.com/fr/guide", patterns)
+    assert _is_denied("https://x.com/en/docs", patterns)
+    assert _is_denied("https://x.com/ja-jp/docs", patterns)
+
+
+def test_lang_en_keeps_en_drops_zh():
+    """lang=en：/en/ 及变体保留，/zh/ /de/ 丢弃。"""
+    from crawagent.tools.advanced_tools import _lang_deny_patterns
+
+    patterns = _lang_deny_patterns("en")
+    assert not _is_denied("https://x.com/en/docs", patterns)
+    assert not _is_denied("https://x.com/en-us/docs", patterns)
+    assert _is_denied("https://x.com/zh/docs", patterns)
+    assert _is_denied("https://x.com/de/docs", patterns)
+
+
+def test_lang_empty_no_filter():
+    """lang 不设 → 无 deny 模式（不过滤）。"""
+    from crawagent.tools.advanced_tools import _lang_deny_patterns
+    assert _lang_deny_patterns("") == []
+    assert _lang_deny_patterns(None) == []
+
+
 # ── browser_use_navigate 错误路径 ──
 
 def test_browser_use_agent_failure_returns_error(monkeypatch):
