@@ -105,7 +105,18 @@ def _settings_snapshot() -> dict[str, Any]:
         "downloads_retention_days": s.downloads_retention_days,
         "output_max_size_gb": s.output_max_size_gb,
         "downloads_max_size_gb": s.downloads_max_size_gb,
+        # ---- LangSmith 追踪（可选调试）：key 脱敏回显，含 * 视为掩码不回写 ----
+        "langsmith_api_key": _mask_key(s.langsmith_api_key),
+        "langsmith_project": s.langsmith_project,
+        "langsmith_tracing": s.langsmith_tracing,
     }
+
+
+def _mask_key(raw: str) -> str:
+    """API Key 脱敏回显：空返 ""，否则 ****+末4位。回写时含 * 视为掩码、还原原值。"""
+    if not raw:
+        return ""
+    return "****" + raw[-4:] if len(raw) > 4 else "****"
 
 
 def _aa_status() -> dict:
@@ -309,8 +320,20 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
         else:
             updates[env] = str(v)
 
+    # ---- LangSmith 追踪：key 含 * 视为掩码跳过；project/tracing 直写 ----
+    if "langsmith_api_key" in payload:
+        k = str(payload.get("langsmith_api_key") or "")
+        if k and "*" not in k:  # 掩码不回写，沿用 .env 原值
+            updates["LANGSMITH_API_KEY"] = k
+    if "langsmith_project" in payload:
+        updates["LANGSMITH_PROJECT"] = str(payload.get("langsmith_project") or "crawagent")
+    if "langsmith_tracing" in payload:
+        updates["LANGSMITH_TRACING"] = "true" if payload.get("langsmith_tracing") else "false"
+
     if updates:
         _save_env_updates(updates)
+        # get_settings 若有缓存则清（让 Settings 重读 .env）；tracing 由 langchain 运行时启动读 env，仍需重启 crawagent 生效
+        get_settings.cache_clear() if hasattr(get_settings, "cache_clear") else None
 
     return {
         "ok": True, "saved": list(updates.keys()),

@@ -11,9 +11,11 @@ const { state, load, saveSettingsFields, openEcoFolder } = useSettings()
 const crawlTip = ref(null)    // {ok, msg}
 const retainTip = ref(null)
 const dirTip = ref(null)
+const langTip = ref(null)
 const savingCrawl = ref(false)
 const savingRetain = ref(false)
 const savingDirs = ref(false)
+const savingLang = ref(false)
 
 // 空 input ↔ null（不清理/不设上限）互转
 const toNumOrNull = (v, kind = Number) => (v === '' || v === null || v === undefined ? null : kind(v))
@@ -65,6 +67,27 @@ async function saveDirs() {
     if (res.ok) await load() // 回读快照，把可能填的相对路径规范成服务端解析后的绝对路径
   } finally {
     savingDirs.value = false
+  }
+}
+
+async function saveLangsmith() {
+  if (savingLang.value) return
+  // 前端校验：勾追踪但 key 空时拦下（后端守门兜底，早报优于静默无效）
+  if (state.langsmith.tracing && !state.langsmith.apiKey.trim()) {
+    langTip.value = { ok: false, msg: '启用追踪需先填 API Key' }
+    return
+  }
+  savingLang.value = true
+  try {
+    const res = await saveSettingsFields({
+      langsmith_api_key: state.langsmith.apiKey,
+      langsmith_project: state.langsmith.project,
+      langsmith_tracing: state.langsmith.tracing,
+    })
+    langTip.value = _toTip(res, '✓ LangSmith 配置已保存，重启 CrawAgent 后追踪生效')
+    if (res.ok) await load() // 回读脱敏 key 回显
+  } finally {
+    savingLang.value = false
   }
 }
 </script>
@@ -148,6 +171,33 @@ async function saveDirs() {
       </button>
     </div>
     <div v-if="retainTip" class="result" :class="retainTip.ok ? 'ok' : 'err'" style="margin-top: 8px">{{ retainTip.msg }}</div>
+  </section>
+
+  <section class="card">
+    <h2 class="card-title">LangSmith 追踪</h2>
+    <p class="hint" style="margin-bottom: 12px">LangChain 链路追踪（可选调试）。配置写入 .env，但 langchain 运行时在进程启动时读取 env，因此保存后需重启 <code>crawagent start</code> 才生效。</p>
+    <div class="field" style="max-width: 360px">
+      <label class="field">
+        <span class="label">API Key</span>
+        <input type="password" v-model="state.langsmith.apiKey" placeholder="未配置" spellcheck="false" autocomplete="off" />
+        <span class="hint">已配置时回显脱敏掩码（****xxxx）；含 * 视为掩码不回写。留空 = 不改。</span>
+      </label>
+      <label class="field">
+        <span class="label">项目名</span>
+        <input type="text" v-model="state.langsmith.project" placeholder="crawagent" spellcheck="false" autocomplete="off" />
+        <span class="hint">LangSmith 项目名，默认 crawagent</span>
+      </label>
+      <label class="field" style="flex-direction: row; align-items: center; gap: 8px">
+        <input type="checkbox" v-model="state.langsmith.tracing" style="width: auto" />
+        <span class="label" style="margin: 0">启用链路追踪</span>
+      </label>
+      <div class="actions" style="justify-content: flex-start">
+        <button type="button" class="btn-primary" :disabled="savingLang" @click="saveLangsmith">
+          <span v-if="savingLang" class="spin" />保存
+        </button>
+      </div>
+      <div v-if="langTip" class="result" :class="langTip.ok ? 'ok' : 'err'" style="margin-top: 8px">{{ langTip.msg }}</div>
+    </div>
   </section>
 </template>
 

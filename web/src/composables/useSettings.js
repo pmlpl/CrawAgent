@@ -38,6 +38,12 @@ const state = reactive({
     outputCapGb: null,     // 产物容量上限（GB，null = 不限）
     downloadsCapGb: null,  // 下载容量上限（GB）
   },
+  // ---- LangSmith 追踪（可选调试）：后端 settings 已支持，保存写 .env ----
+  langsmith: {
+    apiKey: '',            // 回显掩码（****xxxx），含 * 视为掩码不回写
+    project: 'crawagent',  // LangSmith 项目名
+    tracing: false,        // 是否启用链路追踪（需重启 crawagent 生效）
+  },
 })
 
 // 简化视图：给 App.vue/Header 等只读场景用
@@ -94,6 +100,12 @@ async function load() {
     }
     // 有自定义命令时默认展开高级模式
     state.advancedMode = !!state.mcpStartCommand
+    // LangSmith 追踪字段（后端脱敏回显 apiKey）
+    state.langsmith = {
+      apiKey: data.langsmith_api_key || '',
+      project: data.langsmith_project || 'crawagent',
+      tracing: !!data.langsmith_tracing,
+    }
   } finally {
     state.loading = false
   }

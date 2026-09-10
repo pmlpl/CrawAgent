@@ -66,6 +66,10 @@ def client(tmp_path, monkeypatch):
             downloads_retention_days=60,
             output_max_size_gb=None,
             downloads_max_size_gb=5.0,
+            # LangSmith 追踪（010 快照会读）
+            langsmith_api_key="",
+            langsmith_project="crawagent",
+            langsmith_tracing=False,
         )
 
     # settings 路由与 registry 各持有一份 get_settings 引用，都要替换
@@ -92,7 +96,8 @@ def test_settings_get_does_not_leak_api_key(client):
     body = r.json()
     assert body["providers"][0]["name"] == "TestProv"
     assert body["providers"][0]["key_set"] is True
-    assert "api_key" not in json.dumps(body)
+    # providers/models 不出现 api_key 字段（langsmith_api_key 是合法脱敏字段，不在此约束内）
+    assert "api_key" not in json.dumps(body["providers"])
     assert "api_key" not in json.dumps(body["models"])
 
 
@@ -342,6 +347,10 @@ def eco_client(tmp_path, monkeypatch):
             mcp_servers=data.get("MCP_SERVERS", ""),
             skills_dirs=str(skills_dir),
             project_root=tmp_path,
+            # LangSmith 追踪（010 快照会读）
+            langsmith_api_key="",
+            langsmith_project="crawagent",
+            langsmith_tracing=False,
         )
 
     from crawagent.web.routers import settings as settings_router
