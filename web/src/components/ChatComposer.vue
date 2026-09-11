@@ -4,6 +4,7 @@
 // - 工具栏：附件、Agent 选择、模型&推理强度、思考开关、发送
 // - 状态栏：复用后端 metrics.status_line() 输出
 import { computed, nextTick, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useChat } from '../composables/useChat'
 import { useSettings } from '../composables/useSettings'
 
@@ -17,7 +18,8 @@ const chat = useChat()
 const settings = useSettings()
 
 // 直接绑定 useChat 的 draft（按会话独立保存到 localStorage）
-const draft = chat.draft
+// draft 是可写 computed：storeToRefs 保 ref 形态，v-model 与 .value 都能用
+const { draft } = storeToRefs(chat)
 const inputEl = ref(null)
 const toolbarRef = ref(null)
 
@@ -252,8 +254,8 @@ defineExpose({ fill })
     </form>
 
     <!-- 状态栏 -->
-    <div v-if="chat.lastStatus.value" class="status-bar">
-      <span class="status-text">{{ chat.lastStatus.value }}</span>
+    <div v-if="chat.lastStatus" class="status-bar">
+      <span class="status-text">{{ chat.lastStatus }}</span>
     </div>
   </footer>
 </template>

@@ -84,8 +84,8 @@ function handleRenameSession(id, title) {
     <!-- 左侧：常驻侧边栏（桌面端固定，移动端抽屉） -->
     <AppSidebar
       :open="sidebarOpen"
-      :sessions="chat.sessions.value"
-      :active-id="chat.session.value"
+      :sessions="chat.sessions"
+      :active-id="chat.session"
       :is-settings-page="isSettingsPage"
       :is-sites-page="isSitesPage"
       @new-chat="handleNewChat"
@@ -108,7 +108,7 @@ function handleRenameSession(id, title) {
         :is-settings-page="isSettingsPage"
         :is-sites-page="isSitesPage"
         :title="pageTitle"
-        :session-id="chat.session.value"
+        :session-id="chat.session"
         :default-model="settings.config.defaultModel"
         @toggle-sidebar="sidebarOpen = !sidebarOpen"
       />

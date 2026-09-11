@@ -1,11 +1,13 @@
 // useChat 事件分发测试（handoff §1.5）— Mock WebSocket + fetch，全离线。
-// useChat 是模块级单例：每个用例 vi.resetModules() 后动态 import 拿全新实例。
+// useChat 是 Pinia setup store：每个用例 setActivePinia(createPinia()) 拿全新 store。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { useChat } from './useChat'
 
 let MockWebSocket
 
 beforeEach(() => {
-  vi.resetModules()
+  setActivePinia(createPinia())
   MockWebSocket = class {
     static OPEN = 1
     static instances = []
@@ -25,9 +27,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-async function setup() {
-  const mod = await import('./useChat')
-  const chat = mod.useChat()
+function setup() {
+  const chat = useChat()
   chat.connect()
   const ws = MockWebSocket.instances.at(-1)
   ws.onopen?.()
@@ -69,15 +70,15 @@ describe('useChat 事件分发', () => {
 
   it('用例 3：error 事件追加错误气泡，后续输入可继续不卡', async () => {
     const { chat, ws } = await setup()
-    chat.busy.value = true
-    chat.typing.value = true
+    chat.busy = true
+    chat.typing = true
     emit(ws, { type: 'error', message: '工具爆炸了' })
 
     const err = chat.items.find(i => i.kind === 'error')
     expect(err).toBeTruthy()
     expect(err.content).toContain('工具爆炸了')
-    expect(chat.busy.value).toBe(false)
-    expect(chat.typing.value).toBe(false)
+    expect(chat.busy).toBe(false)
+    expect(chat.typing).toBe(false)
 
     // 错误后可继续发送（连接已就绪、busy 已复位）
     const sent = chat.send('再来一次')
@@ -111,7 +112,7 @@ describe('useChat 事件分发', () => {
     expect(aiItems.length).toBe(1)
     expect(aiItems[0].content).toBe('回答完毕')
     expect(chat.items.length).toBe(2)
-    expect(chat.busy.value).toBe(false)
+    expect(chat.busy).toBe(false)
   })
 
   it('用例 4b：ai_thinking_delta 流式累积成一条 thinking step，done 收尾，tool_call 强制收尾', async () => {
@@ -185,10 +186,10 @@ describe('useChat 事件分发', () => {
     emit(ws, { type: 'ai', content: '旧消息' })
     expect(chat.items.length).toBe(1)
 
-    const oldSession = chat.session.value
+    const oldSession = chat.session
     chat.newSession()
 
-    expect(chat.session.value).not.toBe(oldSession)
+    expect(chat.session).not.toBe(oldSession)
     expect(chat.items.length).toBe(0)
     // 新会话建了新连接
     expect(MockWebSocket.instances.at(-1)).not.toBe(ws)

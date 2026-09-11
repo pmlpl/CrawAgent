@@ -1,4 +1,5 @@
 import { computed, reactive, ref } from 'vue'
+import { defineStore } from 'pinia'
 import { useSettings } from './useSettings'
 
 // ============================================================
@@ -15,15 +16,9 @@ const DRAFT_KEY = 'crawagent-draft'  // localStorage key：草稿根
 const newId = () =>
   Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join('')
 
-// 单例：跨组件共享状态
-let _instance = null
-export function useChat() {
-  if (_instance) return _instance
-  _instance = createChat()
-  return _instance
-}
-
-function createChat() {
+// Pinia setup store：跨组件共享状态（原闭包工厂 createChat 包进 defineStore，
+// 内部 617 行零改动——ws/定时器/aiStreams Map 等作为 setup 函数局部变量保非响应私有）
+const useChatStore = defineStore('chat', () => {
   const settings = useSettings() // 发送消息时携带当前选中的模型
   const items = reactive([])
   const busy = ref(false)
@@ -614,4 +609,10 @@ function createChat() {
     connect, loadHistory, send, stop, newSession, switchSession, fetchSessions, reconnect, deleteSession,
     archiveSession, batchDeleteSessions, renameSession, answerAsk,
   }
+})
+
+// 薄封装：消费方（App/ChatPage/ChatComposer/ContextRing/AskCard/Sites/SiteDetail/main）
+// 全用 useChat()，setup store 返回的 ref/reactive/函数形态与原返回一致，零改动
+export function useChat() {
+  return useChatStore()
 }

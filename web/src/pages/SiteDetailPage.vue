@@ -147,10 +147,10 @@ function recrawl() {
   const prompt = `请重新抓取 ${originKey.value}（${site.value?.title || ''}）的最新内容。`
   router.push('/chat')
   setTimeout(() => {
-    if (chat.connected.value) {
+    if (chat.connected) {
       chat.send(prompt)
     } else {
-      chat.lastDraft.value = prompt
+      chat.lastDraft = prompt
     }
   }, 300)
 }

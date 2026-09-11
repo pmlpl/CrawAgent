@@ -48,10 +48,10 @@ function onRecrawl(site, ev) {
   const prompt = `请重新抓取 ${site.origin}（${site.title || ''}）的最新内容。`
   router.push('/chat')
   setTimeout(() => {
-    if (chat.connected.value) {
+    if (chat.connected) {
       chat.send(prompt)
     } else {
-      chat.lastDraft.value = prompt
+      chat.lastDraft = prompt
     }
   }, 300)
 }

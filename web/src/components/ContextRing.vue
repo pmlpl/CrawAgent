@@ -91,11 +91,11 @@ function stopInterval() {
 watch(() => props.sessionId, (id) => {
   if (!id) { stopInterval(); return }
   fetchContext()
-  if (chat.busy.value) startInterval()
+  if (chat.busy) startInterval()
 }, { immediate: true })
 
 // 轮次在跑 → 3s 轮询；轮次结束 → 拉一次最终值再停（空闲不轮询）
-watch(() => chat.busy.value, (running) => {
+watch(() => chat.busy, (running) => {
   if (!props.sessionId) return
   if (running) startInterval()
   else { fetchContext(); stopInterval() }

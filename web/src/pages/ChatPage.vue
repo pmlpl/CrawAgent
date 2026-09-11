@@ -118,9 +118,9 @@ function jumpToTurn(id) {
 watch(
   () => chat.items.filter(i => i.kind === 'error').length,
   (n, old) => {
-    if (n > old && chat.lastDraft.value) {
+    if (n > old && chat.lastDraft) {
       restoreDraft.value = ''
-      nextTick(() => { restoreDraft.value = chat.lastDraft.value })
+      nextTick(() => { restoreDraft.value = chat.lastDraft })
     }
   },
 )
@@ -135,7 +135,7 @@ function onSuggest(text) {
 
 // useChat 为单例：路由切走再回来时 items 仍在，避免重复 loadHistory 导致消息翻倍
 onMounted(() => {
-  if (!chat.connected.value) chat.connect()
+  if (!chat.connected) chat.connect()
   if (!chat.items.length) {
     chat.loadHistory()
     // fetchSessions 已在 main.js 启动时调用
@@ -146,7 +146,7 @@ onMounted(() => {
 <template>
   <div class="chat-page">
     <!-- 连接断开提示横幅 -->
-    <div v-if="!chat.connected.value" class="banner" role="button" tabindex="0" @click="chat.reconnect" @keydown.enter="chat.reconnect">
+    <div v-if="!chat.connected" class="banner" role="button" tabindex="0" @click="chat.reconnect" @keydown.enter="chat.reconnect">
       连接已断开 · <b>点击重新连线</b>
     </div>
 
@@ -164,7 +164,7 @@ onMounted(() => {
           <div v-if="item.kind === 'error'" class="err">{{ item.content }}</div>
         </template>
 
-        <div v-if="chat.typing.value" class="typing">
+        <div v-if="chat.typing" class="typing">
           <span class="dig-scene" aria-hidden="true">
             <!-- 跳动粒子：5 颗像素点错落弹跳 -->
             <i class="dot" style="--i:0" /><i class="dot" style="--i:1" /><i class="dot" style="--i:2" /><i class="dot" style="--i:3" /><i class="dot" style="--i:4" />
@@ -172,14 +172,14 @@ onMounted(() => {
           <span class="typing-label">
             <span class="dig-brand">deeply exploring</span>
             <!-- 工具运行中：前端每秒实时计时的已耗时（后端心跳文本是静态快照会冻结，不用于计时） -->
-            <template v-if="chat.runningElapsed.value != null">
+            <template v-if="chat.runningElapsed != null">
               <span class="dig-sep">·</span>
-              <span class="dig-progress">运行中… 已耗时 {{ chat.runningElapsed.value }}s</span>
+              <span class="dig-progress">运行中… 已耗时 {{ chat.runningElapsed }}s</span>
             </template>
             <!-- 工具间歇（LLM 思考等）：显示最后一个真实里程碑 -->
-            <template v-else-if="chat.currentProgress.value">
+            <template v-else-if="chat.currentProgress">
               <span class="dig-sep">·</span>
-              <span class="dig-progress">{{ chat.currentProgress.value }}</span>
+              <span class="dig-progress">{{ chat.currentProgress }}</span>
             </template>
           </span>
         </div>
@@ -212,7 +212,7 @@ onMounted(() => {
     <!-- 输入组件：包含任务进度、工具栏、发送按钮 -->
     <ChatComposer
       ref="composer"
-      :busy="chat.busy.value"
+      :busy="chat.busy"
       :restore="restoreDraft"
       @send="onSend"
       @stop="chat.stop"
