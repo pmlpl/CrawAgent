@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -34,6 +35,21 @@ from crawagent.web.turn_engine import _stream_turn
 
 # Vue 工程（项目根目录 web/）的构建产物
 WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
+
+
+class _ContextPollAccessFilter(logging.Filter):
+    """抑制 GET /api/sessions/{id}/context 的访问日志——前端 ContextRing 每 3 秒轮询，
+    200 OK 行刷屏且无诊断价值（失败也静默兜底）。按格式化消息匹配，跨 uvicorn 版本稳定。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if "GET /api/sessions/" in msg and "/context HTTP/" in msg:
+            return False
+        return True
+
 
 app = FastAPI(title="CrawAgent WebUI")
 
@@ -296,6 +312,9 @@ def main() -> None:
     from fastapi.staticfiles import StaticFiles
 
     _silence_proactor_reset_noise()
+
+    # 装载访问日志过滤器：抑制 ContextRing 每 3 秒轮询 /context 的刷屏
+    logging.getLogger("uvicorn.access").addFilter(_ContextPollAccessFilter())
 
     settings = get_settings()
     settings.log_dir.mkdir(parents=True, exist_ok=True)
