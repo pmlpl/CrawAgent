@@ -144,7 +144,7 @@ const useChatStore = defineStore('chat', () => {
     console.log('[trace] pushToolCall', name, '→ total steps:', ensureTrace().steps.length)
   }
 
-  function pushToolResult(content, toolCallId) {
+  function pushToolResult(content, toolCallId, media = []) {
     const trace = ensureTrace()
     let step = null
     if (toolCallId) {
@@ -158,6 +158,7 @@ const useChatStore = defineStore('chat', () => {
       }
     }
     step.result = content
+    step.media = media || []
     step.done = true
     // 工具结束，进度 pill 的里程碑随之失效 —— 否则 LLM 思考阶段会一直残留
     // 上一工具的旧文案（"运行中… 已耗时 5.6s" 冻结 bug 的另一半根因）
@@ -351,7 +352,7 @@ const useChatStore = defineStore('chat', () => {
   function handleEvent(e) {
     switch (e.type) {
       case 'tool_call': pushToolCall(e.name, e.args, e.tool_call_id); break
-      case 'tool_result': pushToolResult(e.content, e.tool_call_id); break
+      case 'tool_result': pushToolResult(e.content, e.tool_call_id, e.media); break
       case 'ai_thinking': pushThinking(e.content, e.id); break
       case 'ai_thinking_delta': pushThinkingDelta(e.id, e.delta); break
       case 'ai_thinking_done': finishThinkingStream(e.id); break
@@ -434,7 +435,7 @@ const useChatStore = defineStore('chat', () => {
         }
         else if (m.role === 'ai') pushAi(m.content)
         else if (m.role === 'tool_call') pushToolCall(m.name, m.args, m.tool_call_id)
-        else if (m.role === 'tool_result') pushToolResult(m.content, m.tool_call_id)
+        else if (m.role === 'tool_result') pushToolResult(m.content, m.tool_call_id, m.media)
         else if (m.role === 'thinking') pushThinking(m.content)
       }
       currentTrace = null

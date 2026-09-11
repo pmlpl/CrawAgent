@@ -105,8 +105,15 @@ function thinkSummary(text) {
               <span class="progress-text">{{ ln }}</span>
             </div>
           </div>
+          <div v-if="step.media && step.media.length" class="step-media">
+            <template v-for="(m, mi) in step.media" :key="m.url || mi">
+              <video v-if="m.type === 'video'" :src="m.url" controls preload="metadata" class="step-video" />
+              <img v-else-if="m.type === 'image'" :src="m.url" :alt="m.filename" class="step-img" />
+              <audio v-else-if="m.type === 'audio'" :src="m.url" controls preload="metadata" class="step-audio" />
+            </template>
+          </div>
           <div v-if="step.result" class="step-result-wrap">
-            <details class="step-result" :open="step.result.length <= 2000">
+            <details class="step-result" :open="step.result.length <= 2000 || (step.media && step.media.length > 0)">
               <summary v-if="step.result.length > 2000">结果（{{ step.result.length }} 字符，点击展开）</summary>
               <div class="step-result-content">{{ step.result }}</div>
             </details>
@@ -398,6 +405,28 @@ function thinkSummary(text) {
 
 .step-result-wrap {
   margin-top: 4px;
+}
+
+/* 工具下载的媒体内联播放（012）：video/img/audio */
+.step-media {
+  margin: 6px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.step-video {
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 8px;
+  background: #000;
+}
+.step-img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+.step-audio {
+  width: 100%;
+  max-width: 360px;
 }
 .step-result {
   border-left: 2px solid var(--line);

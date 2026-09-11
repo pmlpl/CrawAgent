@@ -26,6 +26,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Rem
 from crawagent.observability.metrics import SessionMetrics, usage_from_message
 from crawagent.tools.save_tool import set_current_session
 from crawagent.web.event_log import EventLog
+from crawagent.web.media import extract_media
 from crawagent.web.state import (
     _active_turns,
     _metrics,
@@ -391,6 +392,7 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                         "type": "tool_result",
                         "tool_call_id": msg.tool_call_id,
                         "content": content,
+                        "media": extract_media(content),
                     })
                     start = pending_tool_starts.pop(msg.tool_call_id, None)
                     if start is not None:

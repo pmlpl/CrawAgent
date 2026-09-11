@@ -321,6 +321,10 @@ def main() -> None:
     # Vue 构建产物的静态资源目录（存在才挂载，挂载晚于 API/WS 路由注册）
     if WEB_DIST.exists():
         app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
+    # 下载目录挂 /downloads（<video> 拖进度条靠 HTTP Range，StaticFiles 原生支持；
+    # 路径穿越由 Starlette 防护；本地部署无鉴权，见 P2-6 决策）
+    settings.downloads_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/downloads", StaticFiles(directory=str(settings.downloads_dir)), name="downloads")
 
     # host/port 可通过环境变量覆盖：Docker 里设 CRAWAGENT_HOST=0.0.0.0，
     # 本地开发默认 127.0.0.1（更安全，只本机可访问）。

@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from crawagent.config.settings import get_settings
 from crawagent.observability.metrics import _fmt_tokens
+from crawagent.web.media import extract_media
 from crawagent.web.state import (
     TOOL_RESULT_PREVIEW,
     _active_turns,
@@ -131,6 +132,7 @@ def _reconstruct_messages(messages, *, truncate=True):
                 "role": "tool_result",
                 "tool_call_id": msg.tool_call_id,
                 "content": content,
+                "media": extract_media(content),
             })
     return items
 
