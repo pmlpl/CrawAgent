@@ -3,14 +3,22 @@
  * ContextRing — 上下文余量环
  *
  * 一个轻量 SVG 圆环，显示当前会话传给 LLM 的 token 使用率。
- * 每隔 3 秒轮询 /api/sessions/{id}/context，只在聊天页且有 session 时工作。
+ * 轮询 /api/sessions/{id}/context，只在聊天页且有 session 时工作。
+ *
+ * 轮询节奏（避免空闲刷屏/空转 DB）：
+ *   - 会话打开：拉一次
+ *   - 轮次在跑（useChat.busy）：每 pollInterval（默认 3s）轮询
+ *   - 轮次结束：拉一次最终值再停，空闲不轮询
  *
  * 颜色分级：
  *   < 60%  绿色（安全）
  *   60-85% 黄色（注意）
- *   > 85%  红色（危险，快满了）
+ *   > 85% 红色（危险，快满了）
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useChat } from '../composables/useChat'
+
+const chat = useChat() // 单例：读 busy 判断轮次是否在跑，决定是否轮询
 
 const props = defineProps({
   sessionId: { type: String, default: '' },
@@ -22,7 +30,6 @@ const props = defineProps({
 const used = ref(0)
 const limit = ref(0)
 const turnCount = ref(0)
-const loading = ref(false)
 let timer = null
 
 // —— 派生 ——
@@ -67,13 +74,12 @@ async function fetchContext() {
   }
 }
 
-function startPolling() {
-  stopPolling()
-  fetchContext()
+function startInterval() {
+  stopInterval()
   timer = setInterval(fetchContext, props.pollInterval)
 }
 
-function stopPolling() {
+function stopInterval() {
   if (timer) {
     clearInterval(timer)
     timer = null
@@ -81,12 +87,21 @@ function stopPolling() {
 }
 
 // —— 生命周期 ——
+// 会话切换：拉一次；若此刻有轮次在跑，开 3s 轮询
 watch(() => props.sessionId, (id) => {
-  if (id) startPolling()
-  else stopPolling()
+  if (!id) { stopInterval(); return }
+  fetchContext()
+  if (chat.busy.value) startInterval()
 }, { immediate: true })
 
-onBeforeUnmount(stopPolling)
+// 轮次在跑 → 3s 轮询；轮次结束 → 拉一次最终值再停（空闲不轮询）
+watch(() => chat.busy.value, (running) => {
+  if (!props.sessionId) return
+  if (running) startInterval()
+  else { fetchContext(); stopInterval() }
+})
+
+onBeforeUnmount(stopInterval)
 </script>
 
 <template>
