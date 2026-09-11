@@ -88,7 +88,8 @@ watch(() => chat.items.length, autoScroll)
 watch(chat.items, autoScroll, { deep: true })
 
 // 任务完成时（typing 从 true → false），在底部才滚动显示最后一个 trace
-watch(chat.typing, (val, old) => {
+// chat.typing 经 Pinia 解包是 boolean 值，须用 getter 才能被 watch 追踪
+watch(() => chat.typing, (val, old) => {
   if (old && !val && isNearBottom()) {
     scrollToTrace()
   }
