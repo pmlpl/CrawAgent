@@ -265,6 +265,9 @@ async function saveMcpServers(servers) {
       state.ecoMcpServers = data.mcp_servers || []
       state.ecoMcpStatus = data.mcp_status || []
       _tip('✓ MCP 配置已保存并生效（下一轮对话使用新工具列表）', true)
+      // 后端预热握手已改后台跑：几秒后拉一次快照补上各 server 工具数，
+      // 免手动刷新（握手失败也只影响工具数展示，不影响开关状态）
+      setTimeout(() => { loadEcosystem().catch(() => {}) }, 4000)
       return true
     }
     _tip('保存失败：' + (data.error || '未知错误'), false)

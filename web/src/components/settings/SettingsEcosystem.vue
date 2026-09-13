@@ -92,7 +92,7 @@ function mcpStatusClass(srv) {
             <td class="mono endpoint-cell">{{ s.transport === 'stdio' ? s.command : s.url }}</td>
             <td><span class="srv-status" :class="mcpStatusClass(s)">{{ mcpStatusText(s) }}</span></td>
             <td class="row-actions">
-              <button type="button" class="btn-ghost btn-sm" @click="toggleServer(s)">
+              <button type="button" class="btn-ghost btn-sm" :disabled="state.saving" @click="toggleServer(s)">
                 {{ s.disabled ? '启用' : '停用' }}
               </button>
               <button type="button" class="icon-btn danger" aria-label="移除" title="移除" @click="removeServer(s)">

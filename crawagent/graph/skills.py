@@ -481,6 +481,22 @@ def _server_conn(srv: dict) -> dict | None:
     return entry
 
 
+def _dedup_tools(per_server: dict[str, list]) -> list:
+    """跨 server 同名工具去重：配置序先到先得（如 anything-analyzer 与
+    browser-harness 都暴露 browser_screenshot，重名会让 Agent 绑定时撞车）。"""
+    seen: set[str] = set()
+    out: list = []
+    for tools in per_server.values():
+        for t in tools:
+            n = getattr(t, "name", "")
+            if n and n in seen:
+                continue
+            if n:
+                seen.add(n)
+            out.append(t)
+    return out
+
+
 def get_mcp_tools() -> list:
     """连接 MCP_SERVERS 配置的所有 server，返回 langchain 工具列表。
 
@@ -498,7 +514,7 @@ def get_mcp_tools() -> list:
 
     sig = _mcp_config_signature()
     if _mcp_tools_cache and sig == _mcp_cache_signature:
-        return [t for tools in _mcp_tools_cache.values() for t in tools]
+        return _dedup_tools(_mcp_tools_cache)
     if not isinstance(_mcp_tools_cache, dict):
         _mcp_tools_cache = {}  # 兼容旧版 None 初始化 / reset 遗留
 
@@ -560,4 +576,4 @@ def get_mcp_tools() -> list:
 
     _mcp_tools_cache = merged
     _mcp_cache_signature = sig
-    return [t for tools in merged.values() for t in tools]
+    return _dedup_tools(merged)

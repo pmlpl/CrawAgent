@@ -98,3 +98,21 @@ def test_success_clears_fail_cache(env, monkeypatch):
     assert len(tools) == 1
     # 成功后 fail_cache 应已清空该 server
     assert "down-srv" not in skills._mcp_fail_cache
+
+
+def test_dedup_tools_first_server_wins():
+    """跨 server 同名工具去重：配置序先到先得（anything/browser-harness 都有 browser_screenshot）。"""
+    from crawagent.graph.skills import _dedup_tools
+
+    class T:
+        def __init__(self, name):
+            self.name = name
+
+    per_server = {
+        "anything-analyzer": [T("browser_screenshot"), T("run_analysis")],
+        "browser-harness": [T("browser_screenshot"), T("browser_click")],
+    }
+    out = _dedup_tools(per_server)
+    names = [t.name for t in out]
+    assert names == ["browser_screenshot", "run_analysis", "browser_click"]
+    assert len(names) == len(set(names))

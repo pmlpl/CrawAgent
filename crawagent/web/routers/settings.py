@@ -541,13 +541,18 @@ async def save_mcp_servers_route(payload: dict = Body(...)) -> dict[str, Any]:
     if not res.get("ok"):
         return res
 
-    # 预热握手：让保存完立刻能看到各 server 工具数（失败也不阻塞保存本身）
-    try:
-        from crawagent.graph.skills import get_mcp_tools
+    # 预热握手改 fire-and-forget：stdio 冷启动数秒 + enabled-but-down 等连接超时，
+    # await 会把响应卡住——前端看不到开关翻转以为没点上（012 后踩）。工具数由前端
+    # 保存成功后延迟拉一次 /api/ecosystem 补上。
+    async def _warmup() -> None:
+        try:
+            from crawagent.graph.skills import get_mcp_tools
 
-        await asyncio.to_thread(get_mcp_tools)
-    except Exception:
-        pass
+            await asyncio.to_thread(get_mcp_tools)
+        except Exception:
+            pass
+
+    asyncio.create_task(_warmup())
 
     from crawagent.graph.skills import mcp_servers_status
     res["mcp_status"] = mcp_servers_status()
