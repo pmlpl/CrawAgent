@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -509,6 +510,10 @@ def save_mcp_servers(incoming: list[dict]) -> dict:
 
     cleaned = _unmask_mcp_headers(cleaned, current)
     _save_env_updates({"MCP_SERVERS": json.dumps(cleaned, ensure_ascii=False)})
+    # os.environ["MCP_SERVERS"]（auto_sync_mcp_token 启动时写入的 Electron 同步快照）
+    # 在 pydantic 里优先级高于 .env——不同步的话 .env 写了也被启动快照盖住：
+    # 开关翻转"看起来无效" + _mcp_config_signature 缓存指纹不变（失效机制被致盲）
+    os.environ["MCP_SERVERS"] = json.dumps(cleaned, ensure_ascii=False)
     get_settings.cache_clear() if hasattr(get_settings, "cache_clear") else None
 
     from crawagent.graph.skills import reset_mcp_cache
