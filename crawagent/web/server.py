@@ -29,6 +29,7 @@ from crawagent.config.settings import get_settings, clear_dead_proxy_env
 from crawagent.web.routers import sessions as sessions_router
 from crawagent.web.routers import settings as settings_router
 from crawagent.web.routers import sites as sites_router
+from crawagent.web.routers import dist as dist_router
 from crawagent.web.state import _active_turns
 from crawagent.web.turn_engine import _stream_turn
 
@@ -106,10 +107,28 @@ def _startup_prune():
 
 threading.Thread(target=_startup_prune, daemon=True).start()
 
+
+def _sweep_task_loop(interval: int) -> None:
+    """后台扫描线程：周期调 requeue_stale_running()，把已死 worker 的任务回队列。
+
+    dist_enabled=True 时由 main() 启动；interval 来自 settings.dist_task_sweep_interval。
+    """
+    from crawagent.dist.queue import requeue_stale_running
+    while True:
+        try:
+            n = requeue_stale_running()
+            if n > 0:
+                print(f"[dist] requeued {n} stale tasks")
+        except Exception as e:
+            print(f"[dist] sweep error (ignored): {e}")
+        time.sleep(interval)
+
+
 # ---- REST API 路由注册 ----
 app.include_router(sessions_router.router)
 app.include_router(settings_router.router)
 app.include_router(sites_router.router)
+app.include_router(dist_router.router)
 
 
 @app.get("/")
@@ -318,6 +337,27 @@ def main() -> None:
 
     settings = get_settings()
     settings.log_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- 分布式：dist_enabled 或 checkpoint_backend=redis 时自动拉起嵌入 Redis ----
+    # 用户通过 .env 显式开启 DIST_ENABLED=true / CHECKPOINT_BACKEND=redis 才触发，
+    # 默认 sqlite 单进程模式不受影响（向后兼容）
+    if settings.dist_enabled or settings.checkpoint_backend == "redis":
+        from crawagent.dist.redis_server import ensure_redis, stop_embedded_redis
+        if ensure_redis():
+            # dist_enabled 时启动任务扫描线程（回队列已死 worker 的任务）
+            if settings.dist_enabled:
+                threading.Thread(
+                    target=_sweep_task_loop,
+                    args=(settings.dist_task_sweep_interval,),
+                    daemon=True,
+                ).start()
+                print(f"[dist] task sweep thread started (interval={settings.dist_task_sweep_interval}s)")
+            # 注册关闭钩子：进程退出时停嵌入 Redis
+            import atexit
+            atexit.register(stop_embedded_redis)
+        else:
+            print("[dist] WARNING: Redis 启动失败，分布式功能不可用（单进程模式仍正常）")
+
     # Vue 构建产物的静态资源目录（存在才挂载，挂载晚于 API/WS 路由注册）
     if WEB_DIST.exists():
         app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")

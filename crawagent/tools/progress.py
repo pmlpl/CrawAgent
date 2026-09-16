@@ -297,4 +297,14 @@ LONG_RUNNING_TOOLS: set[str] = {
     "wallpaper_detail",        # 网络请求
     "list_weread_chapters",    # 网络请求
     "get_weread_chapter",      # 网络请求
+    "get_proxy",               # TCP 健康检查 + HTTP 探活
+    "login_site",              # Playwright 登录流程
+    "check_login_status",      # 带 Cookie 请求页面
+    # ---- Android 逆向（frida hook / adb 交互）----
+    "list_adb_devices",        # adb 设备探测
+    "install_apk",             # adb install 文件传输
+    "push_file",               # adb push 文件传输
+    "frida_hook_function",     # frida-trace 长时挂载
+    "frida_dump_so",           # frida 内联 JS dump
+    "frida_bypass_ssl_pinning",# frida 挂载绕过脚本
 }

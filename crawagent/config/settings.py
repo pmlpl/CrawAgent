@@ -85,6 +85,13 @@ class Settings(BaseSettings):
     locked_chapter_api: str = ""
     # 站点级登录 Cookie 不再放全局配置：随站点档案存 data/sites.json，
     # 由站点工具（如 weread_tool）按 origin 读取。
+    # 代理池（详见 proxy_tool.py）
+    # proxy_enabled：是否启用代理池辅助逻辑。False 时 get_proxy 仍能工作，
+    #                只是 mark_proxy_failed 不再自动 disable（避免误杀）
+    proxy_enabled: bool = True
+    # 默认代理（强制覆盖）：非空字符串时所有 get_proxy 调用都返回它，
+    #                       跳过池轮询（适合"我就一个 clash，别多想"的场景）
+    default_proxy: str = ""
 
     # ---- 产物目录（统一配置，grep 不用全项目搜字符串 "downloads"/"output"）----
     # downloads_dir：媒体下载（图片/视频/音频/壁纸/封面）的根目录。工具/脚本应写入
@@ -129,7 +136,23 @@ class Settings(BaseSettings):
     output_retention_days: int | None = 90
     downloads_retention_days: int | None = 60
     output_max_size_gb: float | None = None
-    downloads_max_size_gb: float | None = 5.0
+    downloads_max_size_gb: float | None = None
+
+    # ---- 分布式（可选；不启用则单进程 SQLite 模式不变，向后兼容）----
+    # checkpoint 后端：sqlite（默认） / redis（共享，多 worker 可恢复同一会话）
+    checkpoint_backend: str = "sqlite"
+    # Redis 连接 URL；checkpoint_backend=redis 或 dist_enabled=True 时必填
+    # 例 "redis://127.0.0.1:6379/0"
+    redis_url: str = ""
+    # 是否启用分布式任务队列（前端提交 → Redis 队列 → worker 领取并行跑）
+    dist_enabled: bool = False
+    # worker 心跳间隔（秒）；超过 2×ttl 视为死亡，任务回队列
+    dist_worker_heartbeat_interval: int = 10
+    dist_worker_heartbeat_ttl: int = 30
+    # 任务回队列扫描间隔（秒，由 web server 后台线程跑）
+    dist_task_sweep_interval: int = 15
+    # 单任务事件列表上限（LTRIM 防爆）
+    dist_task_event_log_max: int = 1000
 
     # ---- LangSmith 调试（可选） ----
     langsmith_api_key: str = ""

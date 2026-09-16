@@ -10,7 +10,7 @@ __pycache__/
 .coverage.*
 htmlcov/
 *.egg-info/
-dist/
+/web/dist/
 build/
 
 # 敏感配置
@@ -23,7 +23,7 @@ logs/
 downloads/
 novels/
 output/
-assets/
+/assets/
 
 # 前端依赖与构建
 node_modules/

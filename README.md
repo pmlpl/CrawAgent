@@ -1,6 +1,14 @@
+<div align="center">
+
+<img src="assets/logo-concepts/concept-A-spider.png" width="180" alt="CrawAgent">
+
 # CrawAgent
 
-LLM 驱动的智能爬虫 Agent 框架。基于 LangChain + LangGraph，内置 22 个爬虫工具、6 个攻略技能、浏览器渲染、MCP 协议扩展（fetch / playwright / 抓包分析）与第三方插件规范（plugins/），支持会话持久化。
+**吐丝 · 结网** — LLM 驱动的智能爬虫 Agent 框架
+
+</div>
+
+基于 LangChain + LangGraph，内置 **43 个爬虫工具**、6 个攻略技能、浏览器渲染、MCP 协议扩展（fetch / playwright / 抓包分析）、第三方插件规范（plugins/）、分布式任务队列与 Android 逆向能力，支持会话持久化。
 
 ## 快速开始
 
@@ -17,9 +25,13 @@ LLM 驱动的智能爬虫 Agent 框架。基于 LangChain + LangGraph，内置 2
 uv sync --group dev
 uv sync --group browser   # 需要浏览器渲染时
 uv sync --group api       # 需要 FastAPI Web 后端时
+uv sync --extra dist      # 需要分布式爬虫时（Redis）
 
-# 可选依赖
+# 可选：浏览器内核
 uv run playwright install chromium   # SPA/动态页面爬取
+
+# 可选：Android 逆向（不写入主依赖，避免冲突）
+pip install frida frida-tools
 ```
 
 ### 配置
@@ -41,68 +53,83 @@ cp .env.example .env
 | `DOWNLOADS_DIR` | 媒体下载目录 | `./downloads` |
 | `OUTPUT_DIR` | 文本产物目录 | `./output` |
 
-### 启动后端
+### 启动
 
 ```bash
-# 开发模式（热重载）
-uv run python -m uvicorn crawagent.web.server:app --host 0.0.0.0 --port 8006 --reload
-
-# 生产模式
-uv run python -m uvicorn crawagent.web.server:app --host 0.0.0.0 --port 8006
+uv run crawagent start
+# → http://127.0.0.1:8006
 ```
 
-启动成功后：
+启动时自动检测 / 下载 / 拉起嵌入 Redis（分布式模式启用时）。**不会自动弹浏览器**——在 WebUI 内手动打开，或直接访问 `http://127.0.0.1:8006`。
 
+环境变量可调：`CRAWAGENT_PORT`（端口，默认 8006）、`CRAWAGENT_HOST=0.0.0.0`（局域网监听，不弹浏览器）、`CRAWAGENT_NO_OPEN=1`（禁止弹浏览器）。
+
+开发模式（前端热更新）：
+
+```bash
+# 终端 1：后端
+uv run crawagent start
+# 终端 2：前端
+cd web && npm run dev
+# → http://127.0.0.1:5173（/api 与 /ws 自动代理到 8006）
 ```
-INFO:     Started server process [12345]
-INFO:     Uvicorn running on http://0.0.0.0:8006
-```
+
+## 能力总览
+
+| 能力域 | 说明 |
+|------|------|
+| 自主工具循环 | 43 个内置工具，LLM 自主决策调用；多数对话零工具调用 |
+| 置信度自动升级 | 提取结果 <60 分自动切 Playwright 浏览器重抓（零 LLM 成本） |
+| 兜底武器 | `run_custom_script`：Agent 现场写 Python 脚本，专治内置工具搞不定的站 |
+| 站点档案 | 首次成功后保存策略/脚本/Cookie，同站复用跳过分析 |
+| 代理池 | 5 个代理管理工具：增删 / 探活 / 轮询 / 失败标记 |
+| 模拟登录 | Playwright 自动表单登录 + Cookie 存档复用 + 登录状态校验 |
+| 分布式爬虫 | Redis checkpointer + 任务队列 + worker 心跳崩溃恢复（`uv sync --extra dist`） |
+| Android 逆向 | frida hook：定位加密函数 / dump SO / 绕过 SSL pinning |
+| MCP 扩展 | fetch / playwright / 自研抓包分析，聊天即加 MCP server |
+| 插件规范 | `plugins/` 下第三方插件自动接入（工具 + 技能） |
+| 会话持久化 | SqliteSaver / RedisSaver，重启后继续聊 |
+| 流式 WebUI | Vue 3 + WebSocket，token 级输出 + 工具轨迹 + 事件断线重放 |
 
 ## 工具列表
 
-Agent 默认装配以下工具（共 22 个）：
+Agent 默认装配 **43 个内置工具**（+ 1 个示例插件工具 `fetch_rss_feed`）。完整清单与用法见 [wiki/03-工具与技能总览.md](wiki/03-工具与技能总览.md)。
 
-### 爬虫核心
+### 基础爬取与提取
 
-| 工具 | 说明 |
-|------|------|
-| `crawl_webpage` | requests 直连爬取 HTML 原始内容（不渲染 JS） |
-| `browse_and_crawl` | Playwright 无头浏览器，处理 SPA/JS 动态页面 |
-| `extract_content` | HTML → Markdown 正文提取 |
-| `extract_list` | 列表页/索引页条目提取（标题+URL 配对） |
-| `extract_list_paged` | 静态多页列表一次抓全：自动翻页（下一页链接 + page/p/pageNum 参数）+ 跨页去重合并 |
-| `ask_user` | 向用户发起交互式选择题（聊天页按钮点击作答）：拉起 MCP 服务、批量下载授权、删除确认等需要用户决定的场景 |
-| `web_search` | 联网搜索第三方站点 |
+`crawl_webpage` · `browse_and_crawl` · `extract_content` · `extract_list` · `extract_list_paged`
 
-### 数据持久化
+### 存储与查询
 
-| 工具 | 说明 |
-|------|------|
-| `save_record` | 保存抽取内容到 SQLite 数据库 |
-| `list_crawled_resources` | 查询已爬取资源 |
-| `save_to_file` | 保存文本到本地文件（md/txt/json） |
-| `download_images` | 批量下载图片/视频到 downloads 目录 |
+`save_record` · `list_crawled_resources` · `search_knowledge` · `save_to_file` · `download_images`
 
 ### 站点专用
 
-| 工具 | 说明 |
-|------|------|
-| `extract_social_media` | 抖音/小红书/B站 视频/图文提取 |
-| `download_social_media` | 社交媒体媒体文件下载 |
-| `extract_wallpaper_list` | 壁纸/图片站列表抽取 |
-| `wallpaper_detail` | 单条壁纸详情抓取 |
-| `list_weread_chapters` | 微信读书章节列表 |
-| `get_weread_chapter` | 微信读书章节正文 |
-| `list_site_profiles` | 已保存站点档案列表 |
-| `save_site_profile` | 保存站点 cookies/脚本/策略 |
+`extract_social_media` · `download_social_media` · `extract_wallpaper_list` · `wallpaper_detail` · `list_weread_chapters` · `get_weread_chapter` · `list_site_profiles` · `save_site_profile`
+
+### 代理池（5）
+
+`add_proxy` · `remove_proxy` · `mark_proxy_failed` · `get_proxy` · `list_proxies`
+
+### 模拟登录（2）
+
+`login_site` · `check_login_status`
+
+### MCP 管理（4）
+
+`list_mcp_servers` · `add_mcp_server` · `remove_mcp_server` · `disable_mcp_server`
+
+### 高级工具（3）
+
+`markitdown_convert` · `crawl4ai_deep_crawl` · `browser_use_navigate`
+
+### Android 逆向（6）
+
+`list_adb_devices` · `install_apk` · `push_file` · `frida_hook_function` · `frida_dump_so` · `frida_bypass_ssl_pinning`
 
 ### 辅助
 
-| 工具 | 说明 |
-|------|------|
-| `run_custom_script` | 写并运行自定义 Python 脚本（沙盒内） |
-| `video_site_expert` | 视频站点子 Agent（自动选址+探测） |
-| `read_skill` | 按需读取 skill 插件正文 |
+`run_custom_script` · `video_site_expert` · `ask_user` · `recommend_scripts` · `read_skill`
 
 ### MCP 扩展（可选，.env 的 MCP_SERVERS 配置）
 
@@ -111,8 +138,8 @@ Agent 默认装配以下工具（共 22 个）：
 | `wait_capture_ready` | 等待抓包会话就绪 |
 | `check_mcp_status` | 检查 MCP Server 状态 |
 | `fetch`（mcp-server-fetch） | 第三方 MCP：网页 → LLM 友好 Markdown（官方 fetch server，stdio） |
-| `browser_*` ×24（playwright-mcp） | 第三方 MCP：微软官方浏览器自动化（导航/点击/截图/表单等） |
-| navigate / filter_requests 等（anything-analyzer） | 自研 MCP：加密接口抓包分析（streamable-http） |
+| `browser_*` ×24（playwright-mcp） | 第三方 MCP：微软官方浏览器自动化 |
+| navigate / filter_requests 等（anything-analyzer） | 自研 MCP：加密接口抓包分析 |
 
 单个 MCP server 连不上只跳过它自己，不影响其它 server。
 
@@ -120,8 +147,8 @@ Agent 默认装配以下工具（共 22 个）：
 
 `skills/` 目录内置 6 个爬虫攻略技能（Agent 构建时索引进 system prompt，正文由
 `read_skill` 按需加载）：`bilibili-grab` / `douyin-grab` / `wallpaper-sites` /
-`weread-grab` / `batch-crawl-playbook`（批量抓取总配方）/ `custom-script-recipes`
-（脚本阶梯配方）。详见 [skills/README.md](skills/README.md)。
+`weread-grab` / `batch-crawl-playbook` / `custom-script-recipes`。
+详见 [skills/README.md](skills/README.md)。
 
 ### 插件（plugins/）
 
@@ -134,31 +161,35 @@ crawagent add-plugin https://github.com/x/y.git  # 从 git 仓库接入
 crawagent plugins                                # 查看已装插件
 ```
 
-插件约定：`plugins/<name>/plugin.json`（manifest）+ `tools/*.py`（工具模块）+
-`skills/*/SKILL.md`（技能包）。仓库自带示例插件 `plugins/example-rss/`。
-
 ## 架构
 
 ```
 crawagent/
 ├── config/settings.py          # pydantic-settings，.env 加载
+├── dist/                        # 分布式：redis_client/redis_server/queue/pubsub/worker/runner/cli
 ├── graph/
 │   ├── agent.py                 # LangGraph StateGraph + SYSTEM_PROMPT 构建
 │   ├── skills.py                # Skill 插件加载 + MCP 自动启动
-│   ├── middleware.py            # 历史消息滑动窗口裁剪
+│   ├── middleware.py            # 历史消息裁剪（半水位淘汰，不污染持久态）
 │   ├── script_forcer.py         # 工具失败 → 自动切换脚本兜底
 │   └── subagents/
 │       └── video_finder.py      # 视频站点子 Agent
-├── llm/model.py                 # get_llm() — DeepSeek 为主，LangChain 抽象
+├── llm/model.py                 # get_llm() — 多服务商适配，LangChain 抽象
 ├── observability/metrics.py     # Token 统计、缓存命中追踪
 ├── prompts/                     # system.md + infinite-gen-2.md（导入时拼接）
-├── tools/                       # 19 个工具模块 + _template/ 插件脚手架
-├── plugins/                     # 第三方插件（plugin.json 规范，见 add-plugin）
+├── storage/                     # checkpointer 工厂 + meta_store + checkpoint_view
+├── tools/                       # 43 个 @tool 工具 + _template/ 插件脚手架
+│   ├── crawl/browse/extract/list_extract/save/query/file
+│   ├── social/wallpaper/weread/site_profile
+│   ├── proxy/login/android_reverse/advanced
+│   └── script_tool/confidence/font_decrypt/pagination
+├── plugins/                     # 第三方插件（plugin.json 规范）
 ├── skills/                      # 内置爬虫技能包（6 个 SKILL.md）
 └── web/
-    ├── server.py                # FastAPI，端口 8006，启动时 daemon 清理
-    ├── routers/                 # sessions / settings / sites
-    └── state.py                 # get_agent / get_checkpointer 单例
+    ├── server.py                # FastAPI，端口 8006
+    ├── routers/                 # sessions / settings / sites / dist
+    ├── state.py                 # get_agent / get_checkpointer 单例
+    └── turn_engine.py           # 轮次事件泵
 ```
 
 数据流：
@@ -166,8 +197,8 @@ crawagent/
 ```
 User Input → FastAPI (/api/sessions)
            → get_agent() (LangGraph compiled)
-           → SYSTEM_PROMPT + LLM (DeepSeek) + Tools
-           → checkpointer (SqliteSaver) 持久化会话
+           → SYSTEM_PROMPT + LLM + 43 工具
+           → checkpointer (SqliteSaver / RedisSaver) 持久化会话
            → Response → 前端
 ```
 
@@ -191,6 +222,16 @@ uv run pytest tests/ -v
 uv run pyright crawagent
 ```
 
+## 文档
+
+| 文档 | 说明 |
+|------|------|
+| [wiki/](wiki/) | 用户向使用说明（快速开始、核心概念、工具总览、扩展能力、FAQ） |
+| [docs/adr/](docs/adr/) | 架构决策记录 |
+| [docs/architecture/](docs/architecture/) | 架构图 SVG |
+| [升级改动文档/](升级改动文档/) | 编号变更规格与实施记录 |
+| [CONTEXT.md](CONTEXT.md) | 术语词汇表 |
+
 ## 目录结构（运行时）
 
 ```
@@ -198,11 +239,13 @@ project_root/
 ├── data/
 │   ├── crawagent.db             # SQLite 爬取数据
 │   ├── sessions.db              # LangGraph 会话状态
+│   ├── meta.db                  # 会话标题 / 错误记录
+│   ├── proxies.json             # 代理池
 │   ├── _tmp/                    # 临时文件（>1h 自动清理）
 │   └── sites.json               # 站点档案
 ├── downloads/                   # 媒体下载（图片/视频/壁纸）
 ├── output/                      # 文本产物（md/txt/json）
-└── logs/                        # 运行日志（>30d 自动清理）
+└── logs/                        # 运行日志 + 会话归档
 ```
 
 ## 许可证

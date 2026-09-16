@@ -156,6 +156,20 @@ _TOOL_META: dict[str, dict[str, Any]] = {
     "markitdown_convert":     {"category": "advanced", "deps": ["markitdown"]},
     "crawl4ai_deep_crawl":    {"category": "advanced", "deps": ["crawl4ai", "playwright"]},
     "browser_use_navigate":  {"category": "advanced", "deps": ["browser_use", "playwright"]},
+    "add_proxy":              {"category": "general", "deps": ["requests"]},
+    "remove_proxy":           {"category": "general", "deps": ["json"]},
+    "mark_proxy_failed":      {"category": "general", "deps": ["json"]},
+    "get_proxy":              {"category": "general", "deps": ["requests"]},
+    "list_proxies":           {"category": "general", "deps": ["json"]},
+    "login_site":             {"category": "site",    "deps": ["playwright"]},
+    "check_login_status":     {"category": "site",    "deps": ["requests"]},
+    # ---- Android 逆向（frida hook）----
+    "list_adb_devices":        {"category": "android", "deps": ["subprocess"]},
+    "install_apk":             {"category": "android", "deps": ["subprocess"]},
+    "push_file":               {"category": "android", "deps": ["subprocess"]},
+    "frida_hook_function":     {"category": "android", "deps": ["subprocess"]},
+    "frida_dump_so":           {"category": "android", "deps": ["subprocess"]},
+    "frida_bypass_ssl_pinning":{"category": "android", "deps": ["subprocess"]},
 }
 
 # 内部模块黑名单：这些模块里的 BaseTool 不应该被 discover_tools 收集
@@ -187,6 +201,8 @@ _EXTRA_TOOL_MODULES: list[str] = [
 
 
 def _guess_category(name: str) -> str:
+    if any(k in name for k in ("frida", "adb", "apk", "ssl_pinning")):
+        return "android"
     if any(k in name for k in ("crawl", "browse")):
         return "crawl"
     if any(k in name for k in ("extract", "list", "probe", "analyze")):
@@ -511,6 +527,7 @@ def specs_to_prompt(specs: list[ToolSpec] | None = None, group_by_category: bool
             "skill": "📚 Skills",
             "eco": "🔌 Ecosystem",
             "advanced": "🚀 Advanced",
+            "android": "📱 Android",
             "general": "General",
         }
         for cat, items in by_cat.items():

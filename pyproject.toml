@@ -49,6 +49,17 @@ browser = [
     "numpy>=1.26.0",
     "brotli>=1.1.0",  # woff2 字体解码
 ]
+# 扩展可选：分布式爬虫（Redis checkpointer + 任务队列 + worker）
+dist = [
+    "redis>=5.2.1",
+    "langgraph-checkpoint-redis>=0.5.2",
+]
+# 扩展可选：Android 逆向（frida hook）
+# 不在 pyproject.toml 声明——frida-tools 的 websockets 依赖约束与主环境冲突，
+# 会让 uv 解析整个项目时失败。改由用户按需手动安装：
+#   pip install frida frida-tools
+# android_reverse_tool.py 用 subprocess 调 frida CLI，不需要 Python import；
+# _check_binary 在工具调用时检查存在性并给出安装提示。
 
 [build-system]
 requires = ["setuptools>=64", "wheel"]
@@ -56,6 +67,7 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 crawagent = "crawagent.cli:main"
+crawagent-dist-worker = "crawagent.dist.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["crawagent*"]

@@ -198,7 +198,7 @@ def decrypt_js_eval_html(html):
 #  helper 3: browser_render(url, wait_ms, extra_headers, cookies)
 # ============================================================
 def browser_render(url, wait_ms=3500, extra_headers=None, cookies=None,
-                   timeout=45, wait_selector=None, user_agent=None):
+                   timeout=45, wait_selector=None, user_agent=None, proxy=None):
     '''用 Playwright (Chromium headless) 完整渲染动态页面。
     适合：JS 渲染 SPA、字体加密需执行页面 CSS、需要等客户端脚本执行后 DOM 完整。
 
@@ -209,6 +209,8 @@ def browser_render(url, wait_ms=3500, extra_headers=None, cookies=None,
         cookies:        str "k1=v1; k2=v2" 或 dict 或 list[dict] 格式（Playwright 兼容）
         wait_selector:  CSS 选择器。若给了就一直等到此元素出现（或超时）再抓 DOM。
         user_agent:     字符串浏览器 UA；留空则用标准 Chrome PC UA。
+        proxy:          可选代理 URL（"http://user:pass@host:port" 或 "socks5://host:port"），
+                        让浏览器走代理；建议先调 get_proxy() 拿可用代理再传进来。
     Returns:
         (final_url: str, html: str) — 出错时返回 ("", "ERR: ...")，html 为错误信息。
     '''
@@ -218,7 +220,7 @@ def browser_render(url, wait_ms=3500, extra_headers=None, cookies=None,
     # 所有参数打包成 JSON，经环境变量 _PAYLOAD 传给子进程（方案 A：不写临时文件）
     payload = dict(url=url, wait_ms=wait_ms, extra_headers=extra_headers or {{}},
                    cookies=cookies, timeout=timeout, wait_selector=wait_selector,
-                   user_agent=user_agent)
+                   user_agent=user_agent, proxy=proxy)
     # 内联 Playwright 脚本：用 {{...}} 插值，所以字符串里的 {{ }} 双写
     _pw_script = r'''
 import json, sys, os
@@ -231,7 +233,19 @@ except Exception as e:
     sys.exit(0)
 try:
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        launch_kw = {{"headless": True}}
+        if p.get("proxy"):
+            from urllib.parse import urlparse as _up, unquote as _uq
+            _pu = _up(p["proxy"])
+            _scheme = _pu.scheme or "http"
+            _ph = _pu.hostname or ""
+            _pp = _pu.port or (1080 if "socks" in _scheme else 8080)
+            launch_kw["proxy"] = {{"server": f"{{_scheme}}://{{_ph}}:{{_pp}}"}}
+            if _pu.username:
+                launch_kw["proxy"]["username"] = _uq(_pu.username)
+            if _pu.password:
+                launch_kw["proxy"]["password"] = _uq(_pu.password)
+        browser = pw.chromium.launch(**launch_kw)
         ctx_kwargs = dict()
         if p.get("user_agent"):
             ctx_kwargs["user_agent"] = p["user_agent"]

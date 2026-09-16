@@ -24,6 +24,8 @@ from crawagent.web.state import (
     get_metrics,
     get_session_error,
 )
+from crawagent.storage.meta_store import get_meta_conn
+from crawagent.storage.checkpoint_view import get_checkpoint_view
 
 router = APIRouter()
 
@@ -231,7 +233,7 @@ async def export_session(session_id: str, format: str = "json"):
         # 查会话标题（有则用作文件名，无则用 session_id）
         title = None
         try:
-            row = get_checkpointer().conn.execute(
+            row = get_meta_conn().execute(
                 "SELECT title FROM session_titles WHERE thread_id = ?", (session_id,)
             ).fetchone()
             if row:
@@ -262,23 +264,18 @@ async def export_session(session_id: str, format: str = "json"):
 
 @router.get("/api/sessions")
 async def sessions() -> dict[str, Any]:
-    """列出 sessions.db 里的全部会话（含最新消息预览），供侧栏展示与切换
+    """列出全部会话（含最新消息预览），供侧栏展示与切换
 
-    性能优化：
-      - 只拉最新 20 个会话（侧栏够用了；更多历史会话通过历史归档查看）
-      - 跳过 checkpoint BLOB > 30MB 的会话（反序列化极慢，preview 直接留空）
+    后端无关：通过 get_checkpoint_view().list_thread_ids() 抽象，
+    sqlite 查 checkpoints 表，redis 走 SMEMBERS 索引。
     """
     def _load() -> list[dict[str, Any]]:
         try:
-            checkpointer = get_checkpointer()
+            view = get_checkpoint_view()
         except Exception:
             return []
         try:
-            rows = checkpointer.conn.execute(
-                "SELECT thread_id, MAX(rowid) AS latest, "
-                "MAX(LENGTH(checkpoint)) AS ckpt_size FROM checkpoints "
-                "GROUP BY thread_id ORDER BY latest DESC LIMIT 20"
-            ).fetchall()
+            rows = view.list_thread_ids(limit=20)
         except Exception:
             return []
 
@@ -289,8 +286,9 @@ async def sessions() -> dict[str, Any]:
             pass
 
         # 一次性拉取全部会话标题（thread_id → title），侧栏直接查内存字典
+        # session_titles 表在 meta.db，与 checkpointer 后端解耦
         try:
-            _titles = dict(checkpointer.conn.execute(
+            _titles = dict(get_meta_conn().execute(
                 "SELECT thread_id, title FROM session_titles"
             ).fetchall())
         except Exception:
@@ -420,17 +418,28 @@ def _delete_session_sync(session_id: str, *, do_archive: bool = True) -> dict[st
     # 2. 归档 placeholder（仅 do_archive=True 时；只写 compressed_dump，LLM 总结等后台线程）
     archive_path = _archive_session_sync(session_id) if do_archive else None
 
-    # 3. 删除检查点
+    # 3. 删除检查点（checkpoints/writes 表仅在 sqlite 后端存在；
+    #    redis 后端无 .conn 属性，try/except 兜底跳过）
     checkpointer = get_checkpointer()
-    for table in ("checkpoints", "writes"):
-        checkpointer.conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (session_id,))
-    # 标题与失败记录一并清掉：会话没了，残留数据就是垃圾
+    conn = getattr(checkpointer, "conn", None)
+    if conn is not None:
+        for table in ("checkpoints", "writes"):
+            try:
+                conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (session_id,))
+            except Exception:
+                pass
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    # 标题与失败记录在 meta.db（独立连接，与 checkpointer 后端无关）
+    meta = get_meta_conn()
     for table in ("session_titles", "session_errors"):
         try:
-            checkpointer.conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (session_id,))
+            meta.execute(f"DELETE FROM {table} WHERE thread_id = ?", (session_id,))
         except Exception:
             pass  # 表尚未创建（老库）等情况，不阻断删除
-    checkpointer.conn.commit()
+    meta.commit()
     _metrics.pop(session_id, None)
     _session_locks.pop(session_id, None)
 
@@ -439,10 +448,10 @@ def _delete_session_sync(session_id: str, *, do_archive: bool = True) -> dict[st
 
 @router.patch("/api/sessions/{session_id}")
 async def rename_session(session_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
-    """重命名会话：upsert session_titles 表。空标题 = 删除自定义名（恢复 ID 显示）。"""
+    """重命名会话：upsert session_titles 表（meta.db）。空标题 = 删除自定义名。"""
     title = (body.get("title") or "").strip()
     def _upsert() -> None:
-        conn = get_checkpointer().conn
+        conn = get_meta_conn()
         if title:
             conn.execute(
                 "INSERT INTO session_titles (thread_id, title) VALUES (?, ?) "

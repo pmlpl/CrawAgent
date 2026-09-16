@@ -4,7 +4,7 @@ CrawAgent — LLM 驱动的智能爬虫 Agent 框架。Python（FastAPI + LangGr
 
 - 后端：`crawagent/tools/`（爬虫工具）、`crawagent/web/`（server + routers + turn_engine 事件泵）、`crawagent/graph/`（agent/middleware/skills）、`crawagent/prompts/system.md`（Agent 行为契约，改工具必同步）。
 - 前端：`web/src/pages/` + `components/`；设置页是四页签结构（`components/settings/`），共享样式 `settings.css` 全部挂 `.settings-page` 前缀。
-- 文档：`docs/`（00-08 项目/架构/工具/待办清单）、`CONTEXT.md` 词汇表 + `docs/adr/` 决策、`升级改动文档/`（编号变更规格 + 人话版实施记录）。
+- 文档：`wiki/`（用户向使用说明）、`docs/adr/`（架构决策）、`docs/architecture/`（架构图 SVG）、`docs/agents/`（Agent 工作流）、`CONTEXT.md` 词汇表、`升级改动文档/`（编号变更规格 + 实施记录）。
 
 ## 任务汇报口令（强制）
 
@@ -43,7 +43,7 @@ uv run python -m crawagent.web.server  # 临时冒烟用这个（静态托管在
 - **冒烟先清端口**：webapp-testing 的 with_server 杀不干净 uvicorn 孤儿进程，后续冒烟会打在旧代码上；结果与代码预期不符时第一反应查残留进程（`netstat -ano | grep :<port>`）。
 - **编辑工具吞尖括号**：含 `<>` 的代码用 Python 脚本落盘，别直接写进 Edit/Write。
 - 背景图/壁纸存服务端 `data/`（ADR-0001），localStorage 已弃用；产物目录在高级页可编辑、保存即生效（工具层每次现读 get_settings()）。
-- 改动后基线：240 pytest + 10 vitest 全绿（工具/设置再扩展时同步更新计数测试与 README/docs/04 的工具数）。
+- 改动后基线：329 pytest + 10 vitest 全绿（工具/设置再扩展时同步更新计数测试与 `crawagent/prompts/system.md` 工具清单 + `wiki/03-工具与技能总览.md` 的工具数）。
 
 ## Agent skills
 

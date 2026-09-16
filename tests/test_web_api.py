@@ -245,6 +245,8 @@ def test_session_export_json(client, monkeypatch):
 
     monkeypatch.setattr(sessions_router, "get_agent", lambda: _FakeAgent())
     monkeypatch.setattr(sessions_router, "get_checkpointer", lambda: _FakeCheckpointer())
+    # session_titles 已迁至 meta.db（get_meta_conn），monkeypatch 指向同一 in-memory db
+    monkeypatch.setattr(sessions_router, "get_meta_conn", lambda: db)
 
     r = client.get("/api/sessions/sid-test/export?format=json")
     assert r.status_code == 200

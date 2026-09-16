@@ -98,7 +98,29 @@ def browse_and_crawl(url: str, task: str = "") -> str:
         from playwright.async_api import async_playwright
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            launch_kw = {"headless": True}
+            # 代理透传：优先 settings.default_proxy，其次进程级 HTTPS_PROXY 环境变量
+            _proxy_url = ""
+            try:
+                from crawagent.config.settings import get_settings
+                _proxy_url = get_settings().default_proxy or ""
+            except Exception:
+                pass
+            if not _proxy_url:
+                import os as _os
+                _proxy_url = _os.environ.get("HTTPS_PROXY") or _os.environ.get("HTTP_PROXY") or ""
+            if _proxy_url:
+                from urllib.parse import urlparse as _up, unquote as _uq
+                _pu = _up(_proxy_url if "://" in _proxy_url else "http://" + _proxy_url)
+                _scheme = _pu.scheme or "http"
+                _ph = _pu.hostname or ""
+                _pp = _pu.port or (1080 if "socks" in _scheme else 8080)
+                launch_kw["proxy"] = {"server": f"{_scheme}://{_ph}:{_pp}"}
+                if _pu.username:
+                    launch_kw["proxy"]["username"] = _uq(_pu.username)
+                if _pu.password:
+                    launch_kw["proxy"]["password"] = _uq(_pu.password)
+            browser = await p.chromium.launch(**launch_kw)
             page = await browser.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(5000)

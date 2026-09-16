@@ -12,11 +12,14 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.sqlite import SqliteSaver  # 保留：sqlite 后端类型兼容
 
 from crawagent.config.settings import get_settings
 from crawagent.graph.agent import get_agent as _build_agent, warm_cache as _warm_cache
 from crawagent.observability.metrics import SessionMetrics
+from crawagent.storage.checkpointer import build_checkpointer
+from crawagent.storage.meta_store import get_meta_conn, reset_meta_conn
 
 # 推送给前端的工具结果预览长度（_run_turn 与会话历史接口共用）
 TOOL_RESULT_PREVIEW = 600
@@ -64,43 +67,33 @@ class _LRUDict(OrderedDict):
 # 上限从 settings 读（.env 可覆盖）；_active_turns 不做 LRU——存的是运行中任务，淘汰会炸
 _settings = get_settings()
 _agents: dict[str, Any] = _LRUDict(_settings.max_cached_agents, "agents")
-_checkpointer: SqliteSaver | None = None
+_checkpointer: BaseCheckpointSaver | None = None
 _metrics: dict[str, SessionMetrics] = _LRUDict(_settings.max_tracked_sessions, "metrics")
 _session_locks: dict[str, asyncio.Lock] = _LRUDict(_settings.max_tracked_sessions, "session_locks")
 _active_turns: dict[str, dict[str, Any]] = {}  # session_id → {queue, loop, future, events, ...}
 
 
-def get_checkpointer() -> SqliteSaver:
+def get_checkpointer() -> BaseCheckpointSaver:
     """惰性创建 checkpointer（只连数据库，不依赖 API Key）。
 
     与 get_agent 分离：会话列表/历史这类"纯数据库读"操作，
     Agent 构建失败（如缺 API Key）时也必须能工作。
+
+    后端由 settings.checkpoint_backend 决定（sqlite 默认 / redis 分布式），
+    实际初始化逻辑在 storage.build_checkpointer() 中。
+    session_titles/session_errors 表已迁至 storage.meta_store（独立 meta.db），
+    与 checkpointer 解耦。
     """
     global _checkpointer
     if _checkpointer is None:
-        settings = get_settings()
-        settings.sessions_db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(settings.sessions_db_path), check_same_thread=False)
-        _checkpointer = SqliteSaver(conn)
-        _checkpointer.setup()
-        # 会话重命名：thread_id → 自定义标题（与 langgraph 的 checkpoints 表同库同连接）
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS session_titles ("
-            "thread_id TEXT PRIMARY KEY, title TEXT NOT NULL)"
-        )
-        # 会话最后一次轮次失败原因：刷新页面后前端仍能显示红条，直到下一轮成功
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS session_errors ("
-            "thread_id TEXT PRIMARY KEY, message TEXT NOT NULL, ts TEXT NOT NULL)"
-        )
-        conn.commit()
+        _checkpointer = build_checkpointer(get_settings())
     return _checkpointer
 
 
 def save_session_error(session_id: str, message: str) -> None:
     """记录会话最后一次轮次失败原因（新错误覆盖旧错误）。失败只打日志不阻断。"""
     try:
-        conn = get_checkpointer().conn
+        conn = get_meta_conn()
         conn.execute(
             "INSERT INTO session_errors (thread_id, message, ts) VALUES (?, ?, ?) "
             "ON CONFLICT(thread_id) DO UPDATE SET message = excluded.message, ts = excluded.ts",
@@ -114,7 +107,7 @@ def save_session_error(session_id: str, message: str) -> None:
 def clear_session_error(session_id: str) -> None:
     """清除会话的失败记录（下一轮成功后调用：问题已解决，红条不再恢复）。"""
     try:
-        conn = get_checkpointer().conn
+        conn = get_meta_conn()
         conn.execute("DELETE FROM session_errors WHERE thread_id = ?", (session_id,))
         conn.commit()
     except Exception as e:
@@ -124,7 +117,7 @@ def clear_session_error(session_id: str) -> None:
 def get_session_error(session_id: str) -> dict[str, str] | None:
     """读取会话最后一次失败原因；无记录返回 None。"""
     try:
-        row = get_checkpointer().conn.execute(
+        row = get_meta_conn().execute(
             "SELECT message, ts FROM session_errors WHERE thread_id = ?", (session_id,)
         ).fetchone()
     except Exception:
@@ -151,6 +144,8 @@ def reset_agent_cache() -> None:
     global _checkpointer
     _agents.clear()
     _checkpointer = None
+    # meta.db 连接也要重置：checkpoint_backend 切换时避免旧连接残留
+    reset_meta_conn()
     # MCP 工具缓存也要失效：token/开关可能变了
     from crawagent.graph.skills import reset_mcp_cache
     reset_mcp_cache()

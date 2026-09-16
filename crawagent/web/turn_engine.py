@@ -32,12 +32,12 @@ from crawagent.web.state import (
     _metrics,
     clear_session_error,
     get_agent,
-    get_checkpointer,
     save_metrics,
     save_session_error,
     session_lock,
     warm_cache,
 )
+from crawagent.storage.meta_store import get_meta_conn
 
 
 _AUTO_TITLE_PROMPT = (
@@ -60,7 +60,7 @@ def _maybe_auto_title(session_id: str, agent: Any, config: dict, fallback_text: 
     """
     if session_id in _pending_titles:
         return
-    conn = get_checkpointer().conn
+    conn = get_meta_conn()
     try:
         existing = conn.execute(
             "SELECT 1 FROM session_titles WHERE thread_id = ?", (session_id,)
@@ -122,7 +122,7 @@ def _generate_title(session_id: str, user_text: str, ai_text: str) -> None:
             title = title[:30]
         if not title:
             return  # LLM 与兜底都提不出（用户输入为空）
-        conn = get_checkpointer().conn
+        conn = get_meta_conn()
         conn.execute(
             "INSERT INTO session_titles (thread_id, title) VALUES (?, ?) "
             "ON CONFLICT(thread_id) DO NOTHING",  # DO NOTHING：不覆盖在此期间可能的手动改名
