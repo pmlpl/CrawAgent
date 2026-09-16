@@ -23,7 +23,7 @@ logs/
 downloads/
 novels/
 output/
-/assets/
+/assets/fonts/
 
 # 前端依赖与构建
 node_modules/
