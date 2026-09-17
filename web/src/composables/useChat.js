@@ -388,6 +388,11 @@ const useChatStore = defineStore('chat', () => {
     typing.value = false
     currentProgress.value = ''
     _finalizeOpenThinking() // 轮次结束兜底：收尾任何残留流式思考
+    // 兜底：若 ai_done 事件丢失（WS 抖动/重连/后端直发 done），残留 AI 消息的
+    // streaming 会一直为 true，导致消息尾部光标永不消失。这里强制全部收尾。
+    for (const it of items) {
+      if (it.kind === 'ai' && it.streaming) it.streaming = false
+    }
     currentTrace = null
     aiStreams.clear()
     stopTick()
