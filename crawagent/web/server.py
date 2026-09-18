@@ -39,14 +39,27 @@ WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
 
 
 class _ContextPollAccessFilter(logging.Filter):
-    """抑制 GET /api/sessions/{id}/context 的访问日志——前端 ContextRing 每 3 秒轮询，
-    200 OK 行刷屏且无诊断价值（失败也静默兜底）。按格式化消息匹配，跨 uvicorn 版本稳定。"""
+    """抑制前端轮询接口的访问日志——200 OK 行刷屏且无诊断价值（失败也静默兜底）。
+    按格式化消息匹配，跨 uvicorn 版本稳定。
+
+    覆盖两条轮询：
+      1. GET /api/sessions            — useChat.startSessionPoll 任务期间每 3s 拉会话列表
+                                      （新会话首条消息时 checkpoint 未落库，侧栏靠轮询补，
+                                       done 时 endTurn 自动停）
+      2. GET /api/sessions/{id}/context — ContextRing 每 3s 拉上下文环
+    列表根 GET 精确匹配 "GET /api/sessions HTTP/"，不误伤带 id 的
+    GET /api/sessions/{id}（查看/导出/archive 等有诊断价值）。
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage()
         except Exception:
             return True
+        # 列表轮询：GET /api/sessions HTTP/1.1" 200（无路径参数）
+        if "GET /api/sessions HTTP/" in msg:
+            return False
+        # ContextRing 轮询：GET /api/sessions/{id}/context
         if "GET /api/sessions/" in msg and "/context HTTP/" in msg:
             return False
         return True
