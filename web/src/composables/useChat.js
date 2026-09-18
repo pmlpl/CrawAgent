@@ -300,14 +300,20 @@ const useChatStore = defineStore('chat', () => {
     }
     if (!step) return
     if (!step.progress_lines) step.progress_lines = []
+    // 后端"运行中… 已耗时 Xs"心跳是注入时刻的静态快照，pill 已改用前端 runningElapsed
+    // 实时计时。心跳行不入轨迹——否则一个工具跑 48s 会堆 8 条冻结快照，每条都写
+    // "运行中…"看着像 8 个任务卡住（修前 bug）。顺带清掉本 step 已累积的旧心跳行。
+    const HEARTBEAT_RE = /^运行中…\s*已耗时\s*[\d.]+s$/
+    if (step.progress_lines.length) {
+      step.progress_lines = step.progress_lines.filter(l => !HEARTBEAT_RE.test(l))
+    }
     for (const line of evt.lines) {
       if (!line) continue
+      if (HEARTBEAT_RE.test(line)) continue  // 心跳行不入轨迹，pill 用前端实时计时
       // 避免完全相同的重复
       if (step.progress_lines[step.progress_lines.length - 1] === line) continue
       step.progress_lines.push(line)
-      // 后端的"运行中… 已耗时 Xs"心跳是静态快照，不进 pill（仍留在轨迹日志里）；
-      // pill 的耗时由前端 runningElapsed 实时计算
-      if (!/^运行中…\s*已耗时\s*[\d.]+s$/.test(line)) currentProgress.value = line
+      currentProgress.value = line  // 真实里程碑进 pill
     }
     console.log('[progress] lines:', evt.lines.length, 'attached to tool step:', step.name || '(unknown)')
   }
