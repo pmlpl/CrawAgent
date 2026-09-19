@@ -117,9 +117,11 @@ def _run_adb(args: list[str], device_id: str = "", timeout: int = 30) -> tuple[i
 
     返回 (returncode, stdout+stderr 合并)。缺 adb 二进制时返回 (-1, ERR 提示串)。
     """
-    if not _check_binary("adb"):
+    resolved = _check_binary("adb")
+    if not resolved:
         return -1, "ERR: adb 未安装（装 platform-tools，或在 .env 设 ADB_PATH 后重试）"
-    cmd = ["adb"]
+    # 015 三级查找解析出的绝对路径要真正用于执行——PATH 无 adb 时裸 "adb" 会 WinError 2
+    cmd = [resolved]
     if device_id:
         cmd += ["-s", device_id]
     cmd += args
@@ -149,12 +151,13 @@ def _run_frida(args: list[str], timeout: int = 30) -> tuple[int, str]:
     if not args:
         return -1, "ERR: 空命令"
     binary = args[0]
-    if not _check_binary(binary):
+    resolved = _check_binary(binary)
+    if not resolved:
         hint = "pip install frida-tools" if binary.startswith("frida") else f"安装 {binary}"
         return -1, f"ERR: {binary} 未安装（{hint} 后重试）"
     try:
         r = subprocess.run(
-            args,
+            [resolved, *args[1:]],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -208,13 +211,15 @@ def list_adb_devices() -> str:
     if rc != 0:
         return f"ERR: adb devices 失败: {out.strip()}"
     # 解析 "List of devices attached" 之后的行
+    valid_statuses = {"device", "offline", "unauthorized", "recovery", "sideload"}
     device_lines: list[list[str]] = []
     for line in out.splitlines():
         line = line.strip()
         if not line or line.startswith("List of devices"):
             continue
         parts = line.split()
-        if len(parts) < 2:
+        if len(parts) < 2 or parts[1] not in valid_statuses:
+            # 跳过 "* daemon started successfully" 等 adb 自身的提示行
             continue
         device_lines.append(parts)
     if not device_lines:

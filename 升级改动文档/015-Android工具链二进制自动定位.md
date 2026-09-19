@@ -97,3 +97,12 @@ settings 字段 → `_resolve_binary` + 接线 → 测试 → system.md 一句�
 
 - 显式配置优先级低于 which：PATH 里的 adb 恒胜出，`.env` 只在 PATH 没有时兜底——避免"用户指了旧版本还纳闷为什么不生效"的反向困惑。
 - 本变更已随本 commit 入库（代码与文档同批）。
+
+### 追加记录：端到端验证修复两处缺口（2026-09-19，commit 后补）
+
+015 入库后做端到端验证（PATH 无 adb 的真机环境），发现两处缺口并当场修复：
+
+1. **解析路径没用于执行**：`_check_binary` 三级查找命中常见位置表拿到绝对路径，但 `_run_adb` 执行时仍写死 `["adb", ...]`、`_run_frida` 仍用裸 `args[0]`——PATH 无 adb 时照样 WinError 2，三级查找形同虚设（文档"接线"一节表述与实际不符，实为只接了判存检查）。修法：subprocess 首元素改用解析出的绝对路径。
+2. **adb daemon 启动行被当设备**：`list_adb_devices` 解析 `devices -l` 输出时，`* daemon started successfully` 等 adb 提示行满足"≥2 列"被计入，首启环境报"找到 2 台设备"（serial=`*`）。修法：只认第二列为合法设备状态（device/offline/unauthorized/recovery/sideload）的行。
+
+回归：android 工具测试新增 3 用例（adb/frida 执行路径断言 + daemon 行过滤），全量 350 pytest + 10 vitest 全绿。端到端实测：`_check_binary("adb")` 命中 `%LOCALAPPDATA%\Android\Sdk\platform-tools\`，`list_adb_devices` 无设备时正确返回 NO_DEVICE。

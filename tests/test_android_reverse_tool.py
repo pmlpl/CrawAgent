@@ -327,3 +327,59 @@ def test_list_adb_devices_via_common_location(tmp_path, monkeypatch):
         assert "找到 1 台设备" in r and "FAKESERIAL" in r
     finally:
         _clear_cache()
+
+
+# ---- 回归：三级查找解析出的绝对路径必须真正用于执行（015 端到端踩坑）----
+
+def test_run_adb_uses_resolved_path(monkeypatch):
+    """PATH 无 adb、靠常见位置表命中时，subprocess 收到的应是解析出的绝对路径。"""
+    monkeypatch.setattr(art, "_check_binary", lambda name: r"C:\fake\platform-tools\adb.exe")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        class R:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(art.subprocess, "run", fake_run)
+    rc, out = art._run_adb(["devices", "-l"], timeout=5)
+    assert rc == 0
+    assert captured["cmd"][0] == r"C:\fake\platform-tools\adb.exe"
+    assert captured["cmd"][1:] == ["devices", "-l"]
+
+
+def test_run_frida_uses_resolved_path(monkeypatch):
+    monkeypatch.setattr(art, "_check_binary", lambda name: r"C:\fake\frida.exe")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        class R:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(art.subprocess, "run", fake_run)
+    rc, out = art._run_frida(["frida", "-U", "-l", "hook.js"], timeout=5)
+    assert rc == 0
+    assert captured["cmd"][0] == r"C:\fake\frida.exe"
+    assert captured["cmd"][1:] == ["-U", "-l", "hook.js"]
+
+
+def test_list_adb_devices_skips_daemon_lines(monkeypatch):
+    """adb 首启的 "* daemon started successfully" 提示行不该被算成设备。"""
+    monkeypatch.setattr(art, "_check_binary", lambda name: "/adb")
+    monkeypatch.setattr(
+        art, "_run_adb",
+        lambda args, device_id="", timeout=10: (
+            0,
+            "* daemon not running; starting now at tcp:5037\n"
+            "* daemon started successfully\n"
+            "List of devices attached\n",
+        ),
+    )
+    assert "NO_DEVICE" in list_adb_devices.func()
