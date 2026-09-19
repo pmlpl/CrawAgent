@@ -386,7 +386,10 @@ def main() -> None:
     # 本机启动时自动打开 WebUI；绑定 0.0.0.0 视为服务器/容器部署，不开
     if host not in ("0.0.0.0", "::"):
         _open_browser_later(f"http://127.0.0.1:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # timeout_graceful_shutdown=5：Ctrl+C 后最多等 5s 强退。此前默认无超时——
+    # 有 agent 轮次/WebSocket/长 HTTP 在跑时 uvicorn 会一直等，Windows 上第二次
+    # Ctrl+C 还容易被 asyncio loop 吞，导致 "Shutting down" 后退不出去。
+    uvicorn.run(app, host=host, port=port, log_level="info", timeout_graceful_shutdown=5)
 
 
 if __name__ == "__main__":
