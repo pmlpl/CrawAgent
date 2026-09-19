@@ -55,6 +55,24 @@ def test_data_tmp_dir_exists_and_callable():
     assert hasattr(p, "exists")
 
 
+def test_ensure_tmp_removes_subdirectories():
+    """_ensure_tmp 递归清空：顶层文件和子目录一起清（修前只清顶层文件，子目录残留）。
+
+    在真实 DATA_TMP_DIR 造垃圾再验证被清——无持久副作用（_ensure_tmp 本就是清空用的）。
+    """
+    from crawagent.tools.script_tool import _ensure_tmp, DATA_TMP_DIR
+    junk_file = DATA_TMP_DIR / "_test_junk_file.txt"
+    junk_sub = DATA_TMP_DIR / "_test_junk_sub"
+    junk_sub.mkdir(parents=True, exist_ok=True)
+    (junk_sub / "_nested.txt").write_text("junk", encoding="utf-8")
+    junk_file.write_text("junk", encoding="utf-8")
+
+    _ensure_tmp()
+
+    assert not junk_file.exists(), "顶层遗留文件应被清掉"
+    assert not junk_sub.exists(), "子目录应被递归清掉（修前只清文件、子目录残留膨胀）"
+
+
 def test_script_tool_path_is_inside_project():
     """script_tool.py 的 DATA_TMP_DIR 指向 data/_tmp（不是系统 %TEMP%）。"""
     from crawagent.tools.script_tool import DATA_TMP_DIR
