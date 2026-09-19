@@ -45,7 +45,7 @@ def pending_ask_ids() -> list[str]:
 
 
 @tool
-def ask_user(question: str, options: list[str], timeout: int = 300) -> str:
+def ask_user(question: str, options: list[str], timeout: int = 600) -> str:
     """向用户发起选择题并等待点击（通用的人机确认机制）。
 
     适用场景：需要用户授权或选择时——拉起 MCP 服务（anything-analyzer）、
@@ -58,7 +58,8 @@ def ask_user(question: str, options: list[str], timeout: int = 300) -> str:
     参数：
         question: 一句话说清要决定什么（含上下文与后果）。
         options: 2-6 个短选项文案，如 ["打开 anything-analyzer", "暂不打开"]。
-        timeout: 最长等待秒数（默认 300，上限 1800）。
+        timeout: 最长等待秒数（默认 600，上限 1800）。用户需要离开设备
+                 操作（如去手机上抓包/点授权）时请主动给更大的 timeout。
 
     返回：
         用户点击的选项原文；超时/关闭返回提示语。
@@ -73,7 +74,7 @@ def ask_user(question: str, options: list[str], timeout: int = 300) -> str:
     try:
         wait_s = max(_MIN_TIMEOUT, min(int(timeout), _MAX_TIMEOUT))
     except (TypeError, ValueError):
-        wait_s = 300
+        wait_s = 600
 
     with _LOCK:
         _SEQ += 1

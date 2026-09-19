@@ -803,12 +803,13 @@ def run_custom_script(code: str, timeout: int = 60) -> str:
               hashlib, base64, random, math, copy, itertools, html 标准库, requests,
               BeautifulSoup, urllib.parse.*, Path, datetime。可选：lxml_html
               （通过 HAS_LXML 判断是否可用）。结果一律用 print() 输出。
-        timeout: 最长秒数（默认 60，上限 120）。
+        timeout: 最长秒数（默认 60，上限 600）。抓包监听、等设备响应、
+              批量下载等慢任务请主动给更大的 timeout，避免 120s 内跑不完被强杀。
 
     返回：
         标准输出 + 错误输出（前 5000 字）+ 异常时带 EXIT CODE / TIMEOUT 前缀。
     """
-    timeout = min(max(timeout, 5), 120)
+    timeout = min(max(timeout, 5), 600)
     settings = get_settings()
     venv_python = str(Path(sys.executable))
 

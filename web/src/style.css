@@ -119,6 +119,12 @@ html.bg-active .thinking {
   -webkit-backdrop-filter: blur(12px);
 }
 html.bg-active .composer-wrap { background: none; } /* 撤掉底部实色渐变，输入卡自己毛玻璃 */
+html.bg-active .ask-card {
+  /* ask_user 选择卡：待用户操作的交互面，比普通消息更实一点保证可读 */
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+}
 html.bg-active .composer {
   background: color-mix(in srgb, var(--panel) 78%, transparent);
   backdrop-filter: blur(16px) saturate(1.15);
