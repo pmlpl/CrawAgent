@@ -60,6 +60,18 @@ def get_meta_conn(settings: Settings | None = None) -> sqlite3.Connection:
     return _meta_conn
 
 
+def get_session_title(thread_id: str, settings: Settings | None = None) -> str:
+    """取会话标题；无记录或查询失败返回空串（调用方自行兜底，不抛异常）。"""
+    try:
+        conn = get_meta_conn(settings)
+        row = conn.execute(
+            "SELECT title FROM session_titles WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
 def reset_meta_conn() -> None:
     """关闭并清空单例连接（设置变更或测试隔离时调用）。"""
     global _meta_conn

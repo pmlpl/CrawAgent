@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 from langchain_core.tools import tool
 
 from crawagent.config.settings import get_settings
+from crawagent.tools.session_dir import session_subdir
 
 # 模块级路径变量（raw string 外，Python 代码可直接引用）
 _s = get_settings()
@@ -88,6 +89,7 @@ from datetime import datetime
 PROJECT_ROOT = Path({root!r})
 DOWNLOADS_DIR = Path({downloads!r})
 OUTPUT_DIR = Path({output!r})
+SESSION_SUBDIR = {session_subdir!r}
 
 # -------- lxml（可选，若本环境未装则为 None）------------------------------
 try:
@@ -791,7 +793,9 @@ def run_custom_script(code: str, timeout: int = 60) -> str:
 
     保存路径约定：
       - 媒体下载 → DOWNLOADS_DIR / 子目录   (= settings.downloads_dir / 子目录)
-      - 文档（md/txt） → OUTPUT_DIR / 子目录    (= settings.output_dir / 子目录)
+      - 文档（md/txt） → OUTPUT_DIR / SESSION_SUBDIR / 文件名（本会话产物目录；SESSION_SUBDIR
+        为注入好的子目录名常量，空串表示无会话上下文此时直接用 OUTPUT_DIR）
+      - 不要把产物写到桌面/项目根等任意绝对路径
 
     脚本模板复用：写脚本前如果感觉本站和之前爬过的某个站结构相似
     （字体混淆 / CSDN / 微信读书 / DPlayer m3u8 ...），可以先调
@@ -830,6 +834,7 @@ def run_custom_script(code: str, timeout: int = 60) -> str:
             root=str(settings.project_root),
             downloads=str(settings.downloads_dir),
             output=str(settings.output_dir),
+            session_subdir=session_subdir(),
             injected_profiles=injected_profiles,
         )
         # 加上一行运行时注释，方便调试时看自动注入了哪些 origin

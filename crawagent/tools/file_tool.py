@@ -21,12 +21,17 @@ def _resolve_file_path(filename: str, subdir: str) -> Path:
     """安全地把 filename + subdir 解析为项目内绝对路径。
 
     返回值保证在 output_dir 内；若路径逃逸则抛 ValueError。
+    subdir 为空时默认落当前会话子目录（变更 014 会话级产物目录）；
+    无会话上下文（CLI/worker/直调工具）时落 output/ 根，行为与改前一致。
     """
     settings = get_settings()
     base = settings.project_root.resolve()
     output_root = settings.output_dir.resolve()
 
     subdir_clean = subdir.strip("/\\")
+    if not subdir_clean:
+        from crawagent.tools.session_dir import session_subdir
+        subdir_clean = session_subdir()
     if subdir_clean in ("output", ""):
         file_path = (output_root / filename).resolve()
     else:
