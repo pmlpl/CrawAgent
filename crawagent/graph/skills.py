@@ -13,12 +13,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import yaml
 from langchain_core.tools import tool
 
 from crawagent.config.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_skill_dirs() -> list[Path]:
@@ -572,7 +575,13 @@ def get_mcp_tools() -> list:
             while hasattr(root, "exceptions") and root.exceptions:
                 root = root.exceptions[0]
             _mcp_fail_cache[name] = _time.time()  # 记失败时间戳，TTL 内不重试不刷屏
-            print(f"[MCP] '{name}' 连接失败（跳过该 server，不影响其它，{_FAIL_TTL_SEC:.0f}s 内不重试）: {type(root).__name__}: {root}")
+            # enabled-but-down 是常态（anything-analyzer 只在抓包任务才需要开），
+            # 失败信息降级 debug——用户侧的正确动作是 agent 的 Step 0 ask_user 拉起流程，
+            # 不是看日志；排障时调 logging 级别即可见。
+            logger.debug(
+                "[MCP] '%s' 连接失败（跳过该 server，不影响其它，%.0fs 内不重试）: %s: %s",
+                name, _FAIL_TTL_SEC, type(root).__name__, root,
+            )
 
     _mcp_tools_cache = merged
     _mcp_cache_signature = sig
