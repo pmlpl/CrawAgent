@@ -19,6 +19,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,18 +38,21 @@ DATA_TMP_DIR = PROJECT_ROOT / "data" / "_tmp"
 
 
 def _ensure_tmp() -> Path:
-    """确保临时目录存在，并清空目录内所有遗留文件（启动全量清理）。
+    """确保临时目录存在，并清空目录内所有遗留内容（启动全量清理）。
 
     方案 A 后本模块不再向 _tmp 写任何临时脚本/JSON；该目录仅作为
     run_custom_script 子进程的 cwd，收容 AI 脚本自己写出的输出文件。
-    每次调用无条件清空，避免崩溃残留累积后用户手动删除进回收站导致膨胀。
+    每次调用无条件清空（文件 + 子目录递归），避免崩溃残留累积；
+    修前只清顶层文件，downloads/output/tools 子目录残留膨胀。
     """
     try:
         DATA_TMP_DIR.mkdir(parents=True, exist_ok=True)
-        for f in DATA_TMP_DIR.glob("*"):
+        for p in DATA_TMP_DIR.glob("*"):
             try:
-                if f.is_file() or f.is_symlink():
-                    f.unlink(missing_ok=True)
+                if p.is_dir() and not p.is_symlink():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink(missing_ok=True)
             except OSError:
                 pass
     except OSError:
