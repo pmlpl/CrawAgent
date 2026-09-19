@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     sessions_db_path: Path = project_root / "data" / "sessions.db"
     log_dir: Path = project_root / "logs"
 
+    # ---- Android 工具链二进制显式路径（015；空 = which + 常见位置自动定位）----
+    adb_path: str = ""
+    frida_path: str = ""
+
     # ---- 资源治理（内存 LRU 上限 + 磁盘保留策略，防只增不减）----
     max_cached_agents: int = 8        # 不同模型的 compiled agent 缓存上限
     max_tracked_sessions: int = 512   # _metrics + _session_locks 的跟踪上限

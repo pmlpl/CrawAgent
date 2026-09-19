@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,6 +24,24 @@ from crawagent.config.settings import get_settings
 
 # 内置 assets 目录（SSL pinning bypass 脚本等随包资源）
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+
+# Windows 常见 adb 安装位置（Android SDK / 主流模拟器；015）。
+# frida 靠 pip 装进 venv Scripts，which 天然覆盖，不设位置表。
+_ADB_COMMON_LOCATIONS = (
+    "%LOCALAPPDATA%/Android/Sdk/platform-tools/adb.exe",
+    "C:/Android/Sdk/platform-tools/adb.exe",
+    "%ProgramFiles%/Netease/MuMuPlayer-12.0/shell/adb.exe",
+    "%ProgramFiles(x86)%/Netease/MuMuPlayer-12.0/shell/adb.exe",
+    "C:/LDPlayer/LDPlayer9/adb.exe",
+    "%ProgramFiles%/LDPlayer/LDPlayer9/adb.exe",
+    "%ProgramFiles%/Nox/bin/adb.exe",
+)
+
+# 二进制路径命中缓存（进程内扫盘只一次）；miss 故意不缓存，装完软件即时生效
+_BINARY_PATH_CACHE: dict[str, str] = {}
+
+# 工具名 → settings 显式配置字段（frida-trace 与 frida 同目录，共用 frida_path）
+_BINARY_SETTING_KEYS = {"adb": "adb_path", "frida": "frida_path", "frida-trace": "frida_path"}
 
 # frida_dump_so 用的内联 JS 模板（占位符 __SO_NAME__ / __EXPORTS_BLOCK__ 运行时替换）
 _DUMP_SO_JS_TEMPLATE = """\
@@ -52,9 +71,45 @@ if (!_dump()) {
 # 辅助函数
 # ---------------------------------------------------------------------------
 
+def _settings_binary_override(name: str) -> str:
+    """读 .env 显式配置的路径（adb_path/frida_path）；配置存在且是文件才认。"""
+    key = _BINARY_SETTING_KEYS.get(name)
+    if not key:
+        return ""
+    val = getattr(get_settings(), key, "") or ""
+    if val and Path(val).is_file():
+        return val
+    return ""
+
+
+def _common_location_binary(name: str) -> str:
+    """扫 Windows 常见安装位置（仅 adb 有表）；命中返回路径。"""
+    if name != "adb":
+        return ""
+    for tpl in _ADB_COMMON_LOCATIONS:
+        p = Path(os.path.expandvars(tpl))
+        if p.is_file():
+            return str(p)
+    return ""
+
+
 def _check_binary(name: str) -> str | None:
-    """用 shutil.which 检查二进制是否在 PATH 中可用。可用返回路径，缺返回 None。"""
-    return shutil.which(name) or shutil.which(name + ".exe")
+    """三级查找二进制（015）：PATH → settings 显式配置 → Windows 常见位置。
+
+    命中缓存进程内复用（扫盘只一次）；miss 不缓存——用户装完 adb 下次调用即生效。
+    可用返回路径，缺返回 None。
+    """
+    if name in _BINARY_PATH_CACHE:
+        return _BINARY_PATH_CACHE[name]
+    found = shutil.which(name) or shutil.which(name + ".exe")
+    if not found:
+        found = _settings_binary_override(name)
+    if not found:
+        found = _common_location_binary(name)
+    if found:
+        _BINARY_PATH_CACHE[name] = found
+        return found
+    return None
 
 
 def _run_adb(args: list[str], device_id: str = "", timeout: int = 30) -> tuple[int, str]:
@@ -63,7 +118,7 @@ def _run_adb(args: list[str], device_id: str = "", timeout: int = 30) -> tuple[i
     返回 (returncode, stdout+stderr 合并)。缺 adb 二进制时返回 (-1, ERR 提示串)。
     """
     if not _check_binary("adb"):
-        return -1, "ERR: adb 未安装（装 platform-tools 后重试）"
+        return -1, "ERR: adb 未安装（装 platform-tools，或在 .env 设 ADB_PATH 后重试）"
     cmd = ["adb"]
     if device_id:
         cmd += ["-s", device_id]
@@ -145,10 +200,10 @@ def list_adb_devices() -> str:
     返回每台设备的 serial、状态（device/offline/unauthorized）、型号与 Android 版本。
     在任何 frida hook / apk 安装 / 推文件操作前先调它确认设备在线且已授权 USB 调试。
     无设备时返回 "NO_DEVICE: 请先 adb connect / 插 USB 并授权调试"。
-    缺 adb 二进制时返回 "ERR: adb 未安装（装 platform-tools 后重试）"。
+    缺 adb 二进制时返回 "ERR: adb 未安装（装 platform-tools，或在 .env 设 ADB_PATH 后重试）"。
     """
     if not _check_binary("adb"):
-        return "ERR: adb 未安装（装 platform-tools 后重试）"
+        return "ERR: adb 未安装（装 platform-tools，或在 .env 设 ADB_PATH 后重试）"
     rc, out = _run_adb(["devices", "-l"], timeout=10)
     if rc != 0:
         return f"ERR: adb devices 失败: {out.strip()}"
@@ -204,7 +259,7 @@ def install_apk(device_id: str, apk_path: str, reinstall: bool = False, timeout:
     返回 adb install 的 stdout/stderr 摘要 + 成功/失败标记。
     """
     if not _check_binary("adb"):
-        return "ERR: adb 未安装（装 platform-tools 后重试）"
+        return "ERR: adb 未安装（装 platform-tools，或在 .env 设 ADB_PATH 后重试）"
     apk = Path(apk_path)
     if not apk.is_file():
         return f"ERR: APK 不存在: {apk_path}"
@@ -231,7 +286,7 @@ def push_file(device_id: str, local_path: str, remote_path: str, timeout: int = 
     remote_path 必须是设备绝对路径，无写权限时返回 ERR。
     """
     if not _check_binary("adb"):
-        return "ERR: adb 未安装（装 platform-tools 后重试）"
+        return "ERR: adb 未安装（装 platform-tools，或在 .env 设 ADB_PATH 后重试）"
     local = Path(local_path)
     if not local.is_file():
         return f"ERR: 本地文件不存在: {local_path}"

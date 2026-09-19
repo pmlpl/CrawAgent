@@ -14,14 +14,30 @@ from crawagent.tools.android_reverse_tool import (
 
 # ---- _check_binary ----
 
+def _isolate_binary_lookup(monkeypatch, which_result):
+    """把三级查找全部钉死：which 返回 which_result，显式/常见位置层置空，清缓存。"""
+    monkeypatch.setattr(art.shutil, "which", lambda name: which_result)
+    monkeypatch.setattr(art, "_settings_binary_override", lambda name: "")
+    monkeypatch.setattr(art, "_common_location_binary", lambda name: "")
+    art._BINARY_PATH_CACHE.pop("adb", None)
+    art._BINARY_PATH_CACHE.pop("frida", None)
+    art._BINARY_PATH_CACHE.pop("frida-trace", None)
+
+
 def test_check_binary_missing(monkeypatch):
-    monkeypatch.setattr(art.shutil, "which", lambda name: None)
-    assert _check_binary("adb") is None
+    _isolate_binary_lookup(monkeypatch, None)
+    try:
+        assert _check_binary("adb") is None
+    finally:
+        art._BINARY_PATH_CACHE.pop("adb", None)
 
 
 def test_check_binary_found(monkeypatch):
-    monkeypatch.setattr(art.shutil, "which", lambda name: "/usr/bin/adb")
-    assert _check_binary("adb") == "/usr/bin/adb"
+    _isolate_binary_lookup(monkeypatch, "/usr/bin/adb")
+    try:
+        assert _check_binary("adb") == "/usr/bin/adb"
+    finally:
+        art._BINARY_PATH_CACHE.pop("adb", None)
 
 
 # ---- _truncate ----
@@ -212,3 +228,102 @@ def test_bypass_ssl_fail(monkeypatch):
     monkeypatch.setattr(art, "_run_frida", lambda args, timeout=30: (1, "Error: script failed"))
     r = frida_bypass_ssl_pinning.func("dev", "com.x")
     assert "PINNING_FAIL" in r
+
+
+# ---- 015: 三级查找（PATH → settings 显式 → 常见位置）----
+
+def _clear_cache():
+    for k in ("adb", "frida", "frida-trace"):
+        art._BINARY_PATH_CACHE.pop(k, None)
+
+
+def test_settings_binary_override_hits_existing_file(tmp_path, monkeypatch):
+    fake = tmp_path / "my_adb.exe"
+    fake.write_text("", encoding="utf-8")
+
+    class _S:
+        adb_path = str(fake)
+        frida_path = ""
+
+    monkeypatch.setattr(art, "get_settings", lambda: _S())
+    try:
+        assert art._settings_binary_override("adb") == str(fake)
+    finally:
+        _clear_cache()
+
+
+def test_settings_binary_override_ignores_missing_path(tmp_path, monkeypatch):
+    class _S:
+        adb_path = str(tmp_path / "ghost.exe")
+        frida_path = ""
+
+    monkeypatch.setattr("crawagent.config.settings.get_settings", lambda: _S())
+    assert art._settings_binary_override("adb") == ""
+
+
+def test_settings_binary_override_unknown_name():
+    assert art._settings_binary_override("notatool") == ""
+
+
+def test_common_location_binary_hits_table(tmp_path, monkeypatch):
+    fake = tmp_path / "adb.exe"
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setattr(art, "_ADB_COMMON_LOCATIONS", (str(fake),))
+    try:
+        assert art._common_location_binary("adb") == str(fake)
+        assert art._common_location_binary("frida") == ""  # 表只给 adb
+    finally:
+        _clear_cache()
+
+
+def test_check_binary_uses_settings_fallback(tmp_path, monkeypatch):
+    fake = tmp_path / "sdk_adb.exe"
+    fake.write_text("", encoding="utf-8")
+
+    class _S:
+        adb_path = str(fake)
+        frida_path = ""
+
+    monkeypatch.setattr(art.shutil, "which", lambda name: None)
+    monkeypatch.setattr(art, "get_settings", lambda: _S())
+    monkeypatch.setattr(art, "_common_location_binary", lambda name: "")
+    _clear_cache()
+    try:
+        assert _check_binary("adb") == str(fake)
+        # 缓存生效：二次调用不再查 which（把 which 改成爆炸来证明）
+        monkeypatch.setattr(art.shutil, "which", lambda name: (_ for _ in ()).throw(AssertionError("should not re-query")))
+        assert _check_binary("adb") == str(fake)
+    finally:
+        _clear_cache()
+
+
+def test_check_binary_miss_reports_adb_path_hint(monkeypatch):
+    _isolate_binary_lookup(monkeypatch, None)
+    try:
+        assert _check_binary("adb") is None
+        r = list_adb_devices.func()
+        assert "ADB_PATH" in r, r
+    finally:
+        _clear_cache()
+
+
+def test_list_adb_devices_via_common_location(tmp_path, monkeypatch):
+    """端到端：PATH 无 adb，常见位置兜底命中 → 成功列出设备。"""
+    fake = tmp_path / "adb.exe"
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setattr(art.shutil, "which", lambda name: None)
+    monkeypatch.setattr(art, "_settings_binary_override", lambda name: "")
+    monkeypatch.setattr(art, "_common_location_binary", lambda name: str(fake))
+    monkeypatch.setattr(
+        art, "_run_adb",
+        lambda args, device_id="", timeout=30: (
+            0,
+            "List of devices attached\nFAKESERIAL\tdevice product:PD2344 model:V2344A\n",
+        ),
+    )
+    _clear_cache()
+    try:
+        r = list_adb_devices.func()
+        assert "找到 1 台设备" in r and "FAKESERIAL" in r
+    finally:
+        _clear_cache()
