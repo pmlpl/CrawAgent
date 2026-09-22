@@ -10,9 +10,9 @@ from crawagent.web.routers import settings as settings_mod
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings_mod, "_DATA_DIR", tmp_path)
-    monkeypatch.setattr(settings_mod, "_BG_IMAGE", tmp_path / "background.jpg")
-    monkeypatch.setattr(settings_mod, "_BG_META", tmp_path / "background.json")
+    monkeypatch.setattr(settings_mod.background, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(settings_mod.background, "_BG_IMAGE", tmp_path / "background.jpg")
+    monkeypatch.setattr(settings_mod.background, "_BG_META", tmp_path / "background.json")
     app = FastAPI()
     app.include_router(settings_mod.router)
     return TestClient(app)
@@ -34,7 +34,7 @@ def test_save_and_get_background(client):
     body = r.json()
     assert body["ok"] is True
     assert body["image"] and body["image"].startswith("/api/background/image?t=")
-    assert settings_mod._BG_IMAGE.read_bytes().startswith(b"\xff\xd8")
+    assert settings_mod.background._BG_IMAGE.read_bytes().startswith(b"\xff\xd8")
 
     r2 = client.get("/api/background/image")
     assert r2.status_code == 200
@@ -53,7 +53,7 @@ def test_save_rejects_bad_base64(client):
 
 
 def test_save_rejects_oversize(client, monkeypatch):
-    monkeypatch.setattr(settings_mod, "_MAX_BG_BYTES", 8)
+    monkeypatch.setattr(settings_mod.background, "_MAX_BG_BYTES", 8)
     r = client.post("/api/background", json={"data_url": _data_url(b"1234567890")})
     body = r.json()
     assert body["ok"] is False and "上限" in body["error"]

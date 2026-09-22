@@ -40,6 +40,11 @@ def resolve_ask(ask_id: str, value: str) -> bool:
 
 
 def pending_ask_ids() -> list[str]:
+    """列出当前所有未回答的 ask_user ask_id（用于前端轮询 / 测试）。
+
+    Returns:
+        ask_id 列表（与 ``_PENDING`` 同序快照）。
+    """
     with _LOCK:
         return list(_PENDING.keys())
 

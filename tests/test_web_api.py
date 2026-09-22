@@ -76,8 +76,10 @@ def client(tmp_path, monkeypatch):
     from crawagent.llm import registry
     from crawagent.web.routers import settings as settings_router
 
-    monkeypatch.setattr(settings_router, "ENV_FILE", env_file)
-    monkeypatch.setattr(settings_router, "get_settings", fake_get_settings)
+    monkeypatch.setattr(settings_router.core, "ENV_FILE", env_file)
+    monkeypatch.setattr(settings_router.core, "get_settings", fake_get_settings)
+    monkeypatch.setattr(settings_router.mcp, "get_settings", fake_get_settings)
+    monkeypatch.setattr(settings_router.ecosystem, "get_settings", fake_get_settings)
     monkeypatch.setattr(registry, "get_settings", fake_get_settings)
     # load_providers() 现在直接读磁盘 .env — monkeypatch _read_env_file 让它返回 tmp_path 里的假 env
     monkeypatch.setattr(registry, "_read_env_file", lambda: env_file)
@@ -114,7 +116,7 @@ def test_empty_or_masked_key_does_not_clobber_real_key(client):
     # 空 Key 提交后，真实 Key 不应被清空或覆盖
     env_file = None
     from crawagent.web.routers import settings as settings_router
-    env_file = settings_router.ENV_FILE
+    env_file = settings_router.core.ENV_FILE
     providers = json.loads(_parse_env(env_file)["LLM_PROVIDERS"])
     assert providers[0]["api_key"] == REAL_KEY
 
@@ -144,8 +146,8 @@ def test_bulk_delete_skips_active_sessions(client, monkeypatch):
     class _FakeCheckpointer:
         conn = db
 
-    monkeypatch.setattr(sessions_router, "get_agent", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline test")))
-    monkeypatch.setattr(sessions_router, "get_checkpointer", lambda: _FakeCheckpointer())
+    monkeypatch.setattr(sessions_router.crud, "get_agent", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline test")))
+    monkeypatch.setattr(sessions_router.crud, "get_checkpointer", lambda: _FakeCheckpointer())
 
     # 塞一个"运行中"会话：必须跳过不删
     state._active_turns["sid-running"] = {"cancelled": False}
@@ -243,10 +245,10 @@ def test_session_export_json(client, monkeypatch):
     class _FakeCheckpointer:
         conn = db
 
-    monkeypatch.setattr(sessions_router, "get_agent", lambda: _FakeAgent())
-    monkeypatch.setattr(sessions_router, "get_checkpointer", lambda: _FakeCheckpointer())
+    monkeypatch.setattr(sessions_router.crud, "get_agent", lambda: _FakeAgent())
+    monkeypatch.setattr(sessions_router.crud, "get_checkpointer", lambda: _FakeCheckpointer())
     # session_titles 已迁至 meta.db（get_meta_conn），monkeypatch 指向同一 in-memory db
-    monkeypatch.setattr(sessions_router, "get_meta_conn", lambda: db)
+    monkeypatch.setattr(sessions_router.crud, "get_meta_conn", lambda: db)
 
     r = client.get("/api/sessions/sid-test/export?format=json")
     assert r.status_code == 200
@@ -281,8 +283,8 @@ def test_session_export_markdown(client, monkeypatch):
     class _FakeCheckpointer:
         conn = db
 
-    monkeypatch.setattr(sessions_router, "get_agent", lambda: _FakeAgent())
-    monkeypatch.setattr(sessions_router, "get_checkpointer", lambda: _FakeCheckpointer())
+    monkeypatch.setattr(sessions_router.crud, "get_agent", lambda: _FakeAgent())
+    monkeypatch.setattr(sessions_router.crud, "get_checkpointer", lambda: _FakeCheckpointer())
 
     r = client.get("/api/sessions/sid-test/export?format=md")
     assert r.status_code == 200
@@ -296,14 +298,14 @@ def test_session_export_empty_session(client, monkeypatch):
     """用例 6c：导出不存在的会话 — 不报错，返回空消息。"""
     from crawagent.web.routers import sessions as sessions_router
 
-    monkeypatch.setattr(sessions_router, "get_agent", lambda: (_ for _ in ()).throw(RuntimeError("no agent")))
+    monkeypatch.setattr(sessions_router.crud, "get_agent", lambda: (_ for _ in ()).throw(RuntimeError("no agent")))
     db = sqlite3.connect(":memory:", check_same_thread=False)
     db.execute("CREATE TABLE session_titles (thread_id TEXT PRIMARY KEY, title TEXT)")
 
     class _FakeCheckpointer:
         conn = db
 
-    monkeypatch.setattr(sessions_router, "get_checkpointer", lambda: _FakeCheckpointer())
+    monkeypatch.setattr(sessions_router.crud, "get_checkpointer", lambda: _FakeCheckpointer())
 
     r = client.get("/api/sessions/nonexistent/export")
     assert r.status_code == 200
@@ -358,8 +360,10 @@ def eco_client(tmp_path, monkeypatch):
     from crawagent.web.routers import settings as settings_router
     from crawagent.graph import skills as skills_mod
 
-    monkeypatch.setattr(settings_router, "ENV_FILE", env_file)
-    monkeypatch.setattr(settings_router, "get_settings", fake_get_settings)
+    monkeypatch.setattr(settings_router.core, "ENV_FILE", env_file)
+    monkeypatch.setattr(settings_router.core, "get_settings", fake_get_settings)
+    monkeypatch.setattr(settings_router.mcp, "get_settings", fake_get_settings)
+    monkeypatch.setattr(settings_router.ecosystem, "get_settings", fake_get_settings)
     monkeypatch.setattr(skills_mod, "get_settings", fake_get_settings)
 
     from fastapi.testclient import TestClient

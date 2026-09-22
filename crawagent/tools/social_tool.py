@@ -6,7 +6,7 @@ no cookies, no browser.
 
 拆分说明（handoff §2.1）：本文件现仅为**转发层**（≈100 行）——
     - 平台实现搬至 bilibili_tool.py / douyin_tool.py
-    - 通用 HTTP/下载工具搬至 _social_utils.py
+    - 通用 HTTP/下载工具搬至 social_utils.py
     - 对外签名 100% 兼容：agent.py 的 extract_social_media / download_social_media、
       test_smoke.py 的 _extract_bvid / _extract_aweme_id / _mixin_key 均原样保留
 """
@@ -16,7 +16,7 @@ import re
 from langchain_core.tools import tool
 
 from crawagent.config.settings import get_settings
-from crawagent.tools._social_utils import (  # noqa: F401  (re-export 供既有调用方使用)
+from crawagent.tools.social_utils import (  # noqa: F401  (re-export 供既有调用方使用)
     DESKTOP_UA,
     MOBILE_UA,
     _download_to_file,
@@ -121,6 +121,16 @@ def download_social_media(url: str, include: str = "video,cover,comments", subdi
     errors: list[str] = []
 
     def save(kind: str, url_value: str, name: str) -> bool:
+        """下载单个文件并登记结果到 ``downloaded`` / ``errors``。
+
+        Args:
+            kind: 文件类型（``video`` / ``audio`` / ``cover`` / ``image``），仅用于报告。
+            url_value: 下载 URL；空串视为缺数据直接返回 False。
+            name: 输出文件名（不含扩展名，由调用方按 kind+url 补）。
+
+        Returns:
+            True 表示下载成功，False 表示失败（URL 为空或抛异常）。
+        """
         if not url_value:
             return False
         try:

@@ -18,14 +18,14 @@ _UA = {
 
 def _ddg_search(query: str, max_results: int) -> list[dict]:
     """DuckDuckGo HTML 版搜索（无需 JS），解析 a.result__a。"""
-    resp = requests.get(
+    from crawagent.tools._http import http_get
+    text = http_get(
         "https://html.duckduckgo.com/html/",
         params={"q": query},
         headers=_UA,
         timeout=15,
     )
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(text, "html.parser")
 
     results = []
     for a in soup.select("a.result__a")[: max_results]:
@@ -51,14 +51,14 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
 
 def _baidu_search(query: str, max_results: int) -> list[dict]:
     """百度搜索结果页解析（fallback）。链接是百度跳转链，但可直接访问。"""
-    resp = requests.get(
+    from crawagent.tools._http import http_get
+    text = http_get(
         "https://www.baidu.com/s",
         params={"wd": query, "rn": max_results},
         headers=_UA,
         timeout=15,
     )
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(text, "html.parser")
 
     results = []
     for c in soup.select("div.c-container")[: max_results]:

@@ -232,10 +232,26 @@ def _stage3_dom_depth(html: str, base_url: str = "") -> list[dict]:
     best_score = 0
 
     def signature(tag: Tag) -> str:
+        """节点签名：``<tag_name>|<sorted_class>``，用于相似节点去重。
+
+        Args:
+            tag: BeautifulSoup ``Tag``。
+
+        Returns:
+            形如 ``"div|container main"`` 的签名字符串。
+        """
         cls = " ".join(sorted(tag.get("class", [])))
         return f"{tag.name}|{cls}"
 
     def container_depth(tag: Tag) -> int:
+        """节点到根的祖先链长度（不含自身）。
+
+        Args:
+            tag: BeautifulSoup ``Tag``。
+
+        Returns:
+            祖先节点个数；``tag`` 即为根时返回 0。
+        """
         d = 0
         node = tag
         while node.parent:

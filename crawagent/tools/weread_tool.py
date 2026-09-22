@@ -99,11 +99,10 @@ def list_weread_chapters(url_or_book_id: str) -> str:
     if url_or_book_id.startswith("http"):
         book_v = _extract_v_from_url(url_or_book_id)
         # 详情页本身是公开的，不需要 Cookie 就能拿到 bookId
-        _enforce_delay()
+        from crawagent.tools._http import http_get
         try:
-            resp = requests.get(url_or_book_id, headers={"User-Agent": DEFAULT_UA}, timeout=20)
-            resp.raise_for_status()
-            book_id = _extract_book_id(resp.text)
+            html = http_get(url_or_book_id, headers={"User-Agent": DEFAULT_UA}, timeout=20)
+            book_id = _extract_book_id(html)
         except Exception as e:
             return f"[ERROR] 无法获取详情页: {e}"
     else:

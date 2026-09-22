@@ -43,7 +43,6 @@ def crawl_webpage(url: str) -> str:
         若命中 SPA 空壳返回："[SPA_SHELL_DETECTED] ..."，提示用 browse_and_crawl 渲染。
     """
     settings = get_settings()
-    _enforce_delay()
 
     headers = {
         "User-Agent": _ua.random,
@@ -52,14 +51,9 @@ def crawl_webpage(url: str) -> str:
     }
 
     try:
-        resp = requests.get(
-            url,
-            headers=headers,
-            timeout=settings.request_timeout,
-        )
-        resp.raise_for_status()
-        resp.encoding = resp.apparent_encoding or "utf-8"
-        html = resp.text
+        # 延迟 import 避免循环：_http.py 从本模块 import DEFAULT_UA + _enforce_delay
+        from crawagent.tools._http import http_get
+        html = http_get(url, headers=headers, timeout=settings.request_timeout)
 
         # 检测 SPA shell：HTML 很短、主要是 <script> 标签、没有实际内容
         body_text = re.sub(r"<[^>]+>", "", html).strip()

@@ -52,6 +52,14 @@ class _ContextPollAccessFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """``SessionListFilter.filter``：过滤掉 ``GET /api/sessions`` 列表轮询的访问日志。
+
+        Args:
+            record: logging 记录。
+
+        Returns:
+            True = 保留日志，False = 丢弃（被过滤）。
+        """
         try:
             msg = record.getMessage()
         except Exception:
@@ -338,6 +346,10 @@ def _open_browser_later(url: str, delay: float = 2.0) -> None:
 
 
 def main() -> None:
+    """``python -m crawagent.web.server`` 入口 — 启动 FastAPI（开发模式）。
+
+    生产环境用 ``crawagent start``；本入口主要用于无 GUI 环境的冒烟测试。
+    """
     import os
     import uvicorn
 

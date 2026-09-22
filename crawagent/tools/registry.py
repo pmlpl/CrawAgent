@@ -60,6 +60,11 @@ class ToolSpec:
 
     @property
     def is_ready(self) -> bool:
+        """工具已构建：``instance`` 直接可用，或 ``build_fn`` 可即时构建。
+
+        Returns:
+            True 表示这个 ToolSpec 当前可被 agent 调用。
+        """
         return self.instance is not None or self.build_fn is not None
 
 
@@ -95,6 +100,14 @@ def register_tool(
         description_override: 可选的描述覆盖（默认用函数 docstring）
     """
     def decorator(func):
+        """``@register_tool`` 内部包装器：包 langchain ``@tool`` 再登记元数据。
+
+        Args:
+            func: 用户写的工具函数。
+
+        Returns:
+            与 ``func`` 行为等价的 ``BaseTool`` 实例，同时登记到 ``_REGISTERED``。
+        """
         # 先让 langchain 把 func 变成 StructuredTool
         lc_tool = _lc_tool(func)
 
@@ -179,7 +192,7 @@ _SKIP_TOOL_MODULES = {
     "douyin_tool",        # 同上
     "confidence",         # 内部评分函数，没 @tool
     "font_decrypt",       # 字体解密辅助
-    "_social_utils",      # 内部工具
+    "social_utils",       # 公共 helper 模块（无 BaseTool，避免被自动收集）
 }
 
 # 工具名黑名单：即使 discover_tools 扫到也过滤掉（老版/废弃工具/动态装配工具）
@@ -275,11 +288,16 @@ def discover_tools() -> list[ToolSpec]:
         specs.append(spec)
         seen.add(spec.name)
 
-    # 2. 扫 tools/*.py
+    # 2. 扫 tools/*.py（单文件模块）和 tools/*/（包目录）
     tools_dir = Path(__file__).resolve().parent
     root = Path(__file__).resolve().parent.parent.parent
-    for py in sorted(tools_dir.glob("*.py")):
-        mod_name = py.stem
+    mod_names: list[str] = []
+    for entry in sorted(tools_dir.iterdir()):
+        if entry.is_file() and entry.suffix == ".py":
+            mod_names.append(entry.stem)
+        elif entry.is_dir() and (entry / "__init__.py").exists():
+            mod_names.append(entry.name)
+    for mod_name in mod_names:
         if mod_name.startswith("_"):
             continue
         if mod_name in _SKIP_TOOL_MODULES:

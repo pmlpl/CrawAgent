@@ -291,6 +291,16 @@ def _cmd_plugins(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """CLI 入口（``python -m crawagent`` / ``crawagent`` 命令）。
+
+    支持子命令：
+    - ``start`` — 启动 WebUI 后端（默认行为）
+    - ``plugin <subcmd>`` — 插件管理（list / enable / disable / info / path）
+    - ``cron <subcmd>`` — 定时任务管理（list / run / enable / disable）
+
+    Returns:
+        退出码（0 成功 / 非 0 失败）。
+    """
     # Windows 默认 GBK 编码无法输出 emoji，强制使用 UTF-8
     if hasattr(sys.stdout, "reconfigure"):
         try:

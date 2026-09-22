@@ -13,6 +13,8 @@ import time
 import requests
 from langchain_core.tools import tool
 
+from crawagent.tools._http import http_get as _http_get
+
 _UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -83,6 +85,11 @@ async def _collect_page_signals(page_url: str) -> dict:
         context = await browser.new_context(user_agent=_UA["User-Agent"])
 
         def on_response(resp):
+            """Playwright ``response`` 事件回调：收集媒体 URL + 标记可疑下载。
+
+            Args:
+                resp: Playwright ``Response`` 对象。
+            """
             url = resp.url
             low = url.lower()
             if any(low.split("?")[0].endswith(ext) or ext in low for ext in (".m3u8", ".ts", ".mp4")):
@@ -95,6 +102,11 @@ async def _collect_page_signals(page_url: str) -> dict:
         page.on("response", on_response)
 
         def on_popup(_page):
+            """Playwright 新页面/弹窗回调：弹窗计数（用于诊断）。
+
+            Args:
+                _page: Playwright ``Page`` 对象（未使用，仅作事件签名）。
+            """
             nonlocal popup_count
             popup_count += 1
 
@@ -197,7 +209,7 @@ def probe_video_player(page_url: str) -> str:
         result["has_m3u8"] = True
         for m3u8_url in m3u8_urls[:3]:  # 最多试 3 个，取第一个解析成功的
             try:
-                text = requests.get(m3u8_url, headers=_UA, timeout=10).text
+                text = _http_get(m3u8_url, headers=_UA, timeout=10)
                 parsed = _parse_master_m3u8(text)
                 if parsed.get("is_master"):
                     best = parsed["best"]
@@ -206,7 +218,7 @@ def probe_video_player(page_url: str) -> str:
                     if best["uri"]:
                         # 子清单里通常列出真正的 .ts 分片
                         sub_url = _resolve_url(m3u8_url, best["uri"])
-                        sub_text = requests.get(sub_url, headers=_UA, timeout=10).text
+                        sub_text = _http_get(sub_url, headers=_UA, timeout=10)
                         sub_parsed = _parse_master_m3u8(sub_text)
                         if not sub_parsed.get("is_master"):
                             result["segment_count"] = sub_parsed["segment_count"]

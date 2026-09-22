@@ -37,7 +37,7 @@ def _resolve_file_path(filename: str, subdir: str) -> Path:
     else:
         file_path = (output_root / subdir_clean / filename).resolve()
 
-    if not str(file_path).startswith(str(base)):
+    if not Path(file_path).is_relative_to(base):
         raise ValueError(f"path escapes project root: {file_path}")
 
     return file_path
@@ -103,7 +103,8 @@ def save_to_file(filename: str, content: str, subdir: str = "", mode: str = "ove
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         write_mode = "w" if mode != "append" else "a"
-        file_path.write_text(final_content, encoding="utf-8")
+        with file_path.open(mode=write_mode, encoding="utf-8") as f:
+            f.write(final_content)
 
         return (
             f"Saved to {file_path}, {len(final_content)} chars written ({write_mode})."

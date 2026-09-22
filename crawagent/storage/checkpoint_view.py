@@ -44,6 +44,14 @@ class SqliteCheckpointView:
         self._conn = conn
 
     def list_thread_ids(self, limit: int = 20) -> list[tuple[str, int, int]]:
+        """列出最近 ``limit`` 个 thread_id，按最近写入时间倒序。
+
+        Args:
+            limit: 返回条数上限。
+
+        Returns:
+            ``(thread_id, latest_rowid, ckpt_size)`` 三元组列表；表不存在时返回 ``[]``。
+        """
         try:
             rows = self._conn.execute(
                 "SELECT thread_id, MAX(rowid) AS latest, "
@@ -73,6 +81,14 @@ class RedisCheckpointView:
         self._client = client
 
     def list_thread_ids(self, limit: int = 20) -> list[tuple[str, int, int]]:
+        """列出最近 ``limit`` 个 thread_id（按 Redis 元数据 ``latest_rowid`` 倒序）。
+
+        Args:
+            limit: 返回条数上限。
+
+        Returns:
+            ``(thread_id, latest_rowid, ckpt_size)`` 三元组列表；连接失败时返回 ``[]``。
+        """
         try:
             thread_ids = self._client.smembers(self.SESSIONS_KEY)
         except Exception:

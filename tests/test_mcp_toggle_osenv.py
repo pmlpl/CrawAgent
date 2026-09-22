@@ -17,7 +17,7 @@ from crawagent.web.routers.settings import save_mcp_servers
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     env_file = tmp_path / "env"
-    monkeypatch.setattr("crawagent.web.routers.settings.ENV_FILE", env_file)
+    monkeypatch.setattr("crawagent.web.routers.settings.core.ENV_FILE", env_file)
     monkeypatch.setitem(Settings.model_config, "env_file", env_file)
     return env_file
 

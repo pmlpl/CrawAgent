@@ -78,6 +78,87 @@ def _fetch_locked_chapter(item_id: str) -> str:
         return ""
 
 
+def _build_proxy_kwargs() -> dict:
+    """构建 Playwright launch 参数，含代理透传（settings.default_proxy 或 HTTPS_PROXY env）。"""
+    launch_kw = {"headless": True}
+    _proxy_url = ""
+    try:
+        from crawagent.config.settings import get_settings
+        _proxy_url = get_settings().default_proxy or ""
+    except Exception:
+        pass
+    if not _proxy_url:
+        import os as _os
+        _proxy_url = _os.environ.get("HTTPS_PROXY") or _os.environ.get("HTTP_PROXY") or ""
+    if _proxy_url:
+        from urllib.parse import urlparse as _up, unquote as _uq
+        _pu = _up(_proxy_url if "://" in _proxy_url else "http://" + _proxy_url)
+        _scheme = _pu.scheme or "http"
+        _ph = _pu.hostname or ""
+        _pp = _pu.port or (1080 if "socks" in _scheme else 8080)
+        launch_kw["proxy"] = {"server": f"{_scheme}://{_ph}:{_pp}"}
+        if _pu.username:
+            launch_kw["proxy"]["username"] = _uq(_pu.username)
+        if _pu.password:
+            launch_kw["proxy"]["password"] = _uq(_pu.password)
+    return launch_kw
+
+
+def _format_chapter_list(result: dict, task: str) -> str:
+    """格式化章节列表页结果。"""
+    parts = []
+    if result.get("title"):
+        parts.append(f"Title: {result['title']}")
+    parts.append(f"Chapter List ({result.get('chapterCount', 0)} chapters):")
+    parts.append(result.get("chapterList", ""))
+    if task:
+        parts.append(f"Focus: {task}")
+    return "\n\n".join(parts)
+
+
+def _process_reader_page(result: dict, url: str, task: str) -> str:
+    """处理阅读器/文章页：字体解密 + VIP 锁定代理 + HTML 转 Markdown。"""
+    text = result.get("text", "")
+    title = result.get("title", "")
+    font_urls = result.get("fontUrls", [])
+    state_font_url = result.get("stateFontUrl")
+    chapter_lock = result.get("chapterLock", False)
+    chapter_word_number = result.get("chapterWordNumber", 0)
+
+    from crawagent.tools.font_decrypt import has_pua, decrypt_text
+
+    if has_pua(text):
+        font_url = font_urls[0] if font_urls else state_font_url
+        if font_url:
+            text = decrypt_text(text, font_url)
+
+    parts = []
+    if title:
+        parts.append(f"Title: {title}")
+    if task:
+        parts.append(f"Focus: {task}")
+    if chapter_lock:
+        item_id = url.rstrip("/").split("/")[-1]
+        full_text = _fetch_locked_chapter(item_id)
+        if full_text:
+            parts.append(full_text)
+        else:
+            parts.append(
+                f"[WARNING] This chapter is VIP-locked (isChapterLock=true). "
+                f"Only a preview ({len(text)} chars) is available. "
+                f"Full chapter is {chapter_word_number} words. "
+                f"Proxy API failed; login with a VIP account may be required."
+            )
+            parts.append(text)
+    else:
+        if has_pua(text):
+            parts.append(text)
+        else:
+            md = _html_to_md(result.get("html", ""))
+            parts.append(md if md else text)
+    return "\n\n".join(parts)
+
+
 @tool
 def browse_and_crawl(url: str, task: str = "") -> str:
     """用无头浏览器爬取 SPA/JS 动态渲染页面。
@@ -98,29 +179,7 @@ def browse_and_crawl(url: str, task: str = "") -> str:
         from playwright.async_api import async_playwright
 
         async with async_playwright() as p:
-            launch_kw = {"headless": True}
-            # 代理透传：优先 settings.default_proxy，其次进程级 HTTPS_PROXY 环境变量
-            _proxy_url = ""
-            try:
-                from crawagent.config.settings import get_settings
-                _proxy_url = get_settings().default_proxy or ""
-            except Exception:
-                pass
-            if not _proxy_url:
-                import os as _os
-                _proxy_url = _os.environ.get("HTTPS_PROXY") or _os.environ.get("HTTP_PROXY") or ""
-            if _proxy_url:
-                from urllib.parse import urlparse as _up, unquote as _uq
-                _pu = _up(_proxy_url if "://" in _proxy_url else "http://" + _proxy_url)
-                _scheme = _pu.scheme or "http"
-                _ph = _pu.hostname or ""
-                _pp = _pu.port or (1080 if "socks" in _scheme else 8080)
-                launch_kw["proxy"] = {"server": f"{_scheme}://{_ph}:{_pp}"}
-                if _pu.username:
-                    launch_kw["proxy"]["username"] = _uq(_pu.username)
-                if _pu.password:
-                    launch_kw["proxy"]["password"] = _uq(_pu.password)
-            browser = await p.chromium.launch(**launch_kw)
+            browser = await p.chromium.launch(**_build_proxy_kwargs())
             page = await browser.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(5000)
@@ -204,63 +263,9 @@ def browse_and_crawl(url: str, task: str = "") -> str:
 
             await browser.close()
 
-        # --- Book/catalog page: return chapter list ---
         if result.get("isChapterList"):
-            parts = []
-            if result.get("title"):
-                parts.append(f"Title: {result['title']}")
-            parts.append(f"Chapter List ({result.get('chapterCount', 0)} chapters):")
-            parts.append(result.get("chapterList", ""))
-            if task:
-                parts.append(f"Focus: {task}")
-            return "\n\n".join(parts)
-
-        # --- Reader page: extract and decrypt body text ---
-        text = result.get("text", "")
-        title = result.get("title", "")
-        font_urls = result.get("fontUrls", [])
-        state_font_url = result.get("stateFontUrl")
-        chapter_lock = result.get("chapterLock", False)
-        chapter_word_number = result.get("chapterWordNumber", 0)
-
-        # Decrypt font-encrypted text if PUA characters are detected
-        from crawagent.tools.font_decrypt import has_pua, decrypt_text
-
-        if has_pua(text):
-            # Prefer woff2 URL from stylesheets, then __INITIAL_STATE__
-            font_url = font_urls[0] if font_urls else state_font_url
-            if font_url:
-                text = decrypt_text(text, font_url)
-
-        # Build output
-        parts = []
-        if title:
-            parts.append(f"Title: {title}")
-        if task:
-            parts.append(f"Focus: {task}")
-        if chapter_lock:
-            # VIP-locked chapter: try fetching full content via proxy API
-            item_id = url.rstrip("/").split("/")[-1]
-            full_text = _fetch_locked_chapter(item_id)
-            if full_text:
-                parts.append(full_text)
-            else:
-                parts.append(
-                    f"[WARNING] This chapter is VIP-locked (isChapterLock=true). "
-                    f"Only a preview ({len(text)} chars) is available. "
-                    f"Full chapter is {chapter_word_number} words. "
-                    f"Proxy API failed; login with a VIP account may be required."
-                )
-                parts.append(text)
-        else:
-            # 浏览器渲染后的 HTML 转 Markdown（保留标题/列表/代码块）；
-            # 字体加密场景（PUA）保持纯文本，因为 decrypt_text 面向纯文本
-            if has_pua(text):
-                parts.append(text)
-            else:
-                md = _html_to_md(result.get("html", ""))
-                parts.append(md if md else text)
-        return "\n\n".join(parts)
+            return _format_chapter_list(result, task)
+        return _process_reader_page(result, url, task)
 
     try:
         return asyncio.run(_run())

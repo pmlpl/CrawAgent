@@ -115,6 +115,11 @@ class _Timing:
 
     @property
     def total(self) -> float:
+        """已结束的 ``_Timing`` 返回 ``end - start``；未结束则返回当前累计。
+
+        Returns:
+            耗时（秒）。
+        """
         return self.end - self.start if self.end else time.perf_counter() - self.start
 
 
@@ -163,9 +168,11 @@ class SessionMetrics:
     # =============================================================
 
     def turn_begin(self) -> None:
+        """标记新一轮开始（``_current_turn = True``）；与 ``turn_end`` 配对。"""
         self._current_turn = True
 
     def turn_end(self) -> None:
+        """结束当前轮并 ``turn_count += 1``；只在 ``turn_begin`` 后调用才生效。"""
         if self._current_turn:
             self.turn_count += 1
             self._current_turn = False
@@ -173,9 +180,11 @@ class SessionMetrics:
     # ---- LLM ----
 
     def on_llm_start(self) -> None:
+        """记录一次 LLM 调用的开始时间（开 ``_Timing``）。"""
         self._current_llm = _Timing(start=time.perf_counter())
 
     def on_llm_first_token(self) -> None:
+        """记录 LLM 首 token 相对 ``on_llm_start`` 的延迟（仅记录首次）。"""
         if self._current_llm and self._current_llm.first_token == 0.0:
             self._current_llm.first_token = time.perf_counter() - self._current_llm.start
 
@@ -224,9 +233,11 @@ class SessionMetrics:
     # ---- 工具 ----
 
     def on_tool_start(self) -> None:
+        """记录一次工具调用的开始时间（开 ``_Timing``）。"""
         self._current_tool = _Timing(start=time.perf_counter())
 
     def on_tool_end(self) -> None:
+        """结束工具调用计时：累加 ``tool_total_time`` + ``tool_call_count += 1``。无开始事件时 no-op。"""
         if self._current_tool is None:
             return
         self._current_tool.end = time.perf_counter()
@@ -245,14 +256,17 @@ class SessionMetrics:
 
     @property
     def avg_first_token_ms(self) -> float | None:
+        """所有 LLM 调用的平均首 token 延迟（毫秒）；无样本时返回 None。"""
         return (sum(self.first_token_latencies_ms) / len(self.first_token_latencies_ms)) if self.first_token_latencies_ms else None
 
     @property
     def avg_tok_per_s(self) -> float | None:
+        """平均生成速度（tokens/秒）；无样本时返回 None。"""
         return (sum(self.generate_tok_per_s) / len(self.generate_tok_per_s)) if self.generate_tok_per_s else None
 
     @property
     def cache_hit_rate(self) -> float | None:
+        """prompt cache 命中率（0.0-1.0）；无缓存数据时返回 None。"""
         total = self.cache_hit_tokens + self.cache_miss_tokens
         if total <= 0:
             return None
@@ -305,6 +319,14 @@ class SessionMetrics:
     # =============================================================
 
     def to_dict(self) -> dict:
+        """序列化监控指标为 dict（用于 FastAPI WebSocket 推前端 / 持久化）。
+
+        包含派生指标（``avg_first_token_ms`` / ``avg_tok_per_s`` / ``cache_hit_rate``）
+        和原始列表（``first_token_latencies_ms`` / ``generate_tok_per_s``），便于恢复。
+
+        Returns:
+            字段名 → 数值的 dict，可直接 ``json.dumps``。
+        """
         return {
             "turn_count": self.turn_count,
             "step_count": self.step_count,

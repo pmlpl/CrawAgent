@@ -360,9 +360,10 @@ def ensure_mcp_started(wait: bool = True, force: bool = True) -> bool:
             if ret <= 32:
                 log_fh.write(f"ShellExecuteW FAILED ret={ret}\n")
         else:
-            # 非 Windows 用 subprocess
+            # 非 Windows 用 subprocess — 走 argv list 不走 shell（避免 MCP 配置中的命令拼接注入）
+            import shlex
             subprocess.Popen(
-                cmd, shell=True,
+                shlex.split(cmd),
                 cwd=cwd,
                 stdout=log_fh, stderr=subprocess.STDOUT,
             )

@@ -11,14 +11,14 @@ from crawagent.web.routers import settings as settings_mod
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings_mod, "ENV_FILE", tmp_path / "env")
+    monkeypatch.setattr(settings_mod.core, "ENV_FILE", tmp_path / "env")
     app = FastAPI()
     app.include_router(settings_mod.router)
     return TestClient(app)
 
 
 def _env_text():
-    return settings_mod.ENV_FILE.read_text(encoding="utf-8")
+    return settings_mod.core.ENV_FILE.read_text(encoding="utf-8")
 
 
 def test_snapshot_contains_advanced_fields(client):
@@ -127,7 +127,7 @@ def test_save_dirs_resolves_relative_against_project_root(client):
     import shutil
     from pathlib import Path
     name = "output_dir_relative_test_tmp"
-    root = Path(settings_mod.__file__).resolve().parents[3]
+    root = Path(settings_mod.__file__).resolve().parents[4]
     try:
         r = client.post("/api/settings", json={"output_dir": name})
         assert r.json()["ok"] is True

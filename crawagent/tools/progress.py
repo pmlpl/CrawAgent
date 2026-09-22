@@ -203,11 +203,22 @@ _turn_emitters: dict[str, Any] = {}
 
 
 def set_turn_emitter(session_id: str, fn) -> None:
+    """登记 ``session_id`` 的轮次事件 emitter（turn_engine 启动时调）。
+
+    Args:
+        session_id: 会话 ID。
+        fn: 接受 ``event_dict`` 的回调，由 ``emit_turn_event`` 调用。
+    """
     with _LOCK:
         _turn_emitters[session_id] = fn
 
 
 def clear_turn_emitter(session_id: str) -> None:
+    """注销 ``session_id`` 的轮次事件 emitter（turn_engine 退出时 finally 调）。
+
+    Args:
+        session_id: 会话 ID；不存在时静默 no-op。
+    """
     with _LOCK:
         _turn_emitters.pop(session_id, None)
 
@@ -259,6 +270,15 @@ def with_progress(tool: Any) -> Any:
 
     @functools.wraps(original_func)
     def monitored_func(*args: Any, **kwargs: Any) -> Any:
+        """``@monitor`` 装饰后的工具函数：跑前推 trajectory + start/end 进度事件。
+
+        Args:
+            *args: 透传给被装饰工具的位置参数。
+            **kwargs: 透传给被装饰工具的关键字参数。
+
+        Returns:
+            被装饰工具的返回值。
+        """
         # 拼接参数摘要（给前端轨迹显示用，截断防过长）
         try:
             if kwargs:

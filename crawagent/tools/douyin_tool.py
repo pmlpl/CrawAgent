@@ -6,7 +6,7 @@
 """
 import requests
 
-from crawagent.tools._social_utils import (
+from crawagent.tools.social_utils import (
     MOBILE_UA,
     _extract_aweme_id,
     _find_item,
@@ -113,6 +113,15 @@ def _douyin(url: str, fields: set[str]) -> dict:
 # ---- 公开入口（转发层与外部调用使用） ----
 
 def douyin_extract(url: str, fields: set[str]) -> dict:
+    """公开入口：抖音公开数据抽取（视频/作者）。
+
+    Args:
+        url: 抖音分享链接（含 ``modal_id`` 解析）。
+        fields: 要抽取的字段集合（``title`` / ``author`` / ``video_url`` 等）。
+
+    Returns:
+        含有所需字段的 dict；缺失字段以 ``None`` 填充。
+    """
     return _douyin(url, fields)
 
 

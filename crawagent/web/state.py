@@ -50,12 +50,30 @@ class _LRUDict(OrderedDict):
         return v
 
     def get(self, k, d=None):
+        """dict.get 的 LRU 版本：读到值时把 key 移到队尾（最近使用）。
+
+        Args:
+            k: 键。
+            d: 缺省值（键不存在时返回）。
+
+        Returns:
+            键对应的值，或缺省值。
+        """
         if k in self:
             self.move_to_end(k)
             return self[k]
         return d
 
     def setdefault(self, k, d=None):
+        """dict.setdefault 的 LRU 版本：键不存在时设置并移到队尾。
+
+        Args:
+            k: 键。
+            d: 缺省值（键不存在时设置）。
+
+        Returns:
+            现有值或新设置的缺省值。
+        """
         if k not in self:
             self[k] = d
         else:

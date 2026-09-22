@@ -9,10 +9,11 @@ dependencies = [
     "langchain-core>=1.0.0",
     "langgraph>=1.0.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
-    "langchain-openai>=1.0.0",
-    # 显式锁定 openai：避免安装到被篡改的版本（魔改版用 httpx2 替代 httpx，
-    # 会劫持 httpx 命名空间并触发 SyncByteStream 断言失败 → APIConnectionError）
-    "openai>=2.26.0,<3.0.0",
+    "langchain-openai>=1.5.1",
+    # openai 3.x：langchain-openai 1.5.1+ 已放开约束（>=2.45.0,<4.0.0）。
+    # 早期 <3.0.0 pin 是因为魔改版 httpx2 劫持命名空间（SyncByteStream 断言失败），
+    # 官方 3.x 已修复 httpx 兼容性。
+    "openai>=3.0.0",
     # LLM 调用链路追踪（LangSmith）
     "langsmith>=0.1.0",
     # 爬虫工具层

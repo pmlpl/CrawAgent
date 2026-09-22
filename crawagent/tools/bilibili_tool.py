@@ -13,7 +13,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 from crawagent.config.settings import get_settings
-from crawagent.tools._social_utils import (
+from crawagent.tools.social_utils import (
     DESKTOP_UA,
     _download_to_file,
     _extract_bvid,
@@ -246,8 +246,28 @@ def _download_bilibili_video(data: dict, out_dir: Path, title: str, headers: dic
 # ---- 公开入口（转发层与外部调用使用） ----
 
 def bilibili_extract(url: str, fields: set[str]) -> dict:
+    """公开入口：B 站公开数据抽取（视频/评论/作者）。
+
+    Args:
+        url: B 站视频 URL（含 ``BV`` 号解析）。
+        fields: 要抽取的字段集合（``title`` / ``desc`` / ``author`` / ``stat`` / ``comments`` 等）。
+
+    Returns:
+        含有所需字段的 dict；缺失字段以 ``None`` 填充。
+    """
     return _bilibili(url, fields)
 
 
 def bilibili_download(data: dict, out_dir: Path, title: str, headers: dict) -> tuple[list[dict], list[str]]:
+    """公开入口：B 站视频下载（DASH 流 + ffmpeg 合并）。
+
+    Args:
+        data: ``bilibili_extract`` 返回的数据（含 ``dash`` 字段）。
+        out_dir: 输出目录。
+        title: 文件名前缀（已 safe_name）。
+        headers: HTTP 请求头（含 Cookie）。
+
+    Returns:
+        (downloaded, errors)：下载成功的文件列表 + 错误信息列表。
+    """
     return _download_bilibili_video(data, out_dir, title, headers)

@@ -176,12 +176,25 @@ def register_cron_job(
 
 
 def list_cron_jobs() -> list[CronJob]:
+    """读取所有定时任务（按存储顺序）。
+
+    Returns:
+        ``CronJob`` 列表；空列表表示无任务。
+    """
     with _LOCK:
         data = _load()
     return [CronJob(**j) for j in data["jobs"]]
 
 
 def delete_cron_job(job_id: str) -> bool:
+    """删除指定 ID 的定时任务（含 ``last_run`` 记录）。
+
+    Args:
+        job_id: 任务 ID。
+
+    Returns:
+        True = 实际删除了任务；False = ID 不存在。
+    """
     with _LOCK:
         data = _load()
         before = len(data["jobs"])
@@ -192,6 +205,15 @@ def delete_cron_job(job_id: str) -> bool:
 
 
 def toggle_job(job_id: str, enabled: bool) -> bool:
+    """切换任务的启用位（仅状态实际变化时写盘）。
+
+    Args:
+        job_id: 任务 ID。
+        enabled: 期望启用状态。
+
+    Returns:
+        True = 状态实际切换；False = 状态未变或 ID 不存在。
+    """
     with _LOCK:
         data = _load()
         changed = False
@@ -218,11 +240,10 @@ def add_notify_cb(cb: Callable[[str, str, str], None]) -> None:
 
 
 def _run_job_once(job: CronJob) -> CronJob:
-    import requests as _requests
+    from crawagent.tools._http import http_get
 
     try:
-        resp = _requests.get(job.url, timeout=30, headers={"User-Agent": "CrawAgent-Scheduler/1.0"})
-        content = resp.text
+        content = http_get(job.url, timeout=30, headers={"User-Agent": "CrawAgent-Scheduler/1.0"})
         new_hash = hashlib.sha256(content.encode()).hexdigest()
 
         now = datetime.now().isoformat(timespec="seconds")
@@ -300,6 +321,10 @@ _engine_thread: threading.Thread | None = None
 
 
 def start_engine() -> None:
+    """启动 cron 调度引擎线程（幂等）。
+
+    多次调用仅第一次实际起线程；后续调用立即返回。线程为 daemon，主进程退出时自动结束。
+    """
     if _engine_running:
         return
     _engine_thread = threading.Thread(target=_engine_loop, name="cron_scheduler", daemon=True)
@@ -307,5 +332,9 @@ def start_engine() -> None:
 
 
 def stop_engine() -> None:
+    """停止 cron 调度引擎（标志位清零，下一轮 ``_engine_loop`` 检测后退出）。
+
+    线程本身不强制 join — daemon 线程会在主进程退出时自动结束。
+    """
     global _engine_running
     _engine_running = False

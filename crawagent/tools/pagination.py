@@ -30,11 +30,12 @@ _NEXT_CLASS_RE = re.compile(r"(?:^|[-_])next(?:[-_]|$)|next[-_]?page|page[-_]?ne
 
 
 def http_get(url: str, timeout: int = 20) -> str:
-    """抓取页面 HTML（节流 + 固定 UA）。wallpaper_tool 与翻页流程共用。"""
-    _enforce_delay()
-    r = requests.get(url, headers=HEADERS, timeout=timeout)
-    r.raise_for_status()
-    return r.text
+    """抓取页面 HTML（节流 + 固定 UA）。wallpaper_tool 与翻页流程共用。
+
+    实现委托 ``crawagent.tools._http.http_get``（变更 020 统一封装），保持外部签名不变。
+    """
+    from crawagent.tools._http import http_get as _shared_http_get
+    return _shared_http_get(url, headers=HEADERS, timeout=timeout)
 
 
 def _with_param(page_url: str, param: str, value: int) -> str:
