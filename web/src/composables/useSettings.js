@@ -225,7 +225,7 @@ async function open() {
   state.open = true
   state.testResult = null
   state.saveTip = ''
-  await loadAll()
+  await Promise.all([load(), loadEcosystem()])
 }
 
 function close() {

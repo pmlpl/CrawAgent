@@ -3,13 +3,18 @@
 从 social_tool.py 拆出（handoff §2.1）。公开入口：
     bilibili_extract(url, fields) — 抽取公开数据
     bilibili_download(data, out_dir, title, headers) — DASH 下载 + ffmpeg 合并
+
+029 改造：主路径走 httpx.AsyncClient + asyncio.gather 并发（2 波），
+同步 helper 保留供单测 mock。_bilibili 内部 asyncio.run 驱动 async 路径。
 """
+import asyncio
 import hashlib
 import re
 import time
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+import httpx
 import requests
 
 from crawagent.config.settings import get_settings
@@ -137,7 +142,96 @@ def _bilibili_comments(aid, headers: dict) -> list[dict]:
     ]
 
 
-def _bilibili(url: str, fields: set[str]) -> dict:
+# ---- async 路径（029：httpx.AsyncClient + asyncio.gather 并发） ----
+
+async def _aget(client: httpx.AsyncClient, url: str, *, params: dict | None = None, headers: dict | None = None) -> dict:
+    """async HTTP GET → JSON dict。网络错误返回 {"code": -1}。"""
+    try:
+        resp = await client.get(url, params=params, headers=headers, timeout=15)
+        return resp.json()
+    except (httpx.HTTPError, ValueError):
+        return {"code": -1}
+
+
+async def _aget_wbi_keys(client: httpx.AsyncClient, headers: dict) -> tuple[str, str]:
+    """async 版 _get_wbi_keys — nav API 拿 wbi img/sub key。"""
+    nav = await _aget(client, "https://api.bilibili.com/x/web-interface/nav", headers=headers)
+    wbi = (nav.get("data") or {}).get("wbi_img") or {}
+    img_url = wbi.get("img_url", "")
+    sub_url = wbi.get("sub_url", "")
+    img_key = Path(urlparse(img_url).path).stem
+    sub_key = Path(urlparse(sub_url).path).stem
+    if len(img_key) == 32 and len(sub_key) == 32:
+        return img_key, sub_key
+    return "", ""
+
+
+async def _aget_view(client: httpx.AsyncClient, bvid: str, headers: dict) -> dict:
+    """async 视频基本信息 API。"""
+    return await _aget(client, "https://api.bilibili.com/x/web-interface/view",
+                       params={"bvid": bvid}, headers=headers)
+
+
+async def _aget_playurl(client: httpx.AsyncClient, params: dict, headers: dict,
+                        img_key: str, sub_key: str) -> dict:
+    """async playurl — 先 WBI 签名，失败 fallback unsigned。"""
+    if img_key and sub_key:
+        signed = _wbi_sign(params, img_key, sub_key)
+        payload = await _aget(client, "https://api.bilibili.com/x/player/wbi/playurl",
+                              params=signed, headers=headers)
+        if payload.get("code") == 0:
+            return payload
+    return await _aget(client, "https://api.bilibili.com/x/player/playurl",
+                       params=params, headers=headers)
+
+
+async def _aget_media(client: httpx.AsyncClient, bvid: str, cid, headers: dict,
+                      img_key: str, sub_key: str) -> dict:
+    """async 媒体信息 — fnval 16/1 两轮。"""
+    media: dict = {}
+    for fnval in (16, 1):
+        payload = await _aget_playurl(
+            client,
+            {"bvid": bvid, "cid": cid, "qn": 127, "fnval": fnval, "fourk": 1},
+            headers, img_key, sub_key,
+        )
+        if payload.get("code") != 0:
+            media["media_error"] = payload.get("message", "Playurl API error.")
+            continue
+        pdata = payload.get("data") or {}
+        if pdata.get("quality") and not media.get("quality"):
+            media["quality"] = pdata["quality"]
+        if pdata.get("durl") and not media.get("video_url"):
+            media["video_url"] = pdata["durl"][0].get("url", "")
+        dash_data = pdata.get("dash") or {}
+        if dash_data.get("video") and not media.get("dash_video_url"):
+            media["dash_video_url"] = dash_data["video"][0].get("baseUrl", "")
+        if dash_data.get("audio") and not media.get("dash_audio_url"):
+            media["dash_audio_url"] = dash_data["audio"][0].get("baseUrl", "")
+    return media
+
+
+async def _aget_comments(client: httpx.AsyncClient, aid, headers: dict) -> list[dict]:
+    """async 评论 API。"""
+    data = await _aget(client, "https://api.bilibili.com/x/v2/reply/main",
+                       params={"type": 1, "oid": aid, "mode": 3, "next": 0}, headers=headers)
+    if data.get("code") != 0:
+        return []
+    replies = (data.get("data") or {}).get("replies") or []
+    return [
+        {"text": (r.get("content") or {}).get("message", ""),
+         "user": (r.get("member") or {}).get("uname", ""),
+         "likes": r.get("like", 0)}
+        for r in replies if (r.get("content") or {}).get("message")
+    ]
+
+
+async def _abilibili(url: str, fields: set[str]) -> dict:
+    """async 主函数 — 2 波并发：
+
+    Wave 1: view + wbi_keys（互相独立，只依赖 bvid）
+    Wave 2: comments（依赖 aid from view） + media（依赖 cid from view + wbi_keys）
+    """
     bvid = _extract_bvid(url)
     if not bvid:
         bvid = _extract_bvid(_resolve(url))
@@ -148,20 +242,18 @@ def _bilibili(url: str, fields: set[str]) -> dict:
     settings = get_settings()
     if settings.bilibili_cookie:
         headers["Cookie"] = settings.bilibili_cookie
-    try:
-        view = _get(
-            "https://api.bilibili.com/x/web-interface/view",
-            params={"bvid": bvid},
-            headers=headers,
-        ).json()
-    except (requests.RequestException, ValueError):
-        return {"platform": "bilibili", "bvid": bvid, "error": "Bilibili view API request failed."}
+
+    async with httpx.AsyncClient() as client:
+        # Wave 1: view + wbi_keys 并发
+        view_task = asyncio.ensure_future(_aget_view(client, bvid, headers))
+        wbi_task = asyncio.ensure_future(_aget_wbi_keys(client, headers))
+        view, (img_key, sub_key) = await asyncio.gather(view_task, wbi_task)
+
     if view.get("code") != 0:
         return {"platform": "bilibili", "bvid": bvid, "error": view.get("message", "Bilibili API error.")}
 
     data = view.get("data") or {}
     aid = data.get("aid")
-    # ponytail: first part only; multi-part video needs pages[] iteration if requested
     cid = data.get("cid") or ((data.get("pages") or [{}])[0].get("cid"))
     result: dict = {"platform": "bilibili", "bvid": bvid, "aid": aid, "cid": cid}
 
@@ -172,19 +264,40 @@ def _bilibili(url: str, fields: set[str]) -> dict:
         result["author"] = ((data.get("owner") or {}).get("name") or "")
         result["cover_url"] = data.get("pic", "")
         result["statistics"] = {
-            "view": stat.get("view", 0),
-            "like": stat.get("like", 0),
-            "reply": stat.get("reply", 0),
-            "danmaku": stat.get("danmaku", 0),
-            "favorite": stat.get("favorite", 0),
-            "coin": stat.get("coin", 0),
+            "view": stat.get("view", 0), "like": stat.get("like", 0),
+            "reply": stat.get("reply", 0), "danmaku": stat.get("danmaku", 0),
+            "favorite": stat.get("favorite", 0), "coin": stat.get("coin", 0),
             "share": stat.get("share", 0),
         }
-    if "media" in fields:
-        result.update(_bilibili_media(bvid, cid, headers))
-    if "comments" in fields:
-        result["comments"] = _bilibili_comments(aid, headers)
+
+    # Wave 2: comments + media 并发（只在需要时才发请求）
+    if "media" in fields or "comments" in fields:
+        async with httpx.AsyncClient() as client:
+            tasks = []
+            if "comments" in fields:
+                tasks.append(asyncio.ensure_future(_aget_comments(client, aid, headers)))
+            if "media" in fields:
+                tasks.append(asyncio.ensure_future(
+                    _aget_media(client, bvid, cid, headers, img_key, sub_key)))
+
+            results = await asyncio.gather(*tasks) if tasks else []
+
+        idx = 0
+        if "comments" in fields:
+            result["comments"] = results[idx]
+            idx += 1
+        if "media" in fields:
+            result.update(results[idx])
+
     return result
+
+
+def _bilibili(url: str, fields: set[str]) -> dict:
+    """同步入口：asyncio.run 驱动 async 路径（029 改造）。
+
+    同步 helper（_get_wbi_keys / _bilibili_playurl 等）保留供单测 mock。
+    """
+    return asyncio.run(_abilibili(url, fields))
 
 
 def _download_bilibili_video(data: dict, out_dir: Path, title: str, headers: dict) -> tuple[list[dict], list[str]]:

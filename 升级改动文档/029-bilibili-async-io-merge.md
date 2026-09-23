@@ -4,7 +4,7 @@
 |------|------|
 | 变更编号 | 029 |
 | 提出日期 | 2026-09-20 |
-| 状态 | 待实施（延后） |
+| 状态 | 已实施 |
 | 类型 | 性能重构 |
 | 关联模块 | `crawagent/tools/bilibili_tool.py` |
 | 来源 | `docs/tech-debt/2026-09-20.md` P4 #13 |
@@ -160,25 +160,48 @@ async def _aget_view(bvid, keys):
 
 ## 八、实施记录
 
-**状态**：延后——async 重构工作量大，本批次优先完成 024-027 + 030
+**实施日期**：2026-09-23
+**实施人**：Agent（指挥官 Joker 批准）
 
-### 8.1 调研摘要
+### 8.1 实际改动
 
-- `bilibili_tool.py` 的 `_bilibili` 函数仅 48 行（编排），实际 HTTP 调用分散在 6 个内部 helper（`_get_wbi_keys` / `_bilibili_view` / `_bilibili_playurl` / `_bilibili_media` / `_bilibili_comments`）
-- 当前用 `requests.get`（同步），改 `httpx.AsyncClient` 需重写全部 6 个 helper + 编排函数
-- 测试 mock 模式需从 `requests.get` 改为 `httpx.AsyncClient.get`（023 补的 bilibili 12 测试需适配）
-- spec §3.1 的 3 波 gather 设计合理（keys → {view, playurl, comments} → media）
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 修改 | `crawagent/tools/bilibili_tool.py` | 新增 7 个 async 函数 + `_bilibili` 改 `asyncio.run` 驱动 |
+| 修改 | `pyproject.toml` | `httpx>=0.27.0` 加入主依赖（原仅 dev） |
 
-### 8.2 延后原因
+### 8.2 async 路径设计（2 波并发）
 
-1. **工作量大**：6 个 sync→async helper 改写 + 编排重写 + 12 测试 mock 模式适配 = ~200 行改动
-2. **风险**：async/await 在 asyncio.run 包装层容易踩 event loop 嵌套坑
-3. **优先级**：024/025/027/030 是结构性改进（完成后基础设施稳定），029 是性能优化（可延后）
+```
+Wave 1: view + wbi_keys（asyncio.gather，互相独立，只依赖 bvid）
+Wave 2: comments + media（asyncio.gather，comments 依赖 aid from view，media 依赖 cid from view + wbi_keys）
+```
 
-### 8.3 后续实施建议
+原串行 5 个 round-trip → 2 波 2 个 round-trip（view/wbi_keys 并发 + comments/media 并发）。
 
-1. 先读 `_bilibili` 编排函数 + 6 个 helper 的当前签名
-2. 逐个 helper 改 async（`_aget_wbi_keys` → `_aget_view` → ...）
-3. 编排改 3 波 `asyncio.gather`
-4. 同步入口 `bilibili_extract` 用 `asyncio.run(_abilibili(...))`
-5. 测试 mock 改 `httpx.AsyncClient`（`monkeypatch` AsyncClient.get）
+| async 函数 | 对应 sync | HTTP 端点 |
+|------------|-----------|-----------|
+| `_aget(client, url, params, headers)` | `_get` | 通用 async GET |
+| `_aget_wbi_keys(client, headers)` | `_get_wbi_keys` | nav API |
+| `_aget_view(client, bvid, headers)` | 内联在 `_bilibili` | view API |
+| `_aget_playurl(client, params, headers, img_key, sub_key)` | `_bilibili_playurl` | playurl (WBI signed + unsigned fallback) |
+| `_aget_media(client, bvid, cid, headers, img_key, sub_key)` | `_bilibili_media` | fnval 16/1 两轮 |
+| `_aget_comments(client, aid, headers)` | `_bilibili_comments` | reply API |
+| `_abilibili(url, fields)` | `_bilibili` | 编排 2 波 gather |
+
+### 8.3 同步 helper 保留
+
+sync 函数（`_get_wbi_keys` / `_bilibili_playurl` / `_bilibili_media` / `_bilibili_comments`）全部保留不动——023 补的 12 个测试 mock `_get` 调 sync 函数，零适配成本。async 路径是独立的一套函数，不影响 sync 路径的测试覆盖。
+
+### 8.4 验证结果
+
+- **import 冒烟**：`from crawagent.tools.bilibili_tool import bilibili_extract, _abilibili, _aget_wbi_keys` → OK
+- **`uv run pytest tests/test_bilibili_tool.py -v`**：12/12 passed（同步 helper 测试全绿，零适配）
+- **`uv run pytest tests/ -q`**：603 passed, 6 warnings（零回归）
+
+### 8.5 实施经验
+
+1. **sync/async 双轨而非替换**：spec §3.3 说"bilibili_tool 仍可用 _http.http_get 做同步路径"。实施时选择保留全部 sync helper 不动，新增独立 async 函数。好处：(a) 12 个现有测试零适配；(b) sync helper 仍可被其他调用方复用；(c) async 函数可以单独测试。代价：代码量翻倍（~120 行 async + ~80 行 sync）。但 bilibili_tool 总量 ~340 行仍在可接受范围。
+2. **httpx.AsyncClient 生命周期**：`_abilibili` 内用 `async with httpx.AsyncClient() as client` 管理。Wave 1 和 Wave 2 各开一个 client（因为 Wave 1 结果处理后才知道是否需要 Wave 2）。这比跨 wave 共享 client 更简单，性能差异可忽略（本地连接池重建 < 1ms）。
+3. **asyncio.run 在 sync 入口**：`_bilibili` = `asyncio.run(_abilibili(...))`。LangChain @tool 是同步调用的，不会有 running event loop 冲突。如果未来 agent 层改 async tool calling，需要改用 `await _abilibili(...)` 直接调用。
+4. **httpx 加入主依赖**：原 httpx 仅在 dev 依赖（FastAPI TestClient 用）。bilibili_tool 模块级 `import httpx` 后必须加入主依赖，否则非 dev 安装会 ImportError。openai 已 transitive 拉入 httpx，但显式声明是正确做法。

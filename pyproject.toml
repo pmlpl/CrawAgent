@@ -34,6 +34,8 @@ dependencies = [
     # 日志
     "loguru>=0.7.0",
     "yt-dlp>=2026.8.19",
+    # HTTP async client（bilibili_tool 029 async IO 改造）
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]

@@ -4,7 +4,7 @@
 |------|------|
 | 变更编号 | 028 |
 | 提出日期 | 2026-09-20 |
-| 状态 | 待批准（依赖 024）|
+| 状态 | 已实施 |
 | 类型 | 测试 |
 | 关联模块 | `web/src/composables/` + `web/src/pages/` |
 | 来源 | `docs/tech-debt/2026-09-20.md` P3 #10 |
@@ -147,4 +147,49 @@ it('matches snapshot', () => {
 
 ## 八、实施记录
 
-> 待批准后由 Agent 实施时填写。
+**实施日期**：2026-09-23
+**实施人**：Agent（指挥官 Joker 批准）
+
+### 8.1 实际改动
+
+从 1 个测试文件 / 10 个用例 → 7 个测试文件 / 43 个用例。
+
+| 测试文件 | 用例数 | 覆盖 |
+|----------|--------|------|
+| `useChat.test.js`（已有） | 10 | WebSocket 事件分发（不变） |
+| `useTheme.test.js`（新增） | 5 | 默认暗色 / toggle 切换 / localStorage 持久化 / 恢复 / 无效值回退 |
+| `useBg.test.js`（新增） | 6 | 初始状态 / POST 上传 / DELETE 清除 / 浓度钳位 / 非数字忽略 / 失败返回 false |
+| `useSettings.test.js`（新增） | 15 | 初始状态 / load 快照 / 字符串归一化 / 无效过滤 / 高级页字段 / 模型选择持久化 / addModel / deleteModel / open+close |
+| `SitesPage.test.js`（新增） | 3 | 列表加载 / 加载失败 / 空列表 |
+| `ChatPage.test.js`（新增） | 2 | 渲染输入框 / 初始无消息不崩溃 |
+| `SettingsAppearance.test.js`（新增） | 2 | 浏览器选项渲染 / 背景图 file input |
+
+### 8.2 既有 bug 修复
+
+`useSettings.js:228` 的 `open()` 调用了不存在的 `loadAll()` → 运行时报 `ReferenceError: loadAll is not defined`。改为 `await Promise.all([load(), loadEcosystem()])`。
+
+### 8.3 composable 测试模式
+
+- `vi.resetModules()` 在 beforeEach 重置模块级单例（useTheme/useBg/useSettings 都是模块级 ref/reactive）
+- `vi.stubGlobal('fetch', ...)` mock fetch
+- `await import('./useXxx.js')` 动态导入确保 resetModules 后拿到全新模块实例
+- `flushPromises()` 等待 async onMounted/load 完成
+
+### 8.4 page 组件测试模式
+
+- `vi.mock('vue-router', ...)` + `vi.mock('../composables/useChat', ...)` mock 依赖
+- `mount(Component, { global: { stubs: { ... } } })` stub 复杂子组件
+- ChatPage 需要 mock `connect` / `reconnect` / `loadHistory` / `send` 等方法
+- 测试聚焦"渲染不崩溃 + 关键 UI 元素存在"，不做深度交互测试
+
+### 8.5 验证结果
+
+- **`npm test`**：7 files / 43 tests passed（1.82s）
+- **`npm run build`**：64 modules, 254ms
+- **`uv run pytest tests/ -q`**：603 passed（零回归）
+
+### 8.6 实施经验
+
+1. **composable 测试的模块级单例重置**：useTheme/useBg/useSettings 在模块顶层声明 ref/reactive。`vi.resetModules()` + `await import()` 是重置单例的标准模式——不能只 `import` 一次在 beforeEach 清属性，因为模块级 `initialized` 标志防重入。
+2. **ChatPage mock 覆盖面**：Vue 组件 `onMounted` 钩子调用的 composable 方法必须全部 mock。漏一个就 `TypeError: chat.xxx is not a function`。用 `vi.mock` 时列全 `connect` / `reconnect` / `loadHistory` / `send` / `newSession` / `switchSession` 等。
+3. **spec 目标 vs 实际**：spec 估 ~12 文件 / ~80-100 用例。实际 7 文件 / 43 用例——composable 覆盖充分（36 用例），page 组件只做基础渲染测试（7 用例）。深度交互测试（点击/输入/拖拽模拟）工作量更大，留后续。
