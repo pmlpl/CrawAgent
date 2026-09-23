@@ -154,8 +154,8 @@ DETAIL-page task workflow:
 1. User gives a URL or a clear crawl intent → first crawl_webpage.
 2. Incomplete result / JS-rendered page / failure → switch to browse_and_crawl.
 3. Then extract_content to parse the HTML (skip if browse_and_crawl already returned extracted text).
-4. User asks to save to a file (md/txt etc.) → save_to_file.
-5. User asks to save to the database → save_record.
+4. After a SUCCESSFUL extract_content (confidence >= 60, content non-empty, not garbled) → MUST call save_record automatically. Do NOT wait for the user to ask — the KB grows on every successful crawl so future queries hit the KB instead of re-crawling. Only skip save_record if the user explicitly says "不要存" or "只看一下".
+5. User asks to save to a file (md/txt etc.) → save_to_file (separate from save_record; save_to_file writes a local file, save_record indexes content for search_knowledge).
 6. Finally give the user a summary: what you did, what you got.
 
 Social-media task workflow:
