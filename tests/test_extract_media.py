@@ -2,6 +2,7 @@
 monkeypatch media.get_settings 返回临时 downloads_dir，不碰真实配置。
 """
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,8 @@ def test_json_format_extracts_media(dl):
 
 def test_text_format_extracts_media(dl):
     """download_images 返文本 'output dir: <dir>' + 文件名行。"""
-    content = f"downloaded 2 files\noutput dir: {dl}\\douyin_abc\n v.mp4 (1.2MB)\n cover.jpg (50KB)"
+    sep = "\\" if sys.platform == "win32" else "/"
+    content = f"downloaded 2 files\noutput dir: {dl}{sep}douyin_abc\n v.mp4 (1.2MB)\n cover.jpg (50KB)"
     out = media_mod.extract_media(content)
     names = {m["filename"] for m in out}
     assert names == {"v.mp4", "cover.jpg"}

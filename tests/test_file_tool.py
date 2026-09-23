@@ -103,6 +103,7 @@ def test_save_session_default_subdir(fake_settings, tmp_path, monkeypatch):
     assert (tmp_path / "output" / "root.md").exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="<> are valid filename chars on Linux")
 def test_save_invalid_filename_in_too_far(fake_settings):
     """filename 含非法 Windows 字符 — save_to_file 当前依赖 pathlib，应该报错而不是写出错位置的文件。"""
     out = file_tool.save_to_file.func("a<b>.md", "x", subdir="d")

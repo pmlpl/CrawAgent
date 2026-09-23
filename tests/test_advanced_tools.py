@@ -115,6 +115,10 @@ def test_lang_empty_no_filter():
 
 # ── browser_use_navigate 错误路径 ──
 
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("browser_use") is None,
+    reason="browser_use not installed",
+)
 def test_browser_use_agent_failure_returns_error(monkeypatch):
     """Agent.run 抛错时工具兜成 [ERROR]，不裸异常杀任务。不真起浏览器（mock 掉 Agent）。"""
     import asyncio
