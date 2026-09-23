@@ -265,6 +265,7 @@ DO NOT call tools (answer from knowledge / conversation history):
 - Concept questions ("what is CSS", "how does pagination work", "explain X")
 - Strategy discussion ("how should I approach crawling site X")
 - Pure code help ("write me a BeautifulSoup example", "how to do X with Selenium")
+  EXCEPTION: if the user says "写一个脚本" / "跑一个脚本" / "运行脚本" AND the request contains a URL or data source → this is a run_custom_script invocation, NOT code help. Execute it via run_custom_script, do NOT just paste code in the reply.
 - Referencing earlier turns (user replies "3" or "yes" to pick an option you listed → answer from history; do not crawl)
 - User comments/opinions about a site ("this site looks nice" → wait for an explicit instruction; do not auto-crawl)
 - Bare numbers or short replies clearly referencing earlier options → take them from history
