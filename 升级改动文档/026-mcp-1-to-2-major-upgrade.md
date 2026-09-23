@@ -4,7 +4,7 @@
 |------|------|
 | 变更编号 | 026 |
 | 提出日期 | 2026-09-20 |
-| 状态 | 已阻塞（upstream 未适配） |
+| 状态 | 已阻塞（等 upstream l-m-a 适配 mcp 2.x） |
 | 类型 | 依赖升级 |
 | 关联模块 | `crawagent/tools/mcp_capture_tool.py` / `mcp_admin_tool.py` |
 | 来源 | `docs/tech-debt/2026-09-20.md` P2 #5 |
@@ -99,12 +99,65 @@
 
 ## 八、实施记录
 
-**实施日期**：2026-09-22
+**实施日期**：2026-09-22（初版）+ 2026-09-23（完整迁移分析）
 **实施人**：Agent（指挥官 Joker 批准）
-**状态**：**已阻塞——upstream langchain-mcp-adapters 未适配 mcp 2.x API 变更**
-**关联提交**：本批次 026 不入库（回退到 mcp 1.30.0 + langchain-mcp-adapters 0.3.2）
+**状态**：**已阻塞——等 upstream l-m-a 适配 mcp 2.x（方案 A：等）**
+**关联提交**：026 不入库（mcp 1.30.0 + langchain-mcp-adapters 0.3.2 保持现状）
 
-### 8.1 调研过程
+### 8.1 决策：方案 A（等 upstream）
+
+指挥官 2026-09-23 批准方案 A。理由：
+1. mcp 1.30.0 协议层兼容 mcp 2.x server（JSON-RPC 线格式未变）
+2. 当前功能不受影响，无被阻塞的业务需求
+3. langchain-mcp-adapters 是活跃项目（0.3.2 发布于 2026-08-06），适配 mcp 2.x 是时间问题
+
+### 8.2 mcp 2.x 完整迁移分析（2026-09-23 补充）
+
+来源：mcp 官方迁移指南 https://py.sdk.modelcontextprotocol.io/v2/migration/
+
+mcp 2.x 是 **4 层面全面 API 重构**，不是简单改名。shim 无法修复：
+
+| 层面 | mcp 1.x | mcp 2.x | l-m-a 受影响文件 |
+|------|---------|---------|-----------------|
+| **模块结构** | `mcp.server.fastmcp` / `mcp.shared.session` / `mcp.shared.context.RequestContext` | `mcp.server.mcpserver`（旧路径是 stub 故意报错）/ `mcp.shared.session` 删除 / `RequestContext` 删除 | callbacks.py / tools.py |
+| **字段名** | camelCase（`inputSchema`, `nextCursor`） | snake_case（`input_schema`, `next_cursor`） | 所有 type 访问 |
+| **ClientSession** | `get_server_capabilities()` / `cursor` 参数 / timedelta 超时 | 全删 / 超时改 float 秒 / BaseSession 删除 | client.py / sessions.py |
+| **传输层** | httpx + httpx-sse | httpx2（传错类型**静默失败**）+ opentelemetry-api 硬依赖 | sessions.py |
+
+### 8.3 Shim 尝试记录
+
+尝试了 2 层 shim：
+1. `mcp.shared.context.RequestContext = BaseContext` → 解决 callbacks.py:8
+2. `mcp.shared.session` 模块 re-export `mcp.client.session.ProgressFnT` → 解决 callbacks.py:9
+
+第 3 层断裂：`mcp.server.fastmcp` 在 mcp 2.x 是故意报错的 stub（`raise ModuleNotFoundError("FastMCP was renamed to MCPServer")`）。tools.py import `FastMCPTool` 和 `ArgModelBase, FuncMetadata` 从 `mcp.server.fastmcp.*`，这些内部 API 在 mcp 2.x 完全重构。
+
+结论：每层 shim 暴露下一层断裂，shim 不可行。
+
+### 8.4 替代方案（未来重试时可选）
+
+| 方案 | 工作量 | 适用场景 |
+|------|--------|----------|
+| **A: 等 upstream**（已选） | 零 | 当前无紧急需求；定期检查 l-m-a 新版本 |
+| **B: 直接用 mcp 2.x SDK** | ~200 行 | 代码只在 `skills.py:545` 用 `MultiServerMCPClient`；替换成 `mcp.ClientSession` + 手动转 LangChain Tool |
+| **C: Fork l-m-a** | ~400 行 | 保持 l-m-a 抽象层；按迁移指南更新全部 import + 字段名 + API 调用 |
+
+### 8.5 重试检查清单
+
+当 langchain-mcp-adapters 发布新版本时，执行以下检查：
+
+```bash
+# 1. 查新版本约束
+python -c "import importlib.metadata; print(importlib.metadata.requires('langchain-mcp-adapters'))"
+# 如果 mcp 约束放开到 >=2.0.0 或 <3.0.0 → 可以重试
+
+# 2. 升级 + 测试
+uv pip install --upgrade langchain-mcp-adapters mcp
+uv run python -c "from langchain_mcp_adapters.client import MultiServerMCPClient; print('OK')"
+uv run pytest tests/ -q
+
+# 3. 如有 API 变更，修 crawagent/graph/skills.py:545（唯一 import 点）
+```
 
 #### 8.1.1 代码触点扫描
 
