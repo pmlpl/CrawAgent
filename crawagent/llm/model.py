@@ -180,9 +180,10 @@ def get_llm(
         "base_url": base_url,
         "model": model_name,
         "timeout": 120,
-        # 重试策略：3 次重试（含首次共 4 次调用机会）
-        # langchain 内部用 tenacity，自动处理 429/5xx/连接超时
-        "max_retries": 3,
+        # 重试策略：5 次重试（含首次共 6 次调用机会，指数退避总等待 ~15s）
+        # langchain 内部用 tenacity，自动处理 429/5xx/连接超时——
+        # 2026-09 实测中转站 502 "所有上游均失败" 短暂抖动频繁，3 次不够撑过
+        "max_retries": 5,
         "max_tokens": max_tokens or 8192,
     }
 

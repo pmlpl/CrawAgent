@@ -51,6 +51,41 @@ _AUTO_TITLE_PROMPT = (
 _pending_titles: set[str] = set()
 
 
+def _friendly_llm_error(e: Exception) -> str:
+    """把 LLM 调用链路的常见异常翻译成人话；不认识的错误原样透传。
+
+    2026-09 实测：中转站 502 "所有上游均失败" 直接把 raw dict 甩给用户，
+    用户看不懂也不知道该干嘛。翻译后给出行动指引。
+    """
+    raw = str(e) or type(e).__name__
+    low = raw.lower()
+    if "502" in raw or "503" in raw or "504" in raw or "all_upstreams_failed" in low:
+        return (
+            f"LLM 服务暂时不可用（上游网关故障，已自动重试仍失败）。\n"
+            f"请等 1-2 分钟后重发消息；若持续失败，检查 .env 里 LLM 提供商状态。\n"
+            f"[详情] {raw[:200]}"
+        )
+    if "429" in raw or "rate limit" in low or "quota" in low:
+        return (
+            f"LLM 请求被限流或配额耗尽（429）。\n"
+            f"请稍后重试；若反复出现，检查 API 额度或更换模型。\n"
+            f"[详情] {raw[:200]}"
+        )
+    if "401" in raw or "403" in raw or "invalid api key" in low:
+        return (
+            f"LLM 认证失败（401/403），API Key 无效或过期。\n"
+            f"请在设置页检查 API Key 配置。\n"
+            f"[详情] {raw[:200]}"
+        )
+    if "timeout" in low or "timed out" in low or "connection" in low:
+        return (
+            f"LLM 请求超时或网络不通。\n"
+            f"请检查网络连接（含代理设置）后重试。\n"
+            f"[详情] {raw[:200]}"
+        )
+    return raw
+
+
 def _maybe_auto_title(session_id: str, agent: Any, config: dict, fallback_text: str = "") -> None:
     """轮次结束后检查：如果该会话还没有标题，后台调小模型自动生成。
 
@@ -440,8 +475,9 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
         # 否则排查时会被 warm_cache 静默失败的 429 误导
         print(f"[TURN_ERROR] session={session_id}: {type(e).__name__}: {e}")
         # 持久化失败原因：刷新页面后 history 接口仍能返回，红条不丢
-        save_session_error(session_id, str(e) or type(e).__name__)
-        _emit(session_id, q, loop, {"type": "error", "message": str(e)})
+        friendly = _friendly_llm_error(e)
+        save_session_error(session_id, friendly)
+        _emit(session_id, q, loop, {"type": "error", "message": friendly})
         # 失败轮次也要尝试命名（LLM 挂了就用用户输入兜底），否则会话永远是编码名
         try:
             _maybe_auto_title(session_id, agent, config, fallback_text=text)
