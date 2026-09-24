@@ -15,7 +15,7 @@ jobs:
         with: { enable-cache: true }
       - run: uv sync --group dev --group type-stubs --all-extras
       - env: { OPENAI_API_KEY: "sk-fake-for-ci-only" }
-        run: uv run pytest tests/ -v --color=yes -p no:cacheprovider --ignore=tests/test_mcp_fail_cache.py --ignore=tests/test_phase3_scheduler.py
+        run: uv run pytest tests/ -v --color=yes -p no:cacheprovider --tb=line --ignore=tests/test_mcp_fail_cache.py --ignore=tests/test_phase3_scheduler.py
 
   type-check:
     runs-on: ubuntu-latest
