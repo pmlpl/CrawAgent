@@ -174,6 +174,15 @@ class Settings(BaseSettings):
     tool_result_max_chars: int = 2000
     langsmith_tracing: bool = False
 
+    # ---- 浏览器子 Agent 模型（032；三键全空 = 跟随主模型）----
+    # 驱动 browser_use_navigate 的浏览器小 Agent：浏览器操作用便宜快模型即可，
+    # 重思考留给主 Agent。须选支持图片输入的视觉模型（browser-use 默认 use_vision=True
+    # 每步发截图，纯文本模型收图不报错但内容不进上下文 → 退化为按 DOM 文本盲操作）。
+    # base_url / api_key 留空时回落主 provider 对应值（只填模型名即可复用现有服务商）。
+    browser_use_llm_model: str = ""
+    browser_use_llm_base_url: str = ""
+    browser_use_llm_api_key: str = ""
+
 
 def get_settings() -> Settings:
     """获取全局配置单例

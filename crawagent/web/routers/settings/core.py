@@ -110,6 +110,10 @@ def _settings_snapshot() -> dict[str, Any]:
         "langsmith_api_key": _mask_key(s.langsmith_api_key),
         "langsmith_project": s.langsmith_project,
         "langsmith_tracing": s.langsmith_tracing,
+        # ---- 浏览器子 Agent（032）：key 脱敏回显，含 * 视为掩码不回写 ----
+        "browser_use_llm_model": s.browser_use_llm_model,
+        "browser_use_llm_base_url": s.browser_use_llm_base_url,
+        "browser_use_llm_api_key": _mask_key(s.browser_use_llm_api_key),
     }
 
 
@@ -330,6 +334,18 @@ async def post_settings_route(payload: dict = Body(...)) -> dict[str, Any]:
         updates["LANGSMITH_PROJECT"] = str(payload.get("langsmith_project") or "crawagent")
     if "langsmith_tracing" in payload:
         updates["LANGSMITH_TRACING"] = "true" if payload.get("langsmith_tracing") else "false"
+
+    # ---- 浏览器子 Agent 模型（032）：model/base_url 直写，空串 = 清除（恢复跟随主模型）；
+    #      key 含 * 视为掩码跳过（保留旧值，010 语义）。这三键启动期不会被导出进 os.environ，
+    #      工具层读 get_settings() 不经环境变量，纯 .env 落盘保存即生效 ----
+    if "browser_use_llm_model" in payload:
+        updates["BROWSER_USE_LLM_MODEL"] = str(payload.get("browser_use_llm_model") or "").strip()
+    if "browser_use_llm_base_url" in payload:
+        updates["BROWSER_USE_LLM_BASE_URL"] = str(payload.get("browser_use_llm_base_url") or "").strip()
+    if "browser_use_llm_api_key" in payload:
+        k = str(payload.get("browser_use_llm_api_key") or "")
+        if "*" not in k:  # 掩码不回写沿用原值；空串 = 清除（三键全空 = 恢复跟随主模型）
+            updates["BROWSER_USE_LLM_API_KEY"] = k
 
     if updates:
         _save_env_updates(updates)

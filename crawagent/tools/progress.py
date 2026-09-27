@@ -327,4 +327,6 @@ LONG_RUNNING_TOOLS: set[str] = {
     "frida_hook_function",     # frida-trace 长时挂载
     "frida_dump_so",           # frida 内联 JS dump
     "frida_bypass_ssl_pinning",# frida 挂载绕过脚本
+    # ---- 高级工具（009）----
+    "browser_use_navigate",    # LLM 驱动浏览器交互（多步循环，可达数十分钟；032 加步进回调）
 }

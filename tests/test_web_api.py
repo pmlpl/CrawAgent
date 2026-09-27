@@ -70,6 +70,10 @@ def client(tmp_path, monkeypatch):
             langsmith_api_key="",
             langsmith_project="crawagent",
             langsmith_tracing=False,
+            # 浏览器子 Agent（032 快照会读）
+            browser_use_llm_model="",
+            browser_use_llm_base_url="",
+            browser_use_llm_api_key="",
         )
 
     # settings 路由与 registry 各持有一份 get_settings 引用，都要替换
@@ -355,6 +359,10 @@ def eco_client(tmp_path, monkeypatch):
             langsmith_api_key="",
             langsmith_project="crawagent",
             langsmith_tracing=False,
+            # 浏览器子 Agent（032 快照会读）
+            browser_use_llm_model="",
+            browser_use_llm_base_url="",
+            browser_use_llm_api_key="",
         )
 
     from crawagent.web.routers import settings as settings_router

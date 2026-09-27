@@ -44,6 +44,13 @@ const state = reactive({
     project: 'crawagent',  // LangSmith 项目名
     tracing: false,        // 是否启用链路追踪（需重启 crawagent 生效）
   },
+  // ---- 浏览器子 Agent（032）：驱动 browser_use_navigate 的小 Agent 模型 ----
+  // 三键全空 = 跟随主模型；key 回显脱敏掩码，含 * 视为掩码不回写
+  browserAgent: {
+    model: '',
+    baseUrl: '',
+    apiKey: '',
+  },
 })
 
 // 简化视图：给 App.vue/Header 等只读场景用
@@ -105,6 +112,12 @@ async function load() {
       apiKey: data.langsmith_api_key || '',
       project: data.langsmith_project || 'crawagent',
       tracing: !!data.langsmith_tracing,
+    }
+    // 浏览器子 Agent（后端脱敏回显 apiKey）
+    state.browserAgent = {
+      model: data.browser_use_llm_model || '',
+      baseUrl: data.browser_use_llm_base_url || '',
+      apiKey: data.browser_use_llm_api_key || '',
     }
   } finally {
     state.loading = false

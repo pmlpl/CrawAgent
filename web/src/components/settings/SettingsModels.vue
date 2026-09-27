@@ -1,10 +1,33 @@
 <script setup>
 // 「对话模型」页签：多服务商模型注册表（列表/添加/编辑/删除/连通性测试）
+// + 浏览器子 Agent 模型（032，驱动 browser_use_navigate 的小 Agent）
 // Key 按服务商共享，后端不出明文（key_set 标记）；详细状态在 useSettings 组合式
 import { computed, reactive, ref } from 'vue'
 import { useSettings } from '../../composables/useSettings'
 
-const { state, addModel, updateModel, deleteModel, test } = useSettings()
+const { state, addModel, updateModel, deleteModel, test, saveSettingsFields, load } = useSettings()
+
+// ---------- 浏览器子 Agent（032）：三键全空 = 跟随主模型；保存即生效无需重启 ----------
+const savingSubAgent = ref(false)
+const subAgentTip = ref(null)
+
+async function saveBrowserAgent() {
+  if (savingSubAgent.value) return
+  savingSubAgent.value = true
+  try {
+    const res = await saveSettingsFields({
+      browser_use_llm_model: state.browserAgent.model.trim(),
+      browser_use_llm_base_url: state.browserAgent.baseUrl.trim(),
+      browser_use_llm_api_key: state.browserAgent.apiKey,
+    })
+    subAgentTip.value = res.ok
+      ? { ok: true, msg: '✓ 浏览器子 Agent 模型已保存并生效（无需重启）' }
+      : { ok: false, msg: '保存失败：' + (res.error || '未知错误') }
+    if (res.ok) await load() // 回读快照，把 key 回显成服务端脱敏掩码
+  } finally {
+    savingSubAgent.value = false
+  }
+}
 
 // ---------- 服务商预设：选服务商自动填 Base URL，自定义可手填 ----------
 const PROVIDER_PRESETS = [
@@ -186,5 +209,52 @@ async function remove(m) {
         </div>
       </form>
     </template>
+  </section>
+
+  <section class="card">
+    <h2 class="card-title">浏览器子 Agent</h2>
+    <p class="hint" style="margin-bottom: 12px">
+      驱动 browser_use_navigate 的浏览器小 Agent（登录 / 点击 / 填表等交互任务），浏览器操作用便宜快模型即可，重思考留给主 Agent。
+      <b>三键全留空 = 跟随主模型</b>。须选支持图片输入的视觉模型（如 GLM-4V / GLM-5.1 视觉线），纯文本模型会退化为按 DOM 文本盲操作。
+    </p>
+    <div class="field" style="max-width: 420px">
+      <label class="field">
+        <span class="label">模型名</span>
+        <input
+          v-model="state.browserAgent.model"
+          placeholder="留空 = 跟随主模型"
+          spellcheck="false"
+          autocomplete="off"
+        />
+      </label>
+      <label class="field">
+        <span class="label">Base URL</span>
+        <input
+          v-model="state.browserAgent.baseUrl"
+          placeholder="留空 = 复用主服务商接口地址"
+          spellcheck="false"
+          autocomplete="off"
+        />
+      </label>
+      <label class="field">
+        <span class="label">API Key</span>
+        <input
+          type="password"
+          v-model="state.browserAgent.apiKey"
+          placeholder="未配置"
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <span class="hint">已配置时回显脱敏掩码（****xxxx），含 * 视为掩码不回写；清空保存 = 清除。Base URL / Key 留空时回落主服务商对应值（只填模型名即可复用）</span>
+      </label>
+      <div class="actions" style="justify-content: flex-start">
+        <button type="button" class="btn-primary" :disabled="savingSubAgent" @click="saveBrowserAgent">
+          <span v-if="savingSubAgent" class="spin" />保存
+        </button>
+      </div>
+      <div v-if="subAgentTip" class="result" :class="subAgentTip.ok ? 'ok' : 'err'" style="margin-top: 8px">
+        {{ subAgentTip.msg }}
+      </div>
+    </div>
   </section>
 </template>

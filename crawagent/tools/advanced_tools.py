@@ -12,10 +12,55 @@ browser_use 复用 CrawAgent 的 LLM 接入（选项 A，get_llm()）。
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
 from langchain_core.tools import tool
+
+from crawagent.tools.progress import report_progress
+
+
+def _on_browser_step(state: object, output: object, step_no: int) -> None:
+    """browser-use 每步回调（register_new_step_callback）→ report_progress 里程碑。
+
+    动作摘要从 output.action[0] 提取（第一个非空动作键 + 参数，截断 ~60 字），
+    取不出时退化为"步骤 N 执行中"。整个回调 try/except 静默吞异常：
+    进度上报失败绝不影响浏览器任务主流程。由 browser-use 的事件循环线程调用，
+    report_progress 内部 _LOCK 线程安全，无需额外处理。
+    """
+    try:
+        summary = ""
+        try:
+            actions = getattr(output, "action", None) or []
+            if actions:
+                dump = actions[0].model_dump(exclude_unset=True)
+                for key, val in dump.items():
+                    if not _meaningful(val):
+                        continue
+                    if isinstance(val, str):
+                        params = val
+                    else:
+                        try:
+                            params = json.dumps(val, ensure_ascii=False)
+                        except Exception:
+                            params = str(val)
+                    summary = f"{key}: {params}"[:60]
+                    break
+        except Exception:
+            summary = ""
+        report_progress(f"步骤 {step_no}：{summary}" if summary else f"步骤 {step_no} 执行中")
+    except Exception:
+        pass
+
+
+def _meaningful(val: object) -> bool:
+    """动作参数是否含有效信息：None/空串/全空字典（如 done: {"text": ""}）视为无效。"""
+    if val is None or val == "":
+        return False
+    if isinstance(val, dict):
+        return any(v not in (None, "") for v in val.values())
+    return True
 
 
 @tool
@@ -187,19 +232,32 @@ def browser_use_navigate(url: str, task: str) -> str:
         return f"[ERROR] browser_use 未安装或损坏: {type(e).__name__}: {e}"
 
     # LLM 配置（三档，浏览器操作用便宜模型即可）：
-    #  1) BROWSER_USE_LLM_API_KEY（+ 可选 _BASE_URL/_MODEL）：独立 cheap key（推荐，如 OpenAI gpt-4o-mini）
-    #  2) 仅 BROWSER_USE_LLM_MODEL：复用 CrawAgent 的 provider base_url+key，但换便宜模型
-    #     （如 glm-5.3-flash / glm-5.3-free，同局域网免额外 key）
-    #  3) 都不设：默认用 CrawAgent 的主 LLM（glm-5.2，带思考，较贵——不推荐用于浏览器步骤）
+    #  1) 设置页「浏览器子 Agent」手配（Settings.browser_use_llm_model，032）：
+    #     base_url / api_key 留空时回落主 provider 对应值（只填模型名即可复用现有服务商）
+    #  2) os.environ 的 BROWSER_USE_LLM_* 兜底（向后兼容已手写 .env 的用户，语义原样）：
+    #     _API_KEY（+可选 _BASE_URL/_MODEL）独立 cheap key；仅 _MODEL 复用主 provider 换模型
+    #  3) 都无：主 LLM（现状）
     try:
+        from crawagent.config.settings import get_settings
         from crawagent.llm.registry import resolve_model
         from crawagent.llm.model import _ensure_no_proxy_for
+
+        s = get_settings()
+        cfg_model = (s.browser_use_llm_model or "").strip()
+        cfg_base = (s.browser_use_llm_base_url or "").strip()
+        cfg_key = (s.browser_use_llm_api_key or "").strip()
 
         env_key = os.environ.get("BROWSER_USE_LLM_API_KEY", "").strip()
         env_model = os.environ.get("BROWSER_USE_LLM_MODEL", "").strip()
         env_base = os.environ.get("BROWSER_USE_LLM_BASE_URL", "").strip()
 
-        if env_key:
+        if cfg_model:
+            # ① 设置页手配：base/key 留空回落主 provider（与"复用 provider 换模型"语义一致）
+            _, main_base, main_key, _adapter = resolve_model(None)
+            base = cfg_base or main_base
+            llm = ChatOpenAILike(model=cfg_model, api_key=cfg_key or main_key, base_url=base)
+            _ensure_no_proxy_for(base)
+        elif env_key:
             base = env_base or "https://api.openai.com/v1"
             model = env_model or "gpt-4o-mini"
             llm = ChatOpenAILike(model=model, api_key=env_key, base_url=base)
@@ -216,7 +274,12 @@ def browser_use_navigate(url: str, task: str) -> str:
     async def _run() -> str:
         # browser-use 0.13：Agent 直接接 browser=Browser(headless=...)
         browser = Browser(headless=False)
-        agent = Agent(task=f"打开 {url} 然后完成：{task}", llm=llm, browser=browser)
+        agent = Agent(
+            task=f"打开 {url} 然后完成：{task}",
+            llm=llm,
+            browser=browser,
+            register_new_step_callback=_on_browser_step,  # 步进里程碑 → trace 卡片实时展示
+        )
         result = await agent.run()
         # browser-use AgentHistoryList：取最后一条 result / extracted_content
         final = getattr(result, "final_result", None)

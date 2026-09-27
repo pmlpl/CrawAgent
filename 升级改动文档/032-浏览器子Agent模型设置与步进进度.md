@@ -4,7 +4,7 @@
 |------|------|
 | 变更编号 | 032 |
 | 提出日期 | 2026-09-25 |
-| 状态 | 待实施 |
+| 状态 | 已完成（2026-09-27） |
 | 类型 | 功能增强 |
 | 关联模块 | crawagent/config/settings.py、crawagent/web/routers/settings/core.py、crawagent/tools/advanced_tools.py、crawagent/tools/progress.py、web/src/components/settings/SettingsModels.vue |
 
@@ -118,19 +118,43 @@ browser_use_llm_api_key: str = ""
 
 ---
 
-## 八、实施记录（<完成日期>）
+## 八、实施记录（2026-09-27）
 
 ### 怎么做到的（人话版）
 
-（完成后补写）
+浏览器小 Agent 换模型这件事，管道早就铺好了——Settings、.env 写入、脱敏回显、设置页卡片全是现成模式，照 010 LangSmith 的先例搬过来就行。真正的新活有三件：
+
+1. **LLM 三档优先级**：设置页三字段（`browser_use_llm_model/base_url/api_key`）非空模型名即视为手配，base_url / key 留空时回落主 provider 对应值（只填模型名即可复用现有服务商）；settings 空则走老的 `os.environ` 兜底（原样保留），再空才是主模型。有个测试阶段才发现的暗坑：pydantic-settings 会把 `os.environ` 的 `BROWSER_USE_LLM_*` 自动读进同名 Settings 字段——老用户手写 .env 的配置其实无缝迁进了第一档，"设置档压过 env 档"这类测试前提根本不成立，两档天然合并，测试改成忠实记录这个合并语义。
+2. **步进里程碑**：模块级 `_on_browser_step` 回调挂在 `register_new_step_callback` 上，从 `output.action[0].model_dump()` 抠第一个有效动作键 + 参数拼"步骤 N：动作摘要"（60 字截断；`done: {"text": ""}` 这类全空字典也算取不出，退化为"步骤 N 执行中"）；整个回调两层 try/except，进度上报失败绝不碰主流程。走 `report_progress` 轨迹行（非 emit_turn_event），前端 trace 卡片零改动。
+3. **心跳补位**：`browser_use_navigate` 加进 `LONG_RUNNING_TOOLS`，agent.py 自动套 `with_progress`——就算回调哑了也还有"运行中… 已耗时 Xs"兜底心跳。
+
+设置页「浏览器子 Agent」卡片三输入 + 保存按钮，key 脱敏回显（含 `*` 不回写）、清空保存 = 清除（三键全空恢复跟随主模型）。保存即生效：get_settings() 不缓存，工具层每次现读。
 
 ### 实际改动
 
 | 操作 | 文件 | 说明 |
 |------|------|------|
+| 修改 | crawagent/config/settings.py | +3 可空字段 browser_use_llm_model/base_url/api_key |
+| 修改 | crawagent/web/routers/settings/core.py | snapshot 三键（key 过 _mask_key）+ save 三分支（掩码跳过/空串清除） |
+| 修改 | crawagent/tools/advanced_tools.py | LLM 三档优先级 + `_on_browser_step`/`_meaningful` 步进回调 + Agent 挂 register_new_step_callback |
+| 修改 | crawagent/tools/progress.py | LONG_RUNNING_TOOLS + browser_use_navigate |
+| 修改 | web/src/composables/useSettings.js | state.browserAgent 三键 + load() 回显 |
+| 修改 | web/src/components/settings/SettingsModels.vue | 「浏览器子 Agent」卡片（三输入 + 保存 + 脱敏提示） |
+| 修改 | tests/test_web_api.py | 两处 SimpleNamespace 假 settings 补三字段 |
+| 新增 | tests/test_settings_browser_use.py | 6 用例（snapshot 脱敏/save 三分支/partial 不误清） |
+| 新增 | tests/test_browser_subagent.py | 12 用例（三档优先级/no_proxy 记录/回调摘要/退化/截断/吞异常） |
+| 新增 | web/src/components/settings/SettingsModels.test.js | 4 用例（卡片渲染/掩码回显/保存提交三键/失败提示） |
 
 ### 验证结果（对照 §五）
 
+1. `uv run pytest tests/ -q` → **621 passed**（603 基线 + 18 新增）✓
+2. `cd web && npm test && npm run build` → **47 passed**（43 基线 + 4 新增）+ build 成功 ✓
+3. 保存/脱敏/清除链路由 HTTP 级测试全覆盖（真实 .env 不动）：三字段落盘 ✓、key 掩码回显 `****1234` 且明文不出 ✓、含 `*` 保存不覆盖原值 ✓、三键清空保存恢复跟随主模型 ✓
+4. 重启后真实浏览器任务看步进里程碑与心跳——**待人工冒烟**（需 Playwright 浏览器 + LLM 链路，与 §五.5 同属人工感知项）
+5. 便宜快模型提速感知——**待人工冒烟**
+
 ### 说明
 
-- 本变更已随 commit <哈希> 提交入库
+- 与规格偏差一处：api_key 空串语义为**清除**（010 LangSmith 是"空 = 不改"）——本卡片的头号契约是"三键全空 = 跟随主模型"，清空 key 必须能落盘；掩码 `*` 跳过的保护语义不变。
+- os.environ 的 `BROWSER_USE_LLM_*` 经 pydantic 自动并入 Settings 同名字段，老"手写 .env"用户配置无缝生效，tier2 分支保留纯兜底。
+- 本变更已随本 commit 入库（代码与文档同批）。
