@@ -150,6 +150,101 @@ def test_agent_receives_step_callback(env, mocked):
     assert kwargs["task"].startswith("打开 https://example.com")
 
 
+# ── 033：四档挑选（手配 > env > 池中两维全过 > 主模型）──
+
+class _OkAgent:
+    """成功路径：run() 返回可取的 final_result，让工具走到返回头标注。"""
+    last_kwargs: dict | None = None
+
+    def __init__(self, **kw):
+        type(self).last_kwargs = kw
+
+    async def run(self):
+        return SimpleNamespace(final_result=lambda: "页面内容", extracted_content=None)
+
+
+POOL_PROVIDERS = (
+    'LLM_PROVIDERS=[{"name":"主商","base_url":"http://main.example/v1","api_key":"sk-main","models":["main-model"]},'
+    '{"name":"视觉商","base_url":"http://vision.example/v1","api_key":"sk-vision",'
+    '"models":["glm-4v-flash","text-only"],'
+    '"caps":{'
+    '"glm-4v-flash":{"vision":true,"structured":true,"vision_reply":"青色","structured_reply":"{}"},'
+    '"text-only":{"vision":true,"structured":false,"vision_reply":"青色","structured_reply":"400"}}}]'
+)
+
+
+def test_tier3_pool_picks_first_both_dims_passed(env, mocked):
+    """池中第一个两维全过（vision+structured 显式 True）的模型被自动选中。"""
+    env.write(POOL_PROVIDERS)
+    llm = _run_tool()["llm"]
+    assert llm.model == "glm-4v-flash"
+    assert llm.base_url == "http://vision.example/v1"
+    assert llm.api_key == "sk-vision"
+    assert env.no_proxy_calls == ["http://vision.example/v1"]
+
+
+def test_tier3_structured_false_blocks_vision_model(env, mocked):
+    """结构化不过的模型即使视觉过也不自动选（比盲跑更糟）→ 回落主模型。"""
+    env.write(
+        'LLM_PROVIDERS=[{"name":"主商","base_url":"http://main.example/v1","api_key":"sk-main","models":["main-model"]},'
+        '{"name":"视觉商","base_url":"http://vision.example/v1","api_key":"sk-vision","models":["text-only"],'
+        '"caps":{"text-only":{"vision":true,"structured":false}}}]'
+    )
+    llm = _run_tool()["llm"]
+    assert llm.model == "main-model"
+    assert llm.base_url == "http://main.example/v1"
+
+
+def test_tier3_no_qualified_falls_back_to_main(env, mocked):
+    """池内无两维全过 → 主模型，行为与 032 一致。"""
+    env.write(MAIN_PROVIDERS + "\n")
+    llm = _run_tool()["llm"]
+    assert llm.model == "main-model"
+
+
+def test_tier1_settings_beats_pool(env, mocked):
+    """手配三字段永远优先于池中自动挑选。"""
+    env.write(POOL_PROVIDERS + "\nBROWSER_USE_LLM_MODEL=glm-4v-flash\n")
+    llm = _run_tool()["llm"]
+    assert llm.model == "glm-4v-flash"
+    assert llm.base_url == "http://main.example/v1"  # base 留空回落主 provider（032 语义）
+
+
+def test_pattern_guess_alone_does_not_qualify(env, mocked):
+    """pattern 推测视觉（structured 未验证）不算两维全过 → 不自动选。"""
+    env.write(
+        'LLM_PROVIDERS=[{"name":"主商","base_url":"http://main.example/v1","api_key":"sk-main","models":["main-model"]},'
+        '{"name":"视觉商","base_url":"http://vision.example/v1","api_key":"sk-vision","models":["gpt-4o-mini"]}]'
+    )
+    llm = _run_tool()["llm"]
+    assert llm.model == "main-model"  # gpt-4o-mini 命中 pattern 但 structured=None
+
+
+def test_pick_pool_direct(env):
+    """_pick_pool_vision_llm 直测：空池返回 None；合格返回三元组。"""
+    from crawagent.tools.advanced_tools import _pick_pool_vision_llm
+    env.write("LLM_PROVIDERS=[]\n")
+    assert _pick_pool_vision_llm() is None
+    env.write(POOL_PROVIDERS)
+    assert _pick_pool_vision_llm() == ("glm-4v-flash", "http://vision.example/v1", "sk-vision")
+
+
+def test_success_result_carries_model_header(env, monkeypatch):
+    """成功路径返回头带 [子Agent模型: ...] 标注（池选标 vision）。"""
+    import browser_use
+    monkeypatch.setattr(browser_use, "Agent", _OkAgent)
+    monkeypatch.setattr(browser_use, "Browser", lambda *a, **kw: object())
+
+    class _FakeLLM:
+        def __init__(self, model="", api_key="", base_url=""):
+            self.model, self.api_key, self.base_url = model, api_key, base_url
+
+    monkeypatch.setattr("browser_use.llm.openai.like.ChatOpenAILike", _FakeLLM)
+    env.write(POOL_PROVIDERS)
+    res = browser_use_navigate.func("https://example.com", "测试")
+    assert res.startswith("[子Agent模型: glm-4v-flash (vision)]\n页面内容")
+
+
 # ── 步进回调 _on_browser_step ──
 
 from types import SimpleNamespace  # noqa: E402

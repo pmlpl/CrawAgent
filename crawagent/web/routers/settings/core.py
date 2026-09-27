@@ -16,6 +16,7 @@ from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
 
 from crawagent.config.settings import get_settings
+from crawagent.llm.capabilities import get_caps
 from crawagent.llm.registry import load_providers
 from crawagent.web.state import reset_agent_cache
 
@@ -82,7 +83,7 @@ def _settings_snapshot() -> dict[str, Any]:
     providers = load_providers()
     return {
         "models": [
-            {"name": m, "provider": p.get("name", "")}
+            {"name": m, "provider": p.get("name", ""), "caps": get_caps(p, m)}
             for p in providers
             for m in (p.get("models") or [])
         ],
@@ -249,6 +250,115 @@ async def delete_model_route(payload: dict = Body(...)) -> dict[str, Any]:
         return {"ok": False, "error": "模型不存在"}
     entry["models"] = [m for m in entry["models"] if m != name]
     _persist_providers(providers)
+    return {"ok": True, **_settings_snapshot()}
+
+
+def _resolve_endpoint(payload: dict, *, need_model: bool) -> tuple[str, str, str] | str:
+    """解析 (model, base_url, api_key)：显式值优先；api_key 空/含掩码 * 时回落已存 provider 配置。"""
+    provider = str(payload.get("provider") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    base_url = str(payload.get("base_url") or "").strip()
+    api_key = str(payload.get("api_key") or "").strip()
+    if need_model and not model:
+        return "缺少模型 ID"
+    entry = _find_provider(load_providers(), provider) if provider else None
+    if entry:
+        base_url = base_url or entry.get("base_url", "")
+        if not api_key or "*" in api_key:  # 掩码回显值视同留空
+            api_key = entry.get("api_key", "")
+    if not base_url:
+        return "缺少 Base URL（服务商未配置或未填写）"
+    if not api_key:
+        return "该服务商还没有配置 API Key"
+    return model, base_url, api_key
+
+
+def _save_model_caps(provider: str, model: str, caps_update: dict) -> None:
+    """探测结果 / 手动勾选持久化到模型池（provider 条目的 caps 键）；重复探测覆盖。"""
+    if not provider or not model:
+        return
+    providers = load_providers()
+    entry = _find_provider(providers, provider)
+    if entry is None:
+        return
+    entry.setdefault("caps", {}).setdefault(model, {}).update(caps_update)
+    _persist_providers(providers)
+
+
+@router.post("/api/models/discover")
+async def discover_models_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """按 Base URL + Key 拉取该端点的 OpenAI 兼容模型清单（GET {base_url}/models）。"""
+    import httpx
+
+    resolved = _resolve_endpoint(payload, need_model=False)
+    if isinstance(resolved, str):
+        return {"ok": False, "error": resolved}
+    _, base_url, api_key = resolved
+
+    url = base_url.rstrip("/") + "/models"
+    try:
+        r = await asyncio.to_thread(
+            httpx.get, url, headers={"Authorization": f"Bearer {api_key}"}, timeout=10.0,
+        )
+    except Exception:
+        return {"ok": False, "error": f"连不上 {base_url}（检查地址是否正确、服务是否在跑）"}
+    if r.status_code in (401, 403):
+        return {"ok": False, "error": "鉴权失败：API Key 无效或未授权（401）"}
+    if r.status_code == 404:
+        return {"ok": False, "error": f"{url} 返回 404：端点不支持模型发现（确认 Base URL 以 /v1 结尾且为 OpenAI 兼容端点）"}
+    if r.status_code != 200:
+        return {"ok": False, "error": f"拉取失败：HTTP {r.status_code}"}
+    try:
+        data = r.json()
+    except ValueError:
+        return {"ok": False, "error": "响应不是 JSON：该端点可能不是 OpenAI 兼容端点"}
+    items = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return {"ok": False, "error": "响应格式不符合 OpenAI /v1/models 结构"}
+    models = sorted(
+        ({"id": str(it.get("id") or ""), "owned_by": str(it.get("owned_by") or "")}
+         for it in items if isinstance(it, dict) and it.get("id")),
+        key=lambda x: x["id"],
+    )
+    return {"ok": True, "models": models}
+
+
+@router.post("/api/models/probe")
+async def probe_model_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """两维能力探测（视觉 + JSON 结构化输出）一次跑完，结果带模型原话并持久化到模型池。
+
+    判定标准：答对颜色才算视觉（API 不报错 ≠ 能看图，032 实测教训）；
+    可解析 JSON 即结构化过（镜像 browser-use 的 json_schema 机制）。
+    """
+    from crawagent.llm.probe import probe_structured, probe_vision
+
+    resolved = _resolve_endpoint(payload, need_model=True)
+    if isinstance(resolved, str):
+        return {"ok": False, "error": resolved}
+    model, base_url, api_key = resolved
+
+    vision_ok, vision_reply = await asyncio.to_thread(probe_vision, base_url, api_key, model)
+    structured_ok, structured_reply = await asyncio.to_thread(probe_structured, base_url, api_key, model)
+
+    _save_model_caps(str(payload.get("provider") or "").strip(), model, {
+        "vision": vision_ok, "vision_reply": vision_reply,
+        "structured": structured_ok, "structured_reply": structured_reply,
+    })
+    return {
+        "ok": True, "model": model,
+        "vision": vision_ok, "vision_reply": vision_reply,
+        "structured": structured_ok, "structured_reply": structured_reply,
+    }
+
+
+@router.post("/api/models/caps/manual")
+async def caps_manual_route(payload: dict = Body(...)) -> dict[str, Any]:
+    """视觉手动勾选覆盖（用户声明，默认不勾；显式探测结果永远优先于手动勾选）。"""
+    provider = str(payload.get("provider") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    if not provider or not model:
+        return {"ok": False, "error": "缺少 provider 或 model"}
+    _save_model_caps(provider, model, {"vision_manual": bool(payload.get("vision_manual"))})
     return {"ok": True, **_settings_snapshot()}
 
 

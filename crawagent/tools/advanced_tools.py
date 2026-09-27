@@ -200,6 +200,30 @@ def crawl4ai_deep_crawl(url: str, max_pages: int = 50, lang: str = "") -> str:
     return "\n".join(lines)
 
 
+def _pick_pool_vision_llm() -> tuple[str, str, str] | None:
+    """模型池中第一个两维全过的模型（033）：vision 与 structured 都显式为 True。
+
+    pattern 推测 / 手动勾选可以让 vision 生效（get_caps 合并语义），
+    但 structured 只认探测结果——两维没全过就不自动选（browser-use 靠
+    json_schema 结构化输出拿模型动作，JSON 关不过比盲跑更糟）。
+
+    Returns:
+        (model, base_url, api_key)，无合格模型返回 None（调用方回落主模型）。
+    """
+    from crawagent.llm.capabilities import get_caps
+    from crawagent.llm.registry import load_providers
+
+    for p in load_providers():
+        base, key = p.get("base_url", ""), p.get("api_key", "")
+        if not base or not key:
+            continue
+        for m in p.get("models") or []:
+            caps = get_caps(p, m)
+            if caps["vision"] is True and caps["structured"] is True:
+                return m, base, key
+    return None
+
+
 @tool
 def browser_use_navigate(url: str, task: str) -> str:
     """Drive a real browser via an LLM agent to complete an interactive task.
@@ -210,9 +234,11 @@ def browser_use_navigate(url: str, task: str) -> str:
     get the content because the page REQUIRES interaction, e.g. "登录后把我的订单列表抓
     下来"、"点'下一页'翻完所有页"、"填搜索框搜 X 再抓结果".
 
-    The LLM driving the browser is CrawAgent's own configured LLM (get_llm) — no separate
-    key needed. Light/cheap models are fine for browser steps; the heavy reasoning stays
-    in the main agent. Needs Playwright browsers installed (crawl4ai-setup / playwright
+    The LLM driving the browser is auto-selected (cheap/fast is fine for browser
+    steps): manual browser-subagent config > BROWSER_USE_LLM_* env > first verified
+    vision model in the model pool > main LLM. The result starts with a
+    "[子Agent模型: ...]" header showing which model actually drove the browser.
+    Needs Playwright browsers installed (crawl4ai-setup / playwright
     install). Browser may be visible or headless; this is slower than crawl_webpage —
     only use it when interaction is truly required.
 
@@ -231,12 +257,14 @@ def browser_use_navigate(url: str, task: str) -> str:
     except Exception as e:
         return f"[ERROR] browser_use 未安装或损坏: {type(e).__name__}: {e}"
 
-    # LLM 配置（三档，浏览器操作用便宜模型即可）：
+    # LLM 配置（四档，浏览器操作用便宜模型即可）：
     #  1) 设置页「浏览器子 Agent」手配（Settings.browser_use_llm_model，032）：
     #     base_url / api_key 留空时回落主 provider 对应值（只填模型名即可复用现有服务商）
     #  2) os.environ 的 BROWSER_USE_LLM_* 兜底（向后兼容已手写 .env 的用户，语义原样）：
     #     _API_KEY（+可选 _BASE_URL/_MODEL）独立 cheap key；仅 _MODEL 复用主 provider 换模型
-    #  3) 都无：主 LLM（现状）
+    #  3) 模型池中第一个两维全过的模型（033：vision + structured 显式探测通过）
+    #  4) 都无：主 LLM（现状，可能盲跑）
+    picked_label = ""
     try:
         from crawagent.config.settings import get_settings
         from crawagent.llm.registry import resolve_model
@@ -257,17 +285,33 @@ def browser_use_navigate(url: str, task: str) -> str:
             base = cfg_base or main_base
             llm = ChatOpenAILike(model=cfg_model, api_key=cfg_key or main_key, base_url=base)
             _ensure_no_proxy_for(base)
+            picked_label = cfg_model
         elif env_key:
             base = env_base or "https://api.openai.com/v1"
             model = env_model or "gpt-4o-mini"
             llm = ChatOpenAILike(model=model, api_key=env_key, base_url=base)
             _ensure_no_proxy_for(base)
-        else:
-            # 复用 CrawAgent provider（.env LLM_PROVIDERS 解析）
+            picked_label = model
+        elif env_model:
+            # 复用 CrawAgent provider 只换模型（os.environ 的 _MODEL 通常已被 pydantic
+            # 并入 Settings 走第①档；这里仅兜极少数未经 pydantic 的进程环境）
             model_name, base_url, api_key, _adapter = resolve_model(None)
-            model = env_model or model_name  # 允许只换模型不换 key
-            llm = ChatOpenAILike(model=model, api_key=api_key, base_url=base_url)
+            llm = ChatOpenAILike(model=env_model, api_key=api_key, base_url=base_url)
             _ensure_no_proxy_for(base_url)
+            picked_label = env_model
+        else:
+            # ③ 池中第一个两维全过的模型；无合格模型回落主模型（④）
+            pool = _pick_pool_vision_llm()
+            if pool:
+                model, base, key = pool
+                llm = ChatOpenAILike(model=model, api_key=key, base_url=base)
+                _ensure_no_proxy_for(base)
+                picked_label = f"{model} (vision)"
+            else:
+                model_name, base_url, api_key, _adapter = resolve_model(None)
+                llm = ChatOpenAILike(model=model_name, api_key=api_key, base_url=base_url)
+                _ensure_no_proxy_for(base_url)
+                picked_label = f"{model_name} (主模型兜底，池中无两维全过模型)"
     except Exception as e:
         return f"[ERROR] 无法构造 LLM（检查 .env 的 LLM_PROVIDERS 或 BROWSER_USE_LLM_* 环境变量）: {e}"
 
@@ -294,6 +338,7 @@ def browser_use_navigate(url: str, task: str) -> str:
         out = asyncio.run(_run())
         if len(out) > 20000:
             out = out[:20000] + f"\n\n... [truncated, original {len(out)} chars]"
-        return out
+        # 挑选结果让用户可感知（033）：自动选了谁、为什么
+        return f"[子Agent模型: {picked_label}]\n{out}"
     except Exception as e:
         return f"[ERROR] 浏览器交互失败: {type(e).__name__}: {e}"

@@ -51,6 +51,9 @@ const state = reactive({
     baseUrl: '',
     apiKey: '',
   },
+  // ---- 模型能力发现与探测（033）----
+  discovering: false,      // 获取模型列表进行中
+  probing: '',             // 正在探测的模型 "provider/name"（空 = 空闲）
 })
 
 // 简化视图：给 App.vue/Header 等只读场景用
@@ -340,6 +343,56 @@ async function saveSettingsFields(payload) {
   }
 }
 
+// ---------- 模型能力发现与探测（033）----------
+
+// 按 Base URL + Key 拉取该端点的 OpenAI 兼容模型清单（key 留空/掩码时服务端取已存 Key）
+async function discoverModels(form) { // {provider?, apiKey?, baseUrl?}
+  state.discovering = true
+  try {
+    return await _post('/api/models/discover', {
+      provider: form.provider || '',
+      api_key: form.apiKey || '',
+      base_url: form.baseUrl || '',
+    })
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) }
+  } finally {
+    state.discovering = false
+  }
+}
+
+// 两维能力探测（视觉 + JSON 结构化输出），结果持久化到模型池并随快照回显
+async function probeModel(m) { // {name, provider}
+  const key = m.provider + '/' + m.name
+  state.probing = key
+  try {
+    const data = await _post('/api/models/probe', { provider: m.provider, model: m.name })
+    if (data.ok) await load() // 快照里 models[].caps 已含最新徽章与原话
+    return data
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) }
+  } finally {
+    state.probing = ''
+  }
+}
+
+// 视觉手动勾选覆盖（用户声明；显式探测结果永远优先于手动勾选）
+async function saveManualVision(m, checked) { // {name, provider}
+  try {
+    const data = await _post('/api/models/caps/manual', {
+      provider: m.provider, model: m.name, vision_manual: !!checked,
+    })
+    if (data.ok) {
+      await load()
+      return true
+    }
+    _tip(data.error || '保存失败', false)
+  } catch (e) {
+    _tip('保存失败：' + (e?.message || e), false)
+  }
+  return false
+}
+
 export function useSettings() {
   return {
     state, config,
@@ -347,5 +400,6 @@ export function useSettings() {
     saveThinking, test, open, close, setSelectedModel,
     loadEcosystem, saveMcpServers, toggleServer, removeServer, addMcpServer, openEcoFolder,
     saveStartBrowser, saveSettingsFields,
+    discoverModels, probeModel, saveManualVision,
   }
 }
