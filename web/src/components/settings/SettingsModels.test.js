@@ -51,14 +51,13 @@ beforeEach(() => {
 })
 
 describe('SettingsModels：模型列表与能力徽章', () => {
-  it('渲染模型表的能力列：两维徽章 + 待测', () => {
+  it('渲染模型表的能力列：探测过的显示徽章，未验证不显示', () => {
     const wrapper = mount(SettingsModels)
     expect(wrapper.text()).toContain('能力')
     expect(wrapper.text()).toContain('视觉 ✗')      // glm-5.2 探测过 = 明确不过
     expect(wrapper.text()).toContain('JSON ✓')
     expect(wrapper.text()).toContain('视觉 ✓推测')  // glm-4v-flash pattern 命中
-    expect(wrapper.text()).toContain('JSON ?')      // 未验证
-    expect(wrapper.text()).toContain('视觉 ?')      // deepseek-chat 无 caps
+    expect(wrapper.text()).not.toContain('?')       // 未验证不显示徽章（问号视觉噪音已去掉）
   })
 
   it('每行有测试按钮，点击调 probeModel 并展示模型原话', async () => {

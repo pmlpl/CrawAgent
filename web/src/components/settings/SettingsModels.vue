@@ -77,11 +77,11 @@ const visionLabel = (m) => {
     if (c.vision_source === 'probe') return '视觉 ✓'
     return c.vision_source === 'manual' ? '视觉 ✓手动' : '视觉 ✓推测'
   }
-  return c.vision === false ? '视觉 ✗' : '视觉 ?'
+  return c.vision === false ? '视觉 ✗' : ''
 }
 const jsonLabel = (m) => {
   const c = m.caps || {}
-  return c.structured === true ? 'JSON ✓' : c.structured === false ? 'JSON ✗' : 'JSON ?'
+  return c.structured === true ? 'JSON ✓' : c.structured === false ? 'JSON ✗' : ''
 }
 
 function resetForm() {
@@ -181,7 +181,10 @@ function onSubAgentPick(e) {
     state.browserAgent.model = v
   }
 }
-const poolLabel = (m) => `${m.name}（${visionLabel(m)} ${jsonLabel(m)}）`
+const poolLabel = (m) => {
+  const caps = [visionLabel(m), jsonLabel(m)].filter(Boolean).join(' ')
+  return caps ? `${m.name}（${caps}）` : m.name
+}
 </script>
 
 <template>
@@ -210,8 +213,8 @@ const poolLabel = (m) => `${m.name}（${visionLabel(m)} ${jsonLabel(m)}）`
               <td class="mono">{{ m.name }}</td>
               <td>{{ m.provider }}</td>
               <td class="caps-cell">
-                <span class="cap" :class="capClass(m.caps?.vision)" :title="m.caps?.vision_reply || ''">{{ visionLabel(m) }}</span>
-                <span class="cap" :class="capClass(m.caps?.structured)" :title="m.caps?.structured_reply || ''">{{ jsonLabel(m) }}</span>
+                <span v-if="visionLabel(m)" class="cap" :class="capClass(m.caps?.vision)" :title="m.caps?.vision_reply || ''">{{ visionLabel(m) }}</span>
+                <span v-if="jsonLabel(m)" class="cap" :class="capClass(m.caps?.structured)" :title="m.caps?.structured_reply || ''">{{ jsonLabel(m) }}</span>
                 <label class="cap-manual" title="手动声明支持视觉（用户已知中转映射真相时勾选；探测复核会覆盖）">
                   <input type="checkbox" class="switch-input" :checked="m.caps?.vision_manual" @change="toggleManualVision(m, $event.target.checked)" />
                   <span class="switch-track"><span class="switch-knob" /></span>
@@ -219,12 +222,14 @@ const poolLabel = (m) => `${m.name}（${visionLabel(m)} ${jsonLabel(m)}）`
                 </label>
                 <button
                   type="button"
-                  class="btn-ghost btn-sm"
+                  class="btn-ghost btn-sm btn-busy"
+                  :class="{ 'is-busy': state.probing === m.provider + '/' + m.name }"
                   :disabled="state.probing === m.provider + '/' + m.name"
                   title="两维探测：看图 + JSON 结构化输出（一次跑完）"
                   @click="probe(m)"
                 >
-                  <span v-if="state.probing === m.provider + '/' + m.name" class="spin" />测试
+                  <span class="btn-label">测试</span>
+                  <span v-if="state.probing === m.provider + '/' + m.name" class="spin spin-center" />
                 </button>
               </td>
               <td class="row-actions">
@@ -283,11 +288,13 @@ const poolLabel = (m) => `${m.name}（${visionLabel(m)} ${jsonLabel(m)}）`
             <button
               v-if="canDiscover"
               type="button"
-              class="ghost"
+              class="ghost btn-busy"
+              :class="{ 'is-busy': state.discovering }"
               :disabled="state.discovering"
               @click="discover"
             >
-              <span v-if="state.discovering" class="spin" />获取模型列表
+              <span class="btn-label">获取模型列表</span>
+              <span v-if="state.discovering" class="spin spin-center" />
             </button>
           </div>
           <datalist id="discovered-model-list">
@@ -330,11 +337,13 @@ const poolLabel = (m) => `${m.name}（${visionLabel(m)} ${jsonLabel(m)}）`
 
         <div class="actions">
           <button type="button" class="btn-ghost" @click="resetForm">重置</button>
-          <button type="button" class="btn-ghost" :disabled="state.testing || !form.model" @click="test(form)">
-            <span v-if="state.testing" class="spin" />测试连接
+          <button type="button" class="btn-ghost btn-busy" :class="{ 'is-busy': state.testing }" :disabled="state.testing || !form.model" @click="test(form)">
+            <span class="btn-label">测试连接</span>
+            <span v-if="state.testing" class="spin spin-center" />
           </button>
-          <button type="submit" class="btn-primary" :disabled="state.saving || !form.model">
-            <span v-if="state.saving" class="spin" />{{ editing ? '保存修改' : '添加模型' }}
+          <button type="submit" class="btn-primary btn-busy" :class="{ 'is-busy': state.saving }" :disabled="state.saving || !form.model">
+            <span class="btn-label">{{ editing ? '保存修改' : '添加模型' }}</span>
+            <span v-if="state.saving" class="spin spin-center" />
           </button>
           <button type="button" class="ghost" @click="showForm = false">取消</button>
         </div>
@@ -387,8 +396,9 @@ const poolLabel = (m) => `${m.name}（${visionLabel(m)} ${jsonLabel(m)}）`
         <span class="hint">已配置时回显脱敏掩码（****xxxx），含 * 视为掩码不回写；清空保存 = 清除。Base URL / Key 留空时回落主服务商对应值（只填模型名即可复用）</span>
       </label>
       <div class="actions" style="justify-content: flex-start">
-        <button type="button" class="btn-primary" :disabled="savingSubAgent" @click="saveBrowserAgent">
-          <span v-if="savingSubAgent" class="spin" />保存
+        <button type="button" class="btn-primary btn-busy" :class="{ 'is-busy': savingSubAgent }" :disabled="savingSubAgent" @click="saveBrowserAgent">
+          <span class="btn-label">保存</span>
+          <span v-if="savingSubAgent" class="spin spin-center" />
         </button>
       </div>
       <div v-if="subAgentTip" class="result" :class="subAgentTip.ok ? 'ok' : 'err'" style="margin-top: 8px">
@@ -399,7 +409,7 @@ const poolLabel = (m) => `${m.name}（${visionLabel(m)} ${jsonLabel(m)}）`
 </template>
 
 <style scoped>
-/* 能力徽章（033）：绿=通过（accent 口径）、红=明确不过、虚线=未验证待测 */
+/* 能力徽章（033）：绿=通过、红=明确不过；未验证不显示徽章 */
 .caps-cell {
   white-space: nowrap;
 }
@@ -422,9 +432,18 @@ const poolLabel = (m) => `${m.name}（${visionLabel(m)} ${jsonLabel(m)}）`
   color: var(--danger, #e5484d);
   border-color: color-mix(in srgb, var(--danger, #e5484d) 35%, transparent);
 }
-.cap-unknown {
-  color: var(--dim);
-  border-style: dashed;
+/* loading 按钮：spinner 绝对定位居中覆盖、文字藏形保占 —— 按钮尺寸不因 loading 变化 */
+.btn-busy {
+  position: relative;
+}
+.btn-busy.is-busy .btn-label {
+  visibility: hidden;
+}
+.btn-busy .spin-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  margin: -6.5px 0 0 -6.5px;
 }
 
 /* 视觉手动勾选：迷你滑动开关（沿用全局滑动 switch 偏好） */
