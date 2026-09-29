@@ -46,6 +46,34 @@ const useChatStore = defineStore('chat', () => {
   const lastStatus = computed(() => statusBySession[session.value] || null)
   const sessions = ref([]) // 侧栏会话列表 [{id, preview}]
 
+  // ---------- 工作文件夹（变更 034）----------
+  // workDir：当前会话已生效的工作文件夹（空 = 未配置，走 output/downloads 默认落点）。
+  // pendingWorkDir：侧栏选好但还没随首条消息发出去的路径（新会话生效一次后清空）。
+  const workDir = ref('')
+  const pendingWorkDir = ref('')
+
+  function setPendingWorkDir(path) {
+    pendingWorkDir.value = (path || '').trim()
+  }
+
+  function clearPendingWorkDir() {
+    pendingWorkDir.value = ''
+  }
+
+  // 弹系统原生文件夹选择框（后端 tkinter）。返回后端响应：
+  // {ok,path} / {ok,canceled} / {ok:false,error}（前端据此回退手输）。
+  async function pickFolder() {
+    try {
+      const r = await fetch('/api/fs/pick-folder', { method: 'POST' })
+      const data = await r.json()
+      if (data?.ok && data.path) setPendingWorkDir(data.path)
+      else if (data?.ok && data.canceled) { /* 用户取消：保持原状 */ }
+      return data
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  }
+
   // 正在执行的工具步：最后一个 trace 里最后一个未完成的 tool step
   // （LangGraph 顺序执行工具，同一时刻最多一个在跑）
   const runningTool = computed(() => {
@@ -451,6 +479,8 @@ const useChatStore = defineStore('chat', () => {
       }
       currentTrace = null
       if (data.status) statusBySession[session.value] = data.status
+      // 会话工作文件夹回读（034）：刷新/切会话后头部展示不丢
+      workDir.value = data.work_dir || ''
       // 恢复上次未解决的报错（后端持久化，下一轮成功才清除），刷新后红条不丢
       if (data.last_error && data.last_error.message) {
         pushError(data.last_error.message, { restored: true, ts: data.last_error.ts })
@@ -476,7 +506,15 @@ const useChatStore = defineStore('chat', () => {
     typing.value = true
     startTick()
     startSessionPoll()
-    ws.send(JSON.stringify({ type: 'message', content, model: settings.state.model }))
+    // 工作文件夹（034）：仅在会话尚未绑定且用户选了路径时随首条消息带上，
+    // 后端落库后该会话全部产物直接落那里。乐观置位 + 清 pending。
+    const payload = { type: 'message', content, model: settings.state.model }
+    if (pendingWorkDir.value && !workDir.value) {
+      payload.work_dir = pendingWorkDir.value
+      workDir.value = pendingWorkDir.value
+    }
+    pendingWorkDir.value = ''
+    ws.send(JSON.stringify(payload))
     return true
   }
 
@@ -500,6 +538,7 @@ const useChatStore = defineStore('chat', () => {
     currentTrace = null
     traceRoundId = 0
     aiStreams.clear()
+    workDir.value = '' // loadHistory 回读目标会话的值，先清避免残留上一会话的
     connect()
     loadHistory()
   }
@@ -555,6 +594,7 @@ const useChatStore = defineStore('chat', () => {
     currentTrace = null
     traceRoundId = 0
     aiStreams.clear()
+    workDir.value = '' // 新会话未绑定；pendingWorkDir 保留（用户先选文件夹再点新对话的场景）
     if (doConnect) connect()
   }
 
@@ -617,9 +657,11 @@ const useChatStore = defineStore('chat', () => {
   return {
     // state
     items, busy, connected, typing, session, lastDraft, lastStatus, sessions, draft, currentProgress, runningElapsed,
+    workDir, pendingWorkDir,
     // actions
     connect, loadHistory, send, stop, newSession, switchSession, fetchSessions, reconnect, deleteSession,
     archiveSession, batchDeleteSessions, renameSession, answerAsk,
+    setPendingWorkDir, clearPendingWorkDir, pickFolder,
   }
 })
 

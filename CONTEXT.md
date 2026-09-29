@@ -31,3 +31,13 @@ _Avoid_: 与 **ZCode 工作流技能**（grill/implement/tdd，在 `~/.agents/`�
 **插件 (Plugin)**:
 `plugins/` 下带 `plugin.json` manifest 的目录，可同时携带 `tools/*.py`（自动扫描的 @tool）和 `skills/`（CrawAgent skill）。靠文件系统发现，启动期扫描。
 _Avoid_: 与 MCP server 混——插件是本地代码包，MCP server 是协议端点。
+
+### 会话与产物
+
+**工作文件夹 (work_dir)**:
+会话级产物落点（变更 034）：新建对话时由用户弹系统原生对话框选定，存 meta.db `session_titles.work_dir`，随首条 WebSocket 消息 `work_dir` 字段入库。配置后该会话全部产物（文本/媒体/脚本）直接落该文件夹——不套会话子目录，媒体保留工具分类子目录（images/ 等），同时它是路径安全校验的边界（写到文件夹外即拒绝）。
+_Avoid_: 与 014 的"会话产物子目录"（`output/<会话名>/`，无 work_dir 时的兜底默认）混用；与设置页全局"产物目录"混用（那是无会话粒度的根）。
+
+**档案入库询问 (ARCHIVE-ASK)**:
+抓取类任务完成时 AI MUST 用 ask_user 问「本次抓取的内容要存入档案吗？」（存入档案 / 不用 / 本会话不再询问），用户拍板后才 `save_record` 入知识库。取代旧行为"抓取成功即静默 save_record"。"本会话不再询问"由对话上下文自持，不落库。
+_Avoid_: 跳过询问直接入库；对单页速览 / 失败任务 / 用户已拒绝过的会话重复弹问。

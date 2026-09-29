@@ -12,6 +12,7 @@ no cookies, no browser.
 """
 import json
 import re
+from pathlib import Path
 
 from langchain_core.tools import tool
 
@@ -83,7 +84,8 @@ def download_social_media(url: str, include: str = "video,cover,comments", subdi
         include: 英文逗号分隔的下载清单，支持：
             "video"（视频）、"audio"（音频）、"cover"（封面）、
             "images"（图集）、"comments"（评论）。默认 "video,cover,comments"
-        subdir: 项目根下的子目录（默认 "downloads"）
+        subdir: 基准目录下的子目录（默认 "downloads"）。
+            本会话设置了工作文件夹时基准是工作文件夹，否则是项目 downloads/。
 
     返回：
         JSON 汇总，每项下载附带本地绝对路径。
@@ -96,19 +98,25 @@ def download_social_media(url: str, include: str = "video,cover,comments", subdi
     if not include_set:
         include_set = {"video", "cover", "comments"}
 
+    from crawagent.tools.session_dir import current_work_dir
+
     settings = get_settings()
     platform = data.get("platform", "unknown")
     post_id = data.get("aweme_id") or data.get("bvid") or "item"
     title = _safe_name(data.get("title", ""))
-    base = settings.project_root.resolve()
-    downloads_root = settings.downloads_dir.resolve()
+    # 变更 034：会话工作文件夹优先作为基准（平台_作品号 子目录保留）；否则项目 downloads/
+    work_dir = current_work_dir()
+    if work_dir:
+        downloads_root = Path(work_dir).resolve()
+    else:
+        downloads_root = settings.downloads_dir.resolve()
     # 默认 subdir="downloads" 时，等同于直接往 downloads_root/<平台>_<id> 写
     if subdir.strip("/\\") in ("downloads", ""):
         out_dir = (downloads_root / f"{platform}_{post_id}").resolve()
     else:
         out_dir = (downloads_root / subdir / f"{platform}_{post_id}").resolve()
-    if not str(out_dir).startswith(str(base)):
-        return json.dumps({"error": "subdir escapes project root"}, ensure_ascii=False)
+    if not out_dir.is_relative_to(downloads_root):
+        return json.dumps({"error": "subdir escapes downloads root"}, ensure_ascii=False)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     headers = {"User-Agent": MOBILE_UA}

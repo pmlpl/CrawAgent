@@ -151,6 +151,15 @@ onMounted(() => {
       连接已断开 · <b>点击重新连线</b>
     </div>
 
+    <!-- 工作文件夹提示条（034）：本会话产物去哪，始终可感知 -->
+    <div v-if="chat.workDir" class="workdir-bar" :title="chat.workDir">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+      </svg>
+      <span class="wd-label">工作文件夹</span>
+      <span class="wd-value">{{ chat.workDir }}</span>
+    </div>
+
     <!-- 消息流（含轮次导航 + 回到底部） -->
     <div class="stream-wrap">
       <main class="stream" ref="streamRef" @scroll="onScroll">
@@ -437,6 +446,35 @@ onMounted(() => {
   cursor: pointer;
 }
 .banner b { color: var(--accent); }
+
+/* 工作文件夹提示条：与 banner 同层的窄条，路径超长省略、hover 全文 */
+.workdir-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  max-width: var(--maxw);
+  margin: 8px auto 0;
+  padding: 6px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--dim);
+}
+.workdir-bar .wd-label {
+  flex: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+.workdir-bar .wd-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .typing {
   align-self: flex-start;

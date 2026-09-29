@@ -108,20 +108,45 @@ def _unique_path(dir_path: Path, stem: str, ext: str) -> Path:
         i += 1
 
 
+def _resolve_out_dir(subdir: str) -> tuple[Path, str]:
+    """解析媒体落点目录（变更 034）：work_dir 优先，否则 downloads/。
+
+    返回 (out_dir, error)：error 非空表示 subdir 逃逸，out_dir 无效。
+    work_dir 非空时以工作文件夹为基准（分类 subdir 保留——分类是工具语义，
+    用户否掉的是"会话子目录"那层），边界校验基准同步改为 work_dir。
+    抽成纯函数便于离线测试（不触发网络下载）。
+    """
+    from crawagent.tools.session_dir import current_work_dir
+
+    settings = get_settings()
+    work_dir = current_work_dir()
+    if work_dir:
+        base = Path(work_dir).resolve()
+        downloads_root = base
+    else:
+        base = settings.project_root.resolve()
+        downloads_root = settings.downloads_dir.resolve()
+    out_dir: Path = (downloads_root / subdir).resolve()
+    if not out_dir.is_relative_to(downloads_root) or not str(out_dir).startswith(str(base)):
+        return out_dir, "subdir escapes downloads root"
+    return out_dir, ""
+
+
 @tool
 def download_images(urls: str, subdir: str = "wallpapers", referer: str = "") -> str:
-    """批量下载图片或视频到项目下载目录 downloads/。
+    """批量下载图片或视频。会话配置了工作文件夹时直接落该文件夹（分类子目录保留），
+    否则落项目下载目录 downloads/。
 
     适用场景：用户要求保存图片/视频到本地（壁纸缩略图、预告片预览、
-    社交平台封面图等）。**所有媒体文件必须放到 downloads/ 子目录下**
-    （项目根/downloads/<子目录名>），绝对不允许写到别的地方。
+    社交平台封面图等）。默认写到 downloads/ 子目录（项目根/downloads/<子目录名>）；
+    若本会话设置了工作文件夹，则写 <工作文件夹>/<子目录名>。绝对不允许写到别的地方。
 
     参数：
         urls: 一个或多个 URL。支持格式：
               - 单条 URL
               - 英文逗号 / 换行 / 分号 / 空格分隔
               - JSON 数组字符串，如 '["http://a.jpg","http://b.jpg"]'
-        subdir: downloads/ 下的子目录名（默认 "wallpapers"）。
+        subdir: 落点下的子目录名（分类，默认 "wallpapers"）。
                 建议值："wallpapers" / "douyin_videos" / "bilibili_covers"
         referer: 可选。针对有热链保护的站点传入 Referer 头
                  （传目标站点主页 URL，例 "https://example.com/"）。
@@ -133,12 +158,9 @@ def download_images(urls: str, subdir: str = "wallpapers", referer: str = "") ->
     if not url_list:
         return "download_images failed: no valid urls provided"
 
-    settings = get_settings()
-    base = settings.project_root.resolve()
-    downloads_root = settings.downloads_dir.resolve()
-    out_dir: Path = (downloads_root / subdir).resolve()
-    if not out_dir.is_relative_to(downloads_root) or not str(out_dir).startswith(str(base)):
-        return "download_images failed: subdir escapes downloads root"
+    out_dir, err = _resolve_out_dir(subdir)
+    if err:
+        return f"download_images failed: {err}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     headers = {"User-Agent": UA}

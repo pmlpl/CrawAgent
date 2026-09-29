@@ -30,6 +30,7 @@ from crawagent.web.routers import sessions as sessions_router
 from crawagent.web.routers import settings as settings_router
 from crawagent.web.routers import sites as sites_router
 from crawagent.web.routers import dist as dist_router
+from crawagent.web.routers import fs as fs_router
 from crawagent.web.state import _active_turns
 from crawagent.web.turn_engine import _stream_turn
 
@@ -150,6 +151,7 @@ app.include_router(sessions_router.router)
 app.include_router(settings_router.router)
 app.include_router(sites_router.router)
 app.include_router(dist_router.router)
+app.include_router(fs_router.router)
 
 
 @app.get("/")
@@ -223,6 +225,18 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             if not text:
                 continue
             model = str(payload.get("model") or "").strip() or None
+
+            # 首条消息可携带会话工作文件夹（变更 034）：仅在该会话尚未设置时生效，
+            # 会话中途不带 work_dir 的消息不改变已有落点。目录创建失败则忽略
+            # （该会话退回 014 默认落点），不阻断本轮对话。
+            work_dir = str(payload.get("work_dir") or "").strip()
+            if work_dir:
+                from crawagent.storage.meta_store import get_work_dir, set_work_dir
+                try:
+                    if not get_work_dir(session_id):
+                        set_work_dir(session_id, work_dir)
+                except Exception as e:
+                    print(f"[WORK_DIR] {session_id}: 设置失败（忽略，走默认落点）: {e}")
 
             # 检查是否有正在运行的任务
             active = _active_turns.get(session_id)

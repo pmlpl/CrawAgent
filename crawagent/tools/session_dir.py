@@ -41,3 +41,24 @@ def session_subdir() -> str:
     if not name:
         name = sid[:8]
     return name
+
+
+def current_work_dir() -> str:
+    """当前会话的工作文件夹（变更 034）；未配置 / 无会话 / 任何异常返回空串。
+
+    非空时它是该会话全部产物（文本/媒体/脚本）的落点基准，也是路径安全
+    校验的边界——用户选的文件夹就是边界，AI 不得写出到它之外。
+    防御策略与 session_subdir() 同款：落点解析失败不应杀死工具调用。
+    """
+    try:
+        from crawagent.graph.agent import ctx_session_id
+        sid = ctx_session_id.get("") or ""
+    except Exception:
+        return ""
+    if not sid:
+        return ""
+    try:
+        from crawagent.storage.meta_store import get_work_dir
+        return get_work_dir(sid) or ""
+    except Exception:
+        return ""

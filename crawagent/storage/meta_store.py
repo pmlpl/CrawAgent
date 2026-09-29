@@ -56,8 +56,23 @@ def get_meta_conn(settings: Settings | None = None) -> sqlite3.Connection:
             "CREATE TABLE IF NOT EXISTS session_errors ("
             "thread_id TEXT PRIMARY KEY, message TEXT NOT NULL, ts TEXT NOT NULL)"
         )
+        _migrate_meta_columns(_meta_conn)
         _meta_conn.commit()
     return _meta_conn
+
+
+def _migrate_meta_columns(conn: sqlite3.Connection) -> None:
+    """兼容迁移：给老库 session_titles 补 work_dir 列（变更 034 会话工作文件夹）。
+
+    SQLite ADD COLUMN 无损；并发首启另一线程可能已完成迁移，duplicate column 直接忽略。
+    """
+    cursor = conn.execute("PRAGMA table_info(session_titles)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    if "work_dir" not in existing_cols:
+        try:
+            conn.execute("ALTER TABLE session_titles ADD COLUMN work_dir TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
 
 
 def get_session_title(thread_id: str, settings: Settings | None = None) -> str:
@@ -70,6 +85,42 @@ def get_session_title(thread_id: str, settings: Settings | None = None) -> str:
         return row[0] if row else ""
     except Exception:
         return ""
+
+
+def get_work_dir(thread_id: str, settings: Settings | None = None) -> str:
+    """取会话工作文件夹（变更 034）；无记录 / 空 / 查询失败返回空串。
+
+    空串 = 未配置，工具层走 014 默认落点（output/<会话名>/ + downloads/<分类>/）。
+    """
+    try:
+        conn = get_meta_conn(settings)
+        row = conn.execute(
+            "SELECT work_dir FROM session_titles WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
+def set_work_dir(thread_id: str, work_dir: str, settings: Settings | None = None) -> str:
+    """设置会话工作文件夹：abspath 规范化 + 不存在自动创建后入库。
+
+    返回规范化后的绝对路径；目录创建失败抛 OSError（调用方决定是否兜底）。
+    空 work_dir 视为清除（落回空串）。
+    """
+    cleaned = (work_dir or "").strip()
+    conn = get_meta_conn(settings)
+    if cleaned:
+        import os
+        cleaned = os.path.abspath(cleaned)
+        os.makedirs(cleaned, exist_ok=True)
+    conn.execute(
+        "INSERT INTO session_titles (thread_id, title, work_dir) VALUES (?, '', ?) "
+        "ON CONFLICT(thread_id) DO UPDATE SET work_dir = excluded.work_dir",
+        (thread_id, cleaned),
+    )
+    conn.commit()
+    return cleaned
 
 
 def reset_meta_conn() -> None:

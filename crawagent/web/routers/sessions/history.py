@@ -161,7 +161,14 @@ async def history(session_id: str) -> dict[str, Any]:
         # 内存没有就从磁盘恢复（server 重启后），都没有才从检查点重建
         metrics = get_metrics(session_id)
         status = metrics.status_line() if metrics is not None else _reconstruct_status(messages)
-        return {"messages": items, "status": status, "last_error": last_error}
+        # 会话工作文件夹（034）：前端头部展示"产物会去哪"，刷新/切会话后不丢
+        from crawagent.storage.meta_store import get_work_dir
+        return {
+            "messages": items,
+            "status": status,
+            "last_error": last_error,
+            "work_dir": get_work_dir(session_id),
+        }
 
     return await asyncio.to_thread(_load)
 

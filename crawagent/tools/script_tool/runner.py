@@ -62,6 +62,32 @@ def _ensure_tmp() -> Path:
 # 里拿到的正则损坏。
 
 
+def _script_format_kwargs(settings) -> dict:
+    """组装 _ALLOWED_HEADER.format 的路径插值参数（变更 034 work_dir 感知）。
+
+    会话配置了工作文件夹时：output/downloads 都指向 work_dir（脚本两条落点
+    约定都进工作文件夹）、SESSION_SUBDIR 注入空串（产物直接落 work_dir 根，
+    与 save_to_file 语义对齐——用户否掉的是"会话子目录"那一层）。
+    PROJECT_ROOT 恒为真实项目根：get_site_profile / browser_render 依赖
+    PROJECT_ROOT/data/，与产物落点无关。
+    """
+    from crawagent.tools.session_dir import current_work_dir
+    work_dir = current_work_dir()
+    if work_dir:
+        downloads = output = str(Path(work_dir))
+        subdir = ""
+    else:
+        downloads = str(settings.downloads_dir)
+        output = str(settings.output_dir)
+        subdir = session_subdir()
+    return {
+        "root": str(settings.project_root),
+        "downloads": downloads,
+        "output": output,
+        "session_subdir": subdir,
+    }
+
+
 @tool
 def run_custom_script(code: str, timeout: int = 60) -> str:
     """当内置预制工具无法搞定某个站时：写并运行一段自定义 Python 脚本。
@@ -100,9 +126,11 @@ def run_custom_script(code: str, timeout: int = 60) -> str:
          仍然 VIP 遮罩/锁定？→ 立刻停止脚本 → 向用户要 登录 Cookie / VIP 会话字串。
 
     保存路径约定：
-      - 媒体下载 → DOWNLOADS_DIR / 子目录   (= settings.downloads_dir / 子目录)
-      - 文档（md/txt） → OUTPUT_DIR / SESSION_SUBDIR / 文件名（本会话产物目录；SESSION_SUBDIR
-        为注入好的子目录名常量，空串表示无会话上下文此时直接用 OUTPUT_DIR）
+      - 本会话设置了工作文件夹时：DOWNLOADS_DIR 与 OUTPUT_DIR 都指向该文件夹、
+        SESSION_SUBDIR 为空串——脚本产物直接落工作文件夹（媒体加分类子目录）
+      - 未设置时：媒体下载 → DOWNLOADS_DIR / 子目录 (= settings.downloads_dir / 子目录)；
+        文档（md/txt） → OUTPUT_DIR / SESSION_SUBDIR / 文件名（本会话产物目录；
+        SESSION_SUBDIR 为注入好的子目录名常量，空串表示无会话上下文此时直接用 OUTPUT_DIR）
       - 不要把产物写到桌面/项目根等任意绝对路径
 
     脚本模板复用：写脚本前如果感觉本站和之前爬过的某个站结构相似
@@ -136,15 +164,13 @@ def run_custom_script(code: str, timeout: int = 60) -> str:
         injected_profiles = _load_injected_profiles(origins, settings.project_root)
 
         # 拼接完整脚本：预导入 + 自动注入的 profiles + 用户代码
-        # _ALLOWED_HEADER 包含 4 个 str.format 插值占位：
-        #   {root!r}、{downloads!r}、{output!r}、{injected_profiles!r}
+        # _ALLOWED_HEADER 包含 5 个 str.format 插值占位：
+        #   {root!r}、{downloads!r}、{output!r}、{session_subdir!r}、{injected_profiles!r}
         # 其他大括号都用 {{ }} 双写保证 format 后还原为单个字面量
+        fmt_kwargs = _script_format_kwargs(settings)
         header = _ALLOWED_HEADER.format(
-            root=str(settings.project_root),
-            downloads=str(settings.downloads_dir),
-            output=str(settings.output_dir),
-            session_subdir=session_subdir(),
             injected_profiles=injected_profiles,
+            **fmt_kwargs,
         )
         # 加上一行运行时注释，方便调试时看自动注入了哪些 origin
         auto_hint_lines = [

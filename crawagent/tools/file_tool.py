@@ -18,15 +18,33 @@ from crawagent.config.settings import get_settings
 
 
 def _resolve_file_path(filename: str, subdir: str) -> Path:
-    """安全地把 filename + subdir 解析为项目内绝对路径。
+    """安全地把 filename + subdir 解析为绝对路径。
 
-    返回值保证在 output_dir 内；若路径逃逸则抛 ValueError。
-    subdir 为空时默认落当前会话子目录（变更 014 会话级产物目录）；
-    无会话上下文（CLI/worker/直调工具）时落 output/ 根，行为与改前一致。
+    变更 034：会话配置了工作文件夹（work_dir）时以它为基准——
+    subdir 空（或 "output"）直接落 work_dir 根，否则落 work_dir/<subdir>/，
+    不再套 014 的会话子目录；路径安全校验基准同步改为 work_dir
+    （is_relative_to(work_dir)），用户选的文件夹就是边界，逃逸即拒绝。
+    未配置 work_dir：行为与改前一致——subdir 空默认落当前会话子目录
+    （014），无会话上下文（CLI/worker/直调工具）落 output/ 根。
+
+    返回值保证在对应基准目录内；若路径逃逸则抛 ValueError。
     """
     settings = get_settings()
     base = settings.project_root.resolve()
     output_root = settings.output_dir.resolve()
+
+    from crawagent.tools.session_dir import current_work_dir
+    work_dir = current_work_dir()
+    if work_dir:
+        work_root = Path(work_dir).resolve()
+        subdir_clean = subdir.strip("/\\")
+        if subdir_clean in ("output", ""):
+            file_path = (work_root / filename).resolve()
+        else:
+            file_path = (work_root / subdir_clean / filename).resolve()
+        if not Path(file_path).is_relative_to(work_root):
+            raise ValueError(f"path escapes work dir: {file_path}")
+        return file_path
 
     subdir_clean = subdir.strip("/\\")
     if not subdir_clean:
