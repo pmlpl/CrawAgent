@@ -149,3 +149,69 @@ def test_path_prefix_confusion_blocked(tmp_path, monkeypatch):
     assert "path escapes" in out.lower()
     # 确认文件没写到 base 外
     assert not (tmp_path / "myroot_evil").exists()
+
+
+# ---------------------------------------------------------------------------
+# read_file（变更 036 附件配套）：分段读 / 硬上限 / 二进制提示
+# ---------------------------------------------------------------------------
+
+def test_read_file_full(tmp_path):
+    f = tmp_path / "a.txt"
+    f.write_text("甲" * 30, encoding="utf-8")
+    out = file_tool.read_file.func(str(f))
+    assert "甲" * 30 in out
+    assert "共 30 字符" in out and "已全部读完" in out
+
+
+def test_read_file_segmented_offset_chain(tmp_path):
+    """大文件：limit 分段 + 尾部提示接力 offset，读到尾给"已全部读完"。"""
+    f = tmp_path / "big.txt"
+    f.write_text("x" * 250, encoding="utf-8")
+    r1 = file_tool.read_file.func(str(f), 0, 100)
+    assert r1.startswith("x" * 100)
+    assert "已读 0-100" in r1 and "offset=100" in r1
+    r2 = file_tool.read_file.func(str(f), 100, 100)
+    assert "已读 100-200" in r2 and "offset=200" in r2
+    r3 = file_tool.read_file.func(str(f), 200, 100)
+    assert "已读 200-250" in r3 and "已全部读完" in r3  # 最后一段不再给下一个 offset
+    r4 = file_tool.read_file.func(str(f), 999, 100)
+    assert "超出文件末尾" in r4
+
+
+def test_read_file_limit_hard_cap(tmp_path):
+    """limit 传再大也截到 50000 字符（防单次调用撑爆上下文）。"""
+    f = tmp_path / "huge.txt"
+    f.write_text("y" * 60000, encoding="utf-8")
+    out = file_tool.read_file.func(str(f), 0, 10**9)
+    body = out.split("\n（共")[0]
+    assert len(body) == file_tool.READ_FILE_LIMIT_CAP
+    assert "已读 0-50000" in out and "offset=50000" in out
+
+
+def test_read_file_missing(tmp_path):
+    out = file_tool.read_file.func(str(tmp_path / "ghost.txt"))
+    assert out.startswith("Read failed")
+    assert "不存在" in out
+
+
+def test_read_file_binary_hint(tmp_path):
+    """含 \\0 的二进制 → 提示走 markitdown_convert，不吐乱码。"""
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.7\x00\x01binary...")
+    out = file_tool.read_file.func(str(f))
+    assert "markitdown_convert" in out
+    assert "二进制" in out
+
+
+def test_read_file_garbled_decode_hint(tmp_path):
+    """非 UTF-8 高失败率 → 按疑似二进制处理。"""
+    f = tmp_path / "gbk.bin"
+    f.write_bytes(b"\xff" * 1000)
+    out = file_tool.read_file.func(str(f))
+    assert "markitdown_convert" in out or "UTF-8" in out
+
+
+def test_read_file_empty(tmp_path):
+    f = tmp_path / "empty.txt"
+    f.write_text("", encoding="utf-8")
+    assert file_tool.read_file.func(str(f)) == "（共 0 字符，文件为空）"

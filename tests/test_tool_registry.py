@@ -51,6 +51,7 @@ def test_expected_core_tools_present():
         "extract_content",
         "extract_list",
         "save_to_file",
+        "read_file",
         "save_record",
         "run_custom_script",
         "download_images",

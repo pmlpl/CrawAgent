@@ -43,6 +43,8 @@ dependencies = [
 api = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
+    # multipart 表单解析（变更 036：POST /api/uploads 附件上传依赖）
+    "python-multipart>=0.0.9",
 ]
 # 扩展可选：浏览器渲染 + 字体解密（番茄小说等字体加密站点）
 browser = [

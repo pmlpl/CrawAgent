@@ -10,11 +10,13 @@ from fastapi import APIRouter
 from .history import router as history_router, _ARCHIVE_SUMMARY_PROMPT, _reconstruct_status
 from .archive import router as archive_router, _archive_session_sync, _background_summarize
 from .crud import router as crud_router, _delete_session_sync
+from .work_dir import router as work_dir_router
 
 router = APIRouter()
 router.include_router(history_router)
 router.include_router(archive_router)
 router.include_router(crud_router)
+router.include_router(work_dir_router)
 
 __all__ = [
     "router",

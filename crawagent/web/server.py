@@ -31,6 +31,7 @@ from crawagent.web.routers import settings as settings_router
 from crawagent.web.routers import sites as sites_router
 from crawagent.web.routers import dist as dist_router
 from crawagent.web.routers import fs as fs_router
+from crawagent.web.routers import uploads as uploads_router
 from crawagent.web.state import _active_turns
 from crawagent.web.turn_engine import _stream_turn
 
@@ -152,6 +153,34 @@ app.include_router(settings_router.router)
 app.include_router(sites_router.router)
 app.include_router(dist_router.router)
 app.include_router(fs_router.router)
+app.include_router(uploads_router.router)
+
+
+def _build_attachment_block(attachments) -> str | None:
+    """把 send 载荷的 attachments 数组格式化为消息尾部注入块（变更 036）。
+
+    注入的是路径清单而非文件内容（上下文经济性；内容 AI 按需 read_file 读）。
+    无附件 / 非法载荷返回 None（零改动）。格式：
+        [附件]（用 read_file 工具读取内容；pdf/docx 二进制用 markitdown_convert 转换后再读）
+        - /abs/path（name，12345）
+    """
+    if not isinstance(attachments, list) or not attachments:
+        return None
+    lines = [
+        "[附件]（用 read_file 工具读取内容；pdf/docx 二进制用 markitdown_convert 转换后再读）"
+    ]
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        p = str(att.get("path") or "").strip()
+        if not p:
+            continue
+        name = str(att.get("name") or "").strip() or p.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        size = att.get("size")
+        size_s = f"{size} 字节" if isinstance(size, int) else "大小未知"
+        lines.append(f"- {p}（{name}，{size_s}）")
+    # 全部条目都非法时视为无附件
+    return "\n".join(lines) if len(lines) > 1 else None
 
 
 @app.get("/")
@@ -226,17 +255,15 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 continue
             model = str(payload.get("model") or "").strip() or None
 
-            # 首条消息可携带会话工作文件夹（变更 034）：仅在该会话尚未设置时生效，
-            # 会话中途不带 work_dir 的消息不改变已有落点。目录创建失败则忽略
-            # （该会话退回 014 默认落点），不阻断本轮对话。
-            work_dir = str(payload.get("work_dir") or "").strip()
-            if work_dir:
-                from crawagent.storage.meta_store import get_work_dir, set_work_dir
-                try:
-                    if not get_work_dir(session_id):
-                        set_work_dir(session_id, work_dir)
-                except Exception as e:
-                    print(f"[WORK_DIR] {session_id}: 设置失败（忽略，走默认落点）: {e}")
+            # 会话工作文件夹不再随消息传递（035）：绑定走
+            # POST /api/sessions/{id}/work-dir 端点，选择即落库，工具层现读。
+
+            # 附件（变更 036）：send 载荷 attachments=[{name, path, size}] 时，
+            # 在用户消息尾部注入路径清单块（上下文经济性——注入路径而非内容，
+            # AI 按需用 read_file 读）。无附件时零改动。
+            att_block = _build_attachment_block(payload.get("attachments"))
+            if att_block:
+                text = f"{text}\n\n{att_block}"
 
             # 检查是否有正在运行的任务
             active = _active_turns.get(session_id)

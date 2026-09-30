@@ -7,9 +7,6 @@
 // - 底部：站点档案 + 设置 入口
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import logoUrl from '../assets/concept-A-spider.png'
-import { useChat } from '../composables/useChat'
-
-const chat = useChat() // 工作文件夹状态（034）：pendingWorkDir / pickFolder / clearPendingWorkDir
 
 const props = defineProps({
   open: { type: Boolean, default: true },
@@ -106,40 +103,8 @@ function onRename(e, s) {
   emit('rename-session', s.id, trimmed)
 }
 
-// ---- 工作文件夹（变更 034）：选目录 → 回显 → 随新会话首条消息生效 ----
-const picking = ref(false) // 原生框弹窗中（防重复点击）
-const manualMode = ref(false) // tkinter 失败时的手输兜底
-const manualPath = ref('')
-
-async function onPickFolder() {
-  if (picking.value) return
-  picking.value = true
-  manualMode.value = false
-  try {
-    const res = await chat.pickFolder()
-    // ok:false = tkinter 异常（无显示环境等）→ 回退手输输入框保底
-    if (res && res.ok === false) {
-      manualMode.value = true
-      manualPath.value = ''
-    }
-  } finally {
-    picking.value = false
-  }
-}
-
-function confirmManualPath() {
-  const p = manualPath.value.trim()
-  if (!p) return
-  chat.setPendingWorkDir(p)
-  manualMode.value = false
-  manualPath.value = ''
-}
-
-function clearWorkDir() {
-  chat.clearPendingWorkDir()
-  manualMode.value = false
-  manualPath.value = ''
-}
+// ---- 工作文件夹选择已迁到聊天输入区「选择项目」按钮（变更 035）----
+// 侧栏只保留纯粹的新对话入口，不再有任何工作文件夹状态。
 
 function onBulkDelete() {
   const ids = selectedIds.value
@@ -175,50 +140,14 @@ function onBulkDelete() {
       </button>
     </div>
 
-    <!-- 新对话 + 工作文件夹选择 -->
+    <!-- 新对话 -->
     <div class="actions">
-      <div class="actions-row">
-        <button type="button" class="btn-new" @click="emit('new-chat')">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          新对话
-        </button>
-        <button
-          type="button"
-          class="btn-folder"
-          :class="{ active: chat.pendingWorkDir }"
-          :disabled="picking"
-          title="选择本会话的工作文件夹（全部产物直接落这里）"
-          aria-label="选择工作文件夹"
-          @click="onPickFolder"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          </svg>
-        </button>
-      </div>
-      <!-- 已选路径回显（可 × 清除）；弹窗失败时回退手输输入框 -->
-      <div v-if="chat.pendingWorkDir" class="workdir-chip" :title="chat.pendingWorkDir">
-        <svg class="wd-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+      <button type="button" class="btn-new" @click="emit('new-chat')">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" />
         </svg>
-        <span class="wd-path">{{ chat.pendingWorkDir }}</span>
-        <button type="button" class="wd-clear" title="清除，恢复默认存放位置" @click="clearWorkDir">×</button>
-      </div>
-      <div v-else-if="manualMode" class="workdir-manual">
-        <input
-          v-model="manualPath"
-          class="wd-input"
-          type="text"
-          placeholder="输入文件夹完整路径，如 D:\资料\抓取"
-          @keydown.enter="confirmManualPath"
-        />
-        <div class="wd-manual-actions">
-          <button type="button" class="wd-btn wd-ok" :disabled="!manualPath.trim()" @click="confirmManualPath">确定</button>
-          <button type="button" class="wd-btn wd-cancel" @click="clearWorkDir">取消</button>
-        </div>
-      </div>
+        新对话
+      </button>
     </div>
 
     <!-- 会话列表 -->
@@ -450,14 +379,8 @@ function onBulkDelete() {
   flex-direction: column;
   gap: 8px;
 }
-.actions-row {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
-}
 .btn-new {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -474,109 +397,6 @@ function onBulkDelete() {
 }
 .btn-new:hover { background: color-mix(in srgb, var(--accent-soft) 70%, white); }
 .btn-new:active { transform: scale(.98); }
-.btn-folder {
-  flex: none;
-  width: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--dim);
-  cursor: pointer;
-  transition: color .15s, border-color .15s, background .15s;
-}
-.btn-folder:hover {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-  background: var(--hover);
-}
-.btn-folder.active {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-  background: var(--accent-soft);
-}
-.btn-folder:disabled { opacity: .5; cursor: wait; }
-
-/* 已选工作文件夹回显条 */
-.workdir-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  background: var(--accent-soft);
-  border-radius: 8px;
-  font-size: 12px;
-  color: var(--ink);
-}
-.wd-ico { flex: none; color: var(--accent); }
-.wd-path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl; /* 长路径保住最右端的目录名可见 */
-  text-align: left;
-}
-.wd-clear {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--dim);
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: color .15s, background .15s;
-}
-.wd-clear:hover { color: var(--danger); background: var(--danger-soft); }
-
-/* tkinter 失败回退：手输路径输入框 */
-.workdir-manual {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: 10px;
-}
-.wd-input {
-  width: 100%;
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-  color: var(--ink);
-  border-radius: 7px;
-  padding: 6px 9px;
-  font-size: 12.5px;
-  outline: none;
-}
-.wd-input:focus { border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
-.wd-manual-actions { display: flex; gap: 6px; justify-content: flex-end; }
-.wd-btn {
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--dim);
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background .15s, color .15s;
-}
-.wd-btn:hover { background: var(--hover); color: var(--ink); }
-.wd-btn.wd-ok {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  color: var(--accent);
-}
-.wd-btn.wd-ok:disabled { opacity: .4; cursor: not-allowed; }
-.wd-btn.wd-ok:hover:not(:disabled) { background: var(--accent-soft); }
 
 /* ---------- 列表区 ---------- */
 .list-wrap {

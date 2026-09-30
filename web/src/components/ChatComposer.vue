@@ -153,6 +153,63 @@ function toggleThinkingMode() {
   settings.saveThinking()
 }
 
+// ---------- 工作文件夹（变更 035）：选择项目，永远作用于当前会话 ----------
+const picking = ref(false) // 原生选框打开中（防重复点击）
+
+async function onChooseProject() {
+  if (picking.value || props.busy) return
+  picking.value = true
+  try {
+    // chooseProject 内部：取消静默、失败自己发聊天区错误条
+    await chat.chooseProject()
+  } finally {
+    picking.value = false
+  }
+}
+
+// ---------- 附件（变更 036）：上传本地文件，AI 经 read_file 读取 ----------
+const fileInput = ref(null)
+const uploading = ref(false) // 有文件在传（按钮转圈 + 禁重复点击）
+
+function pickFiles() {
+  if (props.busy || uploading.value) return
+  fileInput.value?.click()
+}
+
+function fmtSize(n) {
+  if (typeof n !== 'number' || Number.isNaN(n) || n < 0) return ''
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+async function onFilesChosen(ev) {
+  const files = Array.from(ev.target.files || [])
+  ev.target.value = '' // 清空让同一文件可重复选
+  if (!files.length) return
+  uploading.value = true
+  try {
+    for (const f of files) {
+      try {
+        const fd = new FormData()
+        fd.append('file', f)
+        fd.append('session_id', chat.session)
+        const r = await fetch('/api/uploads', { method: 'POST', body: fd })
+        const data = await r.json()
+        if (data?.ok) {
+          chat.addAttachment({ name: data.name, path: data.path, size: data.size })
+        } else {
+          chat.notifyError(`附件「${f.name}」上传失败：${data?.error || '未知错误'}`)
+        }
+      } catch (e) {
+        chat.notifyError(`附件「${f.name}」上传失败：${e}`)
+      }
+    }
+  } finally {
+    uploading.value = false
+  }
+}
+
 defineExpose({ fill })
 </script>
 
@@ -160,6 +217,16 @@ defineExpose({ fill })
   <footer class="composer-wrap">
     <!-- 主输入区 -->
     <form class="composer" @submit.prevent="submit" :class="{ focused: false }">
+      <!-- 附件 chip 列表（036）：待发送的本地文件 -->
+      <div v-if="chat.attachments.length" class="attach-chips">
+        <span v-for="(a, i) in chat.attachments" :key="a.path + '_' + i" class="chip" :title="a.path">
+          <svg class="chip-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
+          <span class="chip-name">{{ a.name }}</span>
+          <span v-if="fmtSize(a.size)" class="chip-size">{{ fmtSize(a.size) }}</span>
+          <button type="button" class="chip-x" title="移除" @click="chat.removeAttachment(i)">×</button>
+        </span>
+      </div>
+
       <textarea
         ref="inputEl"
         v-model="draft"
@@ -175,9 +242,38 @@ defineExpose({ fill })
       <!-- 内嵌工具栏 -->
       <div class="toolbar" ref="toolbarRef">
         <div class="tool-group left">
-          <!-- 附件 -->
-          <button class="tool-btn" type="button" title="添加附件" aria-label="添加附件">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+          <!-- 附件（036）：点击弹系统文件选择框，上传后成 chip；busy/上传中禁用 -->
+          <button
+            class="tool-btn btn-busy"
+            :class="{ 'is-busy': uploading }"
+            type="button"
+            title="添加附件（发给 AI 读取）"
+            aria-label="添加附件"
+            :disabled="busy || uploading"
+            @click="pickFiles"
+          >
+            <span class="btn-label">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+            </span>
+            <span v-if="uploading" class="spin-center" aria-hidden="true" />
+          </button>
+          <input ref="fileInput" type="file" multiple hidden aria-hidden="true" @change="onFilesChosen" />
+
+          <!-- 选择项目（035）：绑定/更换当前会话的工作文件夹，选完即落库 -->
+          <button
+            class="tool-btn project-btn"
+            :class="{ active: chat.workDir, 'is-busy': picking }"
+            type="button"
+            :disabled="picking || busy"
+            :title="chat.workDir ? `当前项目：${chat.workDir}（点击更换）` : '选择本会话的工作文件夹（全部产物直接落这里）'"
+            @click="onChooseProject"
+          >
+            <span class="btn-label">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
+              <span v-if="chat.workDir" class="project-path">{{ chat.workDir }}</span>
+              <span v-else>选择项目</span>
+            </span>
+            <span v-if="picking" class="spin-center" aria-hidden="true" />
           </button>
         </div>
 
@@ -344,6 +440,85 @@ textarea::placeholder {
 }
 .tool-btn:hover { background: var(--panel-2); color: var(--ink); }
 .tool-btn:disabled { opacity: .6; cursor: default; }
+
+/* 附件/项目按钮的 loading 态：spinner 绝对定位居中覆盖、label 藏形保占，
+   按钮尺寸不因 loading 变化（模式照抄 SettingsModels.vue .btn-busy） */
+.btn-busy { position: relative; }
+.btn-busy.is-busy .btn-label { visibility: hidden; }
+.spin-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  margin: -6.5px 0 0 -6.5px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: attach-spin .8s linear infinite;
+}
+@keyframes attach-spin { to { transform: rotate(360deg); } }
+
+/* 选择项目按钮（035）：未绑定 = 图标+文案；已绑定 = 高亮 + 省略路径 */
+.project-btn { color: var(--dim); }
+.project-btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.project-path {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 长路径保住最右端目录名可见 */
+  text-align: left;
+  font-size: 12px;
+}
+
+/* 附件 chip 列表（036） */
+.attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 20px 0;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  padding: 3px 6px 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: var(--accent-soft);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.chip-ico { flex: none; color: var(--accent); }
+.chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip-size { flex: none; color: var(--faint); font-size: 11px; }
+.chip-x {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color .15s, background .15s;
+}
+.chip-x:hover { color: var(--danger); background: var(--danger-soft); }
+
 .tool-btn.select {
   font-family: var(--font-mono);
   font-size: 12.5px;

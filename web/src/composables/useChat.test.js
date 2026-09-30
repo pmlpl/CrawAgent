@@ -223,70 +223,126 @@ describe('useChat 事件分发', () => {
   })
 })
 
-describe('useChat 工作文件夹（变更 034）', () => {
-  it('用例 W1：pickFolder 选中 → pendingWorkDir 回显；取消/失败不动原状', async () => {
+describe('useChat 选择项目（变更 035）', () => {
+  it('用例 P1：chooseProject 选中 → pick 后 POST work-dir 落库，workDir 更新', async () => {
+    const calls = []
+    fetch.mockImplementation(async (url, opts) => {
+      calls.push({ url: String(url), opts })
+      if (String(url).includes('/api/fs/pick-folder')) {
+        return { ok: true, json: async () => ({ ok: true, path: 'D:/新项目' }) }
+      }
+      return { ok: true, json: async () => ({ ok: true, work_dir: 'D:/新项目' }) }
+    })
     const { chat } = await setup()
-    fetch.mockImplementation(async () => ({ ok: true, json: async () => ({ ok: true, path: 'D:/产物' }) }))
-    const r = await chat.pickFolder()
+    const r = await chat.chooseProject()
+
     expect(r.ok).toBe(true)
-    expect(chat.pendingWorkDir).toBe('D:/产物')
+    expect(chat.workDir).toBe('D:/新项目')
+    // 二段式：先 pick，再按当前会话 id 落库
+    expect(calls.length).toBe(2)
+    expect(calls[0].url).toContain('/api/fs/pick-folder')
+    expect(calls[1].url).toBe(`/api/sessions/${chat.session}/work-dir`)
+    expect(JSON.parse(calls[1].opts.body)).toEqual({ path: 'D:/新项目' })
+  })
 
-    // 取消：回显保留原值不动
-    fetch.mockImplementation(async () => ({ ok: true, json: async () => ({ ok: true, canceled: true, path: '' }) }))
-    await chat.pickFolder()
-    expect(chat.pendingWorkDir).toBe('D:/产物')
+  it('用例 P2：取消静默（不落库、不动原值）；再次点击 = 更换项目', async () => {
+    let mode = 'cancel'
+    fetch.mockImplementation(async (url) => {
+      if (String(url).includes('/api/fs/pick-folder')) {
+        return mode === 'cancel'
+          ? { ok: true, json: async () => ({ ok: true, canceled: true, path: '' }) }
+          : { ok: true, json: async () => ({ ok: true, path: 'E:/换的项目' }) }
+      }
+      return { ok: true, json: async () => ({ ok: true, work_dir: 'E:/换的项目' }) }
+    })
+    const { chat } = await setup()
+    chat.workDir = 'D:/原项目'
 
-    // tkinter 异常：返回 ok:false 交由侧栏回退手输，pending 不变
+    const r = await chat.chooseProject()
+    expect(r.canceled).toBe(true)
+    expect(chat.workDir).toBe('D:/原项目') // 取消不动原值
+
+    mode = 'pick'
+    await chat.chooseProject()
+    expect(chat.workDir).toBe('E:/换的项目') // 更换生效
+  })
+
+  it('用例 P3：pick 失败 / 落库失败 → 聊天区错误条，workDir 不变', async () => {
+    const { chat } = await setup()
+    // tkinter 打不开
     fetch.mockImplementation(async () => ({ ok: true, json: async () => ({ ok: false, error: 'no display' }) }))
-    const r3 = await chat.pickFolder()
-    expect(r3.ok).toBe(false)
-    expect(chat.pendingWorkDir).toBe('D:/产物')
-  })
+    await chat.chooseProject()
+    let err = chat.items.find(i => i.kind === 'error')
+    expect(err).toBeTruthy()
+    expect(err.content).toContain('no display')
+    expect(chat.workDir).toBe('')
 
-  it('用例 W2：选了文件夹后 send → 首条消息携带 work_dir，随即可清除', async () => {
-    const { chat, ws } = await setup()
-    chat.setPendingWorkDir('D:/产物')
-    expect(chat.send('抓一下')).toBe(true)
-
-    const sent = JSON.parse(ws.__lastSent)
-    expect(sent.work_dir).toBe('D:/产物')
-    expect(chat.workDir).toBe('D:/产物')   // 乐观置位，头部立即展示
-    expect(chat.pendingWorkDir).toBe('')   // 用后即清
-
-    // 第二条消息不再携带（会话已绑定，且 pending 已清）
-    chat.busy = false // 模拟首轮 done 后复位（无 done 事件时 busy 会挡住下一条）
-    chat.send('继续')
-    expect(JSON.parse(MockWebSocket.instances.at(-1).__lastSent).work_dir).toBeUndefined()
-
-    // 手动清除路径
-    chat.setPendingWorkDir('E:/别的')
-    chat.clearPendingWorkDir()
-    expect(chat.pendingWorkDir).toBe('')
-  })
-
-  it('用例 W3：没选文件夹 → 消息不带 work_dir 键（014 默认落点）', async () => {
-    const { chat, ws } = await setup()
-    chat.send('普通消息')
-    const sent = JSON.parse(ws.__lastSent)
-    expect('work_dir' in sent).toBe(false)
+    // 落库失败（mkdir 失败等）
+    chat.items.splice(0, chat.items.length)
+    fetch.mockImplementation(async (url) => {
+      if (String(url).includes('/api/fs/pick-folder')) {
+        return { ok: true, json: async () => ({ ok: true, path: 'Z:/坏路径' }) }
+      }
+      return { ok: true, json: async () => ({ ok: false, error: '文件夹创建失败' }) }
+    })
+    await chat.chooseProject()
+    err = chat.items.find(i => i.kind === 'error')
+    expect(err.content).toContain('文件夹创建失败')
     expect(chat.workDir).toBe('')
   })
 
-  it('用例 W4：loadHistory 回读 work_dir；newSession 清当前绑定但保留待生效选择', async () => {
+  it('用例 P4：send 不再携带 work_dir 键（035 收敛到 REST 端点）；loadHistory 回读', async () => {
     fetch.mockImplementation(async (url) => {
       if (String(url).includes('/api/history/')) {
         return { ok: true, json: async () => ({ messages: [], status: null, work_dir: 'D:/旧会话产物' }) }
       }
       return { ok: false, json: async () => ({}) }
     })
-    const { chat } = await setup()
+    const { chat, ws } = await setup()
     await chat.loadHistory()
-    expect(chat.workDir).toBe('D:/旧会话产物')
+    expect(chat.workDir).toBe('D:/旧会话产物') // 刷新/切会话回读不丢
 
-    // 新会话：当前绑定清空；pending（选好未发送的路径）保留
-    chat.setPendingWorkDir('E:/新选的')
+    chat.send('随便聊聊')
+    const sent = JSON.parse(ws.__lastSent)
+    expect('work_dir' in sent).toBe(false) // 消息载荷不再有 work_dir
+
+    // 新会话：绑定清空（要绑定就在输入区重新选项目）
     chat.newSession()
     expect(chat.workDir).toBe('')
-    expect(chat.pendingWorkDir).toBe('E:/新选的')
+  })
+})
+
+describe('useChat 附件（变更 036）', () => {
+  it('用例 A1：addAttachment / removeAttachment 维护清单，发送成功即清空并随载荷带上', async () => {
+    const { chat, ws } = await setup()
+    chat.addAttachment({ name: 'a.md', path: 'D:/uploads/s/a.md', size: 12 })
+    chat.addAttachment({ name: 'b.json', path: 'D:/uploads/s/b.json', size: 34 })
+    expect(chat.attachments.length).toBe(2)
+
+    chat.removeAttachment(0)
+    expect(chat.attachments.map(a => a.name)).toEqual(['b.json'])
+
+    chat.addAttachment({ name: 'a.md', path: 'D:/uploads/s/a.md', size: 12 })
+    expect(chat.send('看这两个文件')).toBe(true)
+    const sent = JSON.parse(ws.__lastSent)
+    expect(sent.attachments.map(a => a.name)).toEqual(['b.json', 'a.md'])
+    expect(chat.attachments.length).toBe(0) // 发送成功即清空
+  })
+
+  it('用例 A2：没有附件 → 载荷不带 attachments 键（零改动）', async () => {
+    const { chat, ws } = await setup()
+    chat.send('普通消息')
+    expect('attachments' in JSON.parse(ws.__lastSent)).toBe(false)
+  })
+
+  it('用例 A3：切会话/新会话清空附件清单（属于输入区待发状态）', async () => {
+    const { chat } = await setup()
+    chat.addAttachment({ name: 'a.md', path: 'D:/x/a.md', size: 1 })
+    chat.newSession()
+    expect(chat.attachments.length).toBe(0)
+
+    chat.addAttachment({ name: 'b.md', path: 'D:/x/b.md', size: 1 })
+    chat.switchSession('other-session')
+    expect(chat.attachments.length).toBe(0)
   })
 })

@@ -1,11 +1,15 @@
-"""文件保存工具 — 将内容写入本地文件（md/txt/json 等）
+"""文件读写工具 — save_to_file（写入）/ read_file（读取，变更 036 附件配套）
 
-增强特性：
+save_to_file 增强特性：
 - overwrite / append 两种写入模式
 - 自动检测 JSON 字符串并 pretty-print
 - 自动补扩展名（无后缀 + JSON 内容 → .json）
 - 路径安全校验（防目录逃逸）
 - 返回文件位置信息（供后续工具引用）
+
+read_file（036）：读本地文本文件，offset/limit 分段（大文件多轮读全）；
+二进制内容提示改走 markitdown_convert。读任意路径是有意设计——与
+run_custom_script 能力面等价，不新增攻击面；work_dir 逃逸校验只管写工具。
 """
 from __future__ import annotations
 
@@ -129,3 +133,69 @@ def save_to_file(filename: str, content: str, subdir: str = "", mode: str = "ove
         )
     except Exception as e:
         return f"Save failed: {e}"
+
+
+# read_file 单次返回的字符硬上限（防单次调用撑爆上下文；超限自动截断到它）
+READ_FILE_LIMIT_CAP = 50000
+
+
+@tool
+def read_file(path: str, offset: int = 0, limit: int = 20000) -> str:
+    """Read a local text file's content (attachments, exported files, logs, code...).
+
+    Parameters:
+        path: absolute path of the file (attachments uploaded via the chat UI
+            carry their server path in the [附件] block of the user message)
+        offset: character position to start reading from (0 = beginning). When a
+            previous read says "继续读传 offset=N", pass that N here
+        limit: max characters to return this call (default 20000, hard cap 50000)
+
+    Returns:
+        The text slice, with a tail hint: "（共 N 字符，已读 a-b，继续读传
+        offset=b）" when more content remains, or "（共 N 字符，已全部读完）"
+        when done. Binary content (pdf/docx/xlsx etc.) returns a hint to convert
+        with markitdown_convert instead. Not-found paths return a plain error.
+
+    Notes:
+        - LARGE files: the tool result is truncated in context after ~2000 chars,
+          so you often only see head+tail of one call — ALWAYS keep reading with
+          the returned offset until the "已全部读完" hint before summarizing.
+        - Encoding is utf-8 (errors replaced); undecodable garbage is reported
+          as suspected binary rather than returned as mojibake.
+    """
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return f"Read failed: 文件不存在（或不是常规文件）: {path}"
+
+        with p.open("rb") as f:
+            raw_head = f.read(8192)
+        if b"\x00" in raw_head:
+            return (
+                f"疑似二进制文件（含 \\0 字节），直接读会得到乱码：{path}\n"
+                "pdf/docx/xlsx/ppt 等请改用 markitdown_convert 转成 Markdown 后再读。"
+            )
+
+        text = p.read_text(encoding="utf-8", errors="replace")
+        # 替换符占比过高也按二进制处理（utf-8 errors=replace 会把坏字节变 \ufffd）
+        if text.count("\ufffd") > max(64, len(text) * 0.3):
+            return (
+                f"疑似二进制或非 UTF-8 编码文件（解码失败率过高）：{path}\n"
+                "pdf/docx 请改用 markitdown_convert；其他编码可让用户转存为 UTF-8。"
+            )
+
+        total = len(text)
+        if total == 0:
+            return "（共 0 字符，文件为空）"
+        offset = max(0, int(offset or 0))
+        limit = min(max(1, int(limit or 0)), READ_FILE_LIMIT_CAP)
+        if offset >= total:
+            return f"（共 {total} 字符，offset 已超出文件末尾，没有更多内容）"
+
+        end = min(offset + limit, total)
+        body = text[offset:end]
+        if end < total:
+            return f"{body}\n（共 {total} 字符，已读 {offset}-{end}，继续读传 offset={end}）"
+        return f"{body}\n（共 {total} 字符，已读 {offset}-{end}，已全部读完）"
+    except Exception as e:
+        return f"Read failed: {e}"

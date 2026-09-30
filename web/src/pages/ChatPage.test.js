@@ -30,6 +30,14 @@ vi.mock('../composables/useChat', () => ({
     sessions: [],
     answerAsk: vi.fn(() => true),
     lastDraft: '',
+    // 035/036：输入区「选择项目」与附件状态
+    workDir: '',
+    attachments: [],
+    chooseProject: vi.fn(),
+    notifyError: vi.fn(),
+    addAttachment: vi.fn(),
+    removeAttachment: vi.fn(),
+    clearAttachments: vi.fn(),
   }),
 }))
 

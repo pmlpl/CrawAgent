@@ -46,32 +46,71 @@ const useChatStore = defineStore('chat', () => {
   const lastStatus = computed(() => statusBySession[session.value] || null)
   const sessions = ref([]) // 侧栏会话列表 [{id, preview}]
 
-  // ---------- 工作文件夹（变更 034）----------
+  // ---------- 工作文件夹（变更 035 交互：选择即落库）----------
   // workDir：当前会话已生效的工作文件夹（空 = 未配置，走 output/downloads 默认落点）。
-  // pendingWorkDir：侧栏选好但还没随首条消息发出去的路径（新会话生效一次后清空）。
+  // 「选择项目」永远作用于当前会话：pick 原生选框 → REST 端点落库 → 更新本状态。
+  // 034 的 pendingWorkDir 悬空机制已删——归属含糊是 035 重构的直接动因。
   const workDir = ref('')
-  const pendingWorkDir = ref('')
 
-  function setPendingWorkDir(path) {
-    pendingWorkDir.value = (path || '').trim()
-  }
-
-  function clearPendingWorkDir() {
-    pendingWorkDir.value = ''
-  }
-
-  // 弹系统原生文件夹选择框（后端 tkinter）。返回后端响应：
-  // {ok,path} / {ok,canceled} / {ok:false,error}（前端据此回退手输）。
+  // 弹系统原生文件夹选择框（后端 tkinter）。返回后端原始响应：
+  // {ok,path} / {ok,canceled} / {ok:false,error}。
   async function pickFolder() {
     try {
       const r = await fetch('/api/fs/pick-folder', { method: 'POST' })
-      const data = await r.json()
-      if (data?.ok && data.path) setPendingWorkDir(data.path)
-      else if (data?.ok && data.canceled) { /* 用户取消：保持原状 */ }
-      return data
+      return await r.json()
     } catch (e) {
       return { ok: false, error: String(e) }
     }
+  }
+
+  // 「选择项目」二段式：选框 → POST work-dir 端点绑定当前会话（落库后才算数）。
+  // 取消静默；pick 失败 / 落库失败 → 聊天区错误提示条。
+  async function chooseProject() {
+    const picked = await pickFolder()
+    if (!picked || picked.ok === false) {
+      notifyError(`文件夹选择框打开失败：${picked?.error || '未知错误'}`)
+      return picked
+    }
+    if (picked.canceled) return picked // 用户取消：静默
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(session.value)}/work-dir`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: picked.path }),
+      })
+      const data = await r.json()
+      if (data?.ok) {
+        workDir.value = data.work_dir || picked.path
+        return data
+      }
+      notifyError(`项目文件夹绑定失败：${data?.error || '未知错误'}`)
+      return data
+    } catch (e) {
+      notifyError(`项目文件夹绑定失败：${e}`)
+      return { ok: false, error: String(e) }
+    }
+  }
+
+  // 聊天区错误提示条（不带发送场景的后缀文案）
+  function notifyError(message) {
+    items.push({ kind: 'error', content: `⚠ ${message}`, _id: nextItemId() })
+  }
+
+  // ---------- 附件（变更 036）----------
+  // 当前输入框待发送的附件清单 [{name, path, size}]；发送成功即清空。
+  // path 是服务端绝对路径（data/uploads/<session>/ 下），AI 用 read_file 读。
+  const attachments = ref([])
+
+  function addAttachment(att) {
+    if (att && att.path) attachments.value.push(att)
+  }
+
+  function removeAttachment(idx) {
+    attachments.value.splice(idx, 1)
+  }
+
+  function clearAttachments() {
+    attachments.value.splice(0, attachments.value.length)
   }
 
   // 正在执行的工具步：最后一个 trace 里最后一个未完成的 tool step
@@ -506,14 +545,12 @@ const useChatStore = defineStore('chat', () => {
     typing.value = true
     startTick()
     startSessionPoll()
-    // 工作文件夹（034）：仅在会话尚未绑定且用户选了路径时随首条消息带上，
-    // 后端落库后该会话全部产物直接落那里。乐观置位 + 清 pending。
     const payload = { type: 'message', content, model: settings.state.model }
-    if (pendingWorkDir.value && !workDir.value) {
-      payload.work_dir = pendingWorkDir.value
-      workDir.value = pendingWorkDir.value
+    // 附件（036）：待发送清单随消息带给后端注入 [附件] 块；发送成功即清空
+    if (attachments.value.length) {
+      payload.attachments = attachments.value.map(a => ({ name: a.name, path: a.path, size: a.size }))
+      clearAttachments()
     }
-    pendingWorkDir.value = ''
     ws.send(JSON.stringify(payload))
     return true
   }
@@ -539,6 +576,7 @@ const useChatStore = defineStore('chat', () => {
     traceRoundId = 0
     aiStreams.clear()
     workDir.value = '' // loadHistory 回读目标会话的值，先清避免残留上一会话的
+    clearAttachments() // 附件清单是输入区待发状态，换会话不带过去
     connect()
     loadHistory()
   }
@@ -594,7 +632,8 @@ const useChatStore = defineStore('chat', () => {
     currentTrace = null
     traceRoundId = 0
     aiStreams.clear()
-    workDir.value = '' // 新会话未绑定；pendingWorkDir 保留（用户先选文件夹再点新对话的场景）
+    workDir.value = '' // 新会话未绑定；要绑定就在输入区点「选择项目」（035）
+    clearAttachments()
     if (doConnect) connect()
   }
 
@@ -657,11 +696,11 @@ const useChatStore = defineStore('chat', () => {
   return {
     // state
     items, busy, connected, typing, session, lastDraft, lastStatus, sessions, draft, currentProgress, runningElapsed,
-    workDir, pendingWorkDir,
+    workDir, attachments,
     // actions
     connect, loadHistory, send, stop, newSession, switchSession, fetchSessions, reconnect, deleteSession,
     archiveSession, batchDeleteSessions, renameSession, answerAsk,
-    setPendingWorkDir, clearPendingWorkDir, pickFolder,
+    chooseProject, notifyError, addAttachment, removeAttachment, clearAttachments,
   }
 })
 

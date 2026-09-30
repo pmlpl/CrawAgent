@@ -412,7 +412,107 @@ def test_download_social_media_default_regression(monkeypatch, tmp_path):
     assert "error" in r2 and "escapes" in r2["error"]
 
 
-# ---------- run_custom_script 路径注入 ----------
+# ---------- work-dir 绑定端点（变更 035：选择即落库） ----------
+
+def _patch_meta_conn(monkeypatch, tmp_path):
+    """meta_store 打到 tmp 库（set/get_work_dir 内部调模块级 get_meta_conn，patch 即生效）。"""
+    import sqlite3
+
+    import crawagent.storage.meta_store as ms
+
+    conn = sqlite3.connect(str(tmp_path / "meta.db"), check_same_thread=False)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_titles ("
+        "thread_id TEXT PRIMARY KEY, title TEXT NOT NULL, work_dir TEXT DEFAULT '')"
+    )
+    conn.commit()
+    monkeypatch.setattr(ms, "get_meta_conn", lambda settings=None: conn)
+    return conn
+
+
+def _work_dir_client():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from crawagent.web.routers.sessions.work_dir import router
+
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
+def test_work_dir_endpoint_bind_new_session(monkeypatch, tmp_path):
+    """新会话（没发过消息、meta.db 无记录）直接绑定 → upsert 建记录 + 目录创建。"""
+    _patch_meta_conn(monkeypatch, tmp_path)
+    client = _work_dir_client()
+
+    target = tmp_path / "新项目"
+    r = client.post("/api/sessions/brand_new/work-dir", json={"path": str(target)})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert Path(data["work_dir"]) == target.resolve()
+    assert target.is_dir()
+
+    import crawagent.storage.meta_store as ms
+    assert ms.get_work_dir("brand_new") == str(target.resolve())
+
+
+def test_work_dir_endpoint_change_and_clear(monkeypatch, tmp_path):
+    """同会话换项目 → 覆盖旧绑定；path 空 = 清除（退回默认落点）。"""
+    _patch_meta_conn(monkeypatch, tmp_path)
+    client = _work_dir_client()
+
+    wd1 = tmp_path / "项目一"
+    wd2 = tmp_path / "项目二"
+    assert client.post("/api/sessions/s1/work-dir", json={"path": str(wd1)}).json()["ok"]
+    assert client.post("/api/sessions/s1/work-dir", json={"path": str(wd2)}).json()["work_dir"] == str(wd2.resolve())
+
+    r = client.post("/api/sessions/s1/work-dir", json={"path": ""})
+    assert r.json() == {"ok": True, "work_dir": ""}
+
+    import crawagent.storage.meta_store as ms
+    assert ms.get_work_dir("s1") == ""
+
+
+def test_work_dir_endpoint_mkdir_failure(monkeypatch, tmp_path):
+    """目录创建失败（父级被同名文件占用）→ ok:False + 人话错误，不裸异常。"""
+    _patch_meta_conn(monkeypatch, tmp_path)
+    client = _work_dir_client()
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("我是文件不是目录")
+    r = client.post("/api/sessions/s2/work-dir", json={"path": str(blocker / "sub")})
+    data = r.json()
+    assert data["ok"] is False
+    assert "失败" in data["error"]
+
+
+def test_work_dir_endpoint_get_roundtrip(monkeypatch, tmp_path):
+    _patch_meta_conn(monkeypatch, tmp_path)
+    client = _work_dir_client()
+
+    wd = tmp_path / "回读项目"
+    client.post("/api/sessions/s3/work-dir", json={"path": str(wd)})
+    r = client.get("/api/sessions/s3/work-dir")
+    assert r.json() == {"ok": True, "work_dir": str(wd.resolve())}
+    # 未绑定的会话 → 空串
+    assert client.get("/api/sessions/s_none/work-dir").json() == {"ok": True, "work_dir": ""}
+
+
+def test_chat_ws_no_longer_accepts_work_dir_payload():
+    """035 回归：chat_ws 不再有 work_dir 载荷处理（绑定收敛到 REST 端点）。
+
+    WS 层离线测不了（发消息即触发真实轮次），用源码扫描锁住契约：
+    server.py 的 chat_ws 里不允许再出现 payload work_dir 分支。
+    """
+    import io
+
+    server_path = Path(__file__).resolve().parents[1] / "crawagent" / "web" / "server.py"
+    src = io.open(server_path, encoding="utf-8").read()
+    assert 'payload.get("work_dir")' not in src
+    assert "set_work_dir" not in src  # 绑定只发生在 sessions/work_dir.py
+
 
 def test_script_format_kwargs_follows_work_dir(monkeypatch, tmp_path):
     import crawagent.tools.script_tool.runner as runner
