@@ -568,3 +568,25 @@ def test_script_header_with_work_dir_formats_clean(monkeypatch, tmp_path):
     )
     assert f"OUTPUT_DIR = Path({str(wd)!r})" in header
     assert "SESSION_SUBDIR = ''" in header
+
+
+def test_script_cwd_follows_work_dir(monkeypatch, tmp_path):
+    """子进程 CWD 跟随 work_dir：脚本里相对路径 open() 自然落工作文件夹（034 bug 修复）。"""
+    import crawagent.tools.script_tool.runner as runner
+    import crawagent.tools.session_dir as sd
+
+    wd = tmp_path / "cwd_wd"
+    wd.mkdir()
+    monkeypatch.setattr(sd, "current_work_dir", lambda: str(wd))
+    assert runner._resolve_script_cwd() == str(wd)
+
+
+def test_script_cwd_defaults_to_tmp_when_no_work_dir(monkeypatch, tmp_path):
+    """未设 work_dir → CWD 退回 _tmp（启动自动清理兜底，与 034 前行为一致）。"""
+    import crawagent.tools.script_tool.runner as runner
+    import crawagent.tools.session_dir as sd
+
+    monkeypatch.setattr(sd, "current_work_dir", lambda: "")
+    tmp = tmp_path / "_tmp"
+    monkeypatch.setattr(runner, "_ensure_tmp", lambda: tmp)
+    assert runner._resolve_script_cwd() == str(tmp)

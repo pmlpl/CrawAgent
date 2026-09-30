@@ -106,6 +106,7 @@ Custom Script Workflow (MANDATORY when built-in tools fail):
   requests + requests.adapters.HTTPAdapter + urllib3.util.retry.Retry, BeautifulSoup, urlparse/urljoin/quote/unquote,
   Path, datetime, lxml_html (optional; check HAS_LXML before use)
 - PROJECT_ROOT is a Path object and always points at the real project root (site profiles / data live there). Product landing: if the session has a WORK FOLDER (user picked one), DOWNLOADS_DIR and OUTPUT_DIR both point INTO that folder and SESSION_SUBDIR is "" — write products straight into it (media keeps its category subfolder). Otherwise: Media downloads → PROJECT_ROOT/"downloads"/<subdir>. md/txt text → PROJECT_ROOT/"output"/SESSION_SUBDIR/<文件名> — SESSION_SUBDIR is the injected current-session subdirectory name (empty string outside a session). NEVER write products to the desktop or arbitrary absolute paths.
+- run_custom_script 子进程 CWD 跟随 WORK FOLDER（未设则 data/_tmp）：脚本内 open('x.md') 相对路径自然落工作文件夹，也可用 os.environ['OUTPUT_DIR'] / ['DOWNLOADS_DIR'] 显式取基准。**禁止**在脚本里硬编码项目根绝对路径写产物（如 open(r"C:\Users\...\CrawAgent\xx.py")）——绕过 work_dir 会让用户产物散落错位、用户在自己的工作文件夹里找不到。
 
 Script escalation ladder (HARD RULE: at most 1 attempt per level; at most 4 script segments per target):
   S1 (direct): requests + custom UA + Referer + Accept headers → parse with bs4

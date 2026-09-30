@@ -62,6 +62,17 @@ def _ensure_tmp() -> Path:
 # 里拿到的正则损坏。
 
 
+def _resolve_script_cwd() -> str:
+    """子进程 CWD：会话配了工作文件夹 → 用它（脚本 open('x.md') 相对路径自然落那里）；
+    否则退回 data/_tmp（启动自动清理兜底，与 034 前行为一致）。
+
+    变更 034 bug 修复：原 cwd 恒为 _tmp，只注入 OUTPUT_DIR/DOWNLOADS_DIR 环境变量，
+    AI 脚本里相对路径 open() 或硬编码项目根会绕过 work_dir，产物散落错位。
+    """
+    from crawagent.tools.session_dir import current_work_dir
+    return current_work_dir() or str(_ensure_tmp())
+
+
 def _script_format_kwargs(settings) -> dict:
     """组装 _ALLOWED_HEADER.format 的路径插值参数（变更 034 work_dir 感知）。
 
@@ -181,7 +192,11 @@ def run_custom_script(code: str, timeout: int = 60) -> str:
         full_code = header + header_suffix + code
 
         # 通过 stdin 传脚本内容（方案 A：不写临时文件，根治泄漏）
-        # cwd 改到 _tmp：AI 脚本自身 open() 写出的输出文件落在 _tmp，启动自动清理
+        # cwd 跟随会话工作文件夹（变更 034 bug 修复：原只注入 OUTPUT_DIR/DOWNLOADS_DIR
+        # 环境变量、cwd 恒为 _tmp，AI 脚本里相对路径 open() 或硬编码项目根会绕过 work_dir，
+        # 导致脚本产物散落到 _tmp/项目根而非用户选的工作文件夹）。work_dir 非空 → cwd=work_dir，
+        # 脚本 open('x.md') 相对路径自然落工作文件夹；未设 work_dir → 退回 _tmp（启动自动清理兜底）。
+        cwd_dir = _resolve_script_cwd()
         try:
             result = subprocess.run(
                 [venv_python, "-"],
@@ -191,7 +206,7 @@ def run_custom_script(code: str, timeout: int = 60) -> str:
                 encoding="utf-8", errors="replace",  # Windows 默认 GBK，脚本输出 UTF-8 会崩读取线程
                 env={**os.environ, "PYTHONIOENCODING": "utf-8"},  # 强制子进程也用 UTF-8 输出
                 timeout=timeout,
-                cwd=str(_ensure_tmp()),
+                cwd=cwd_dir,
             )
             output = ""
             if result.stdout:
