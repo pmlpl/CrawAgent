@@ -6,12 +6,14 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
 
 from crawagent.config.settings import get_settings
+from crawagent.tools.progress import report_progress
 
 MOBILE_UA = (
     "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
@@ -121,11 +123,70 @@ def _download_to_file(url: str, path: Path, headers: dict) -> Path:
         stream=True,
     )
     resp.raise_for_status()
+    # Content-Length → 百分比/总大小；缺失则只显示已下载字节（变更 037）
+    total = 0
+    try:
+        cl = resp.headers.get("Content-Length")
+        if cl:
+            total = int(cl)
+    except (TypeError, ValueError):
+        total = 0
+    name = path.name
+    done = 0
+    start = time.time()
+    last_report = start
+    last_bytes = 0
     with path.open("wb") as fh:
         for chunk in resp.iter_content(chunk_size=8192):
-            if chunk:
-                fh.write(chunk)
+            if not chunk:
+                continue
+            fh.write(chunk)
+            done += len(chunk)
+            now = time.time()
+            if now - last_report >= _PROGRESS_REPORT_INTERVAL:
+                report_progress(_fmt_progress(name, done, total, now - last_report, last_bytes))
+                last_report = now
+                last_bytes = done
+    # 完成行：给用户一个明确收尾（避免停在 98%）
+    report_progress(_fmt_progress_done(name, done, total, time.time() - start))
     return path
+
+
+# 两次进度上报的最小间隔（秒）；大文件下避免每 chunk 都报刷屏
+_PROGRESS_REPORT_INTERVAL: float = 0.5
+
+
+def _fmt_progress(name: str, done: int, total: int, dt: float, prev_bytes: int) -> str:
+    """格式化下载中进度行（变更 037）。
+
+    Args:
+        name: 文件名（``path.name``），让用户知道在下载哪个文件。
+        done: 已下载字节数。
+        total: Content-Length 字节数；0 表示无总大小（只显示已下载）。
+        dt: 自上次上报以来的秒数（用于算瞬时速度）。
+        prev_bytes: 上次上报时的已下载字节数（速度 = 增量 / dt）。
+
+    Returns:
+        形如 ``下载 x.mp4 45% 12.3/27.1MB 2.1MB/s`` 或
+        ``下载 x.mp4 已下载 12.3MB 2.1MB/s``（无 Content-Length）。
+    """
+    done_mb = done / (1024 * 1024)
+    speed = (done - prev_bytes) / dt / (1024 * 1024) if dt > 0 else 0.0
+    if total:
+        pct = done * 100 // total
+        total_mb = total / (1024 * 1024)
+        return f"下载 {name} {pct}% {done_mb:.1f}/{total_mb:.1f}MB {speed:.1f}MB/s"
+    return f"下载 {name} 已下载 {done_mb:.1f}MB {speed:.1f}MB/s"
+
+
+def _fmt_progress_done(name: str, done: int, total: int, elapsed: float) -> str:
+    """格式化下载完成行（变更 037）。"""
+    done_mb = done / (1024 * 1024)
+    avg = done / elapsed / (1024 * 1024) if elapsed > 0 else 0.0
+    if total:
+        total_mb = total / (1024 * 1024)
+        return f"下载 {name} 完成 100% {total_mb:.1f}MB 平均 {avg:.1f}MB/s"
+    return f"下载 {name} 完成 已下载 {done_mb:.1f}MB 平均 {avg:.1f}MB/s"
 
 
 def _find_ffmpeg() -> str:

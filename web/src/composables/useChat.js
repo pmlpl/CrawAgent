@@ -51,6 +51,8 @@ const useChatStore = defineStore('chat', () => {
   // 「选择项目」永远作用于当前会话：pick 原生选框 → REST 端点落库 → 更新本状态。
   // 034 的 pendingWorkDir 悬空机制已删——归属含糊是 035 重构的直接动因。
   const workDir = ref('')
+  // 历史项目（变更 037）：最近用过的 work_dir 去重列表，供提示条菜单一键切换。
+  const workDirHistory = ref([])
 
   // 弹系统原生文件夹选择框（后端 tkinter）。返回后端原始响应：
   // {ok,path} / {ok,canceled} / {ok:false,error}。
@@ -63,24 +65,19 @@ const useChatStore = defineStore('chat', () => {
     }
   }
 
-  // 「选择项目」二段式：选框 → POST work-dir 端点绑定当前会话（落库后才算数）。
-  // 取消静默；pick 失败 / 落库失败 → 聊天区错误提示条。
-  async function chooseProject() {
-    const picked = await pickFolder()
-    if (!picked || picked.ok === false) {
-      notifyError(`文件夹选择框打开失败：${picked?.error || '未知错误'}`)
-      return picked
-    }
-    if (picked.canceled) return picked // 用户取消：静默
+  // 绑定/更换/清除当前会话工作文件夹（POST work-dir 端点）。
+  // 菜单的「历史项 / 清除项目」与「选择项目」的落库步骤共用本函数（单一真源）。
+  // 成功更新 workDir；失败 → 聊天区错误提示条。path 空串 = 清除。
+  async function bindWorkDir(path) {
     try {
       const r = await fetch(`/api/sessions/${encodeURIComponent(session.value)}/work-dir`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: picked.path }),
+        body: JSON.stringify({ path }),
       })
       const data = await r.json()
       if (data?.ok) {
-        workDir.value = data.work_dir || picked.path
+        workDir.value = data.work_dir || path
         return data
       }
       notifyError(`项目文件夹绑定失败：${data?.error || '未知错误'}`)
@@ -89,6 +86,33 @@ const useChatStore = defineStore('chat', () => {
       notifyError(`项目文件夹绑定失败：${e}`)
       return { ok: false, error: String(e) }
     }
+  }
+
+  // 「选择项目」二段式：pick 原生选框 → bindWorkDir 落库。
+  // 取消静默；pick 失败 → 聊天区错误提示条。
+  async function chooseProject() {
+    const picked = await pickFolder()
+    if (!picked || picked.ok === false) {
+      notifyError(`文件夹选择框打开失败：${picked?.error || '未知错误'}`)
+      return picked
+    }
+    if (picked.canceled) return picked // 用户取消：静默
+    return bindWorkDir(picked.path)
+  }
+
+  // 拉历史项目列表（变更 037）：提示条菜单打开前调一次。
+  async function fetchWorkDirHistory() {
+    try {
+      const r = await fetch('/api/sessions/work-dirs/history')
+      if (!r.ok) return
+      const data = await r.json()
+      workDirHistory.value = data.work_dirs || []
+    } catch (e) { /* ignore */ }
+  }
+
+  // 清除当前会话工作文件夹（菜单「清除项目」）。
+  function clearWorkDir() {
+    return bindWorkDir('')
   }
 
   // 聊天区错误提示条（不带发送场景的后缀文案）
@@ -696,11 +720,11 @@ const useChatStore = defineStore('chat', () => {
   return {
     // state
     items, busy, connected, typing, session, lastDraft, lastStatus, sessions, draft, currentProgress, runningElapsed,
-    workDir, attachments,
+    workDir, workDirHistory, attachments,
     // actions
     connect, loadHistory, send, stop, newSession, switchSession, fetchSessions, reconnect, deleteSession,
     archiveSession, batchDeleteSessions, renameSession, answerAsk,
-    chooseProject, notifyError, addAttachment, removeAttachment, clearAttachments,
+    chooseProject, bindWorkDir, clearWorkDir, fetchWorkDirHistory, notifyError, addAttachment, removeAttachment, clearAttachments,
   }
 })
 

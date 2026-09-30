@@ -423,7 +423,8 @@ def _patch_meta_conn(monkeypatch, tmp_path):
     conn = sqlite3.connect(str(tmp_path / "meta.db"), check_same_thread=False)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS session_titles ("
-        "thread_id TEXT PRIMARY KEY, title TEXT NOT NULL, work_dir TEXT DEFAULT '')"
+        "thread_id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+        "work_dir TEXT DEFAULT '', work_dir_ts TEXT DEFAULT '')"
     )
     conn.commit()
     monkeypatch.setattr(ms, "get_meta_conn", lambda settings=None: conn)
@@ -590,3 +591,95 @@ def test_script_cwd_defaults_to_tmp_when_no_work_dir(monkeypatch, tmp_path):
     tmp = tmp_path / "_tmp"
     monkeypatch.setattr(runner, "_ensure_tmp", lambda: tmp)
     assert runner._resolve_script_cwd() == str(tmp)
+
+
+# ---------- 历史项目查询端点（变更 037） ----------
+
+def _insert_wd_row(conn, thread_id, work_dir, ts):
+    """直接插一行（带可控时间戳），供历史排序测试。"""
+    conn.execute(
+        "INSERT INTO session_titles (thread_id, title, work_dir, work_dir_ts) "
+        "VALUES (?, '', ?, ?) "
+        "ON CONFLICT(thread_id) DO UPDATE SET work_dir = excluded.work_dir, "
+        "work_dir_ts = excluded.work_dir_ts",
+        (thread_id, work_dir, ts),
+    )
+    conn.commit()
+
+
+def test_work_dir_history_dedup_and_sort(monkeypatch, tmp_path):
+    """去重 + 按最近绑定时间倒序；同 path 多会话取最大 ts。"""
+    conn = _patch_meta_conn(monkeypatch, tmp_path)
+    _insert_wd_row(conn, "s1", "/projA", "2026-01-01T00:00:00")
+    _insert_wd_row(conn, "s2", "/projB", "2026-01-03T00:00:00")
+    _insert_wd_row(conn, "s3", "/projA", "2026-01-02T00:00:00")  # 同 path 不同会话 → 去重
+
+    import crawagent.storage.meta_store as ms
+    history = ms.list_work_dir_history()
+    # projB(01-03) → projA(取 s3 的 01-02 而非 s1 的 01-01)；去重后 2 项
+    assert history == ["/projB", "/projA"]
+
+
+def test_work_dir_history_empty(monkeypatch, tmp_path):
+    _patch_meta_conn(monkeypatch, tmp_path)
+    import crawagent.storage.meta_store as ms
+    assert ms.list_work_dir_history() == []
+
+
+def test_work_dir_history_limit_10(monkeypatch, tmp_path):
+    """超过 10 个去重 work_dir → 只返回最近 10 个。"""
+    conn = _patch_meta_conn(monkeypatch, tmp_path)
+    for i in range(12):
+        _insert_wd_row(conn, f"s{i}", f"/p{i}", f"2026-01-{i + 1:02d}T00:00:00")
+    import crawagent.storage.meta_store as ms
+    history = ms.list_work_dir_history()
+    assert len(history) == 10
+    assert history[0] == "/p11"  # 最近
+    assert "/p0" not in history  # 最老被截掉
+
+
+def test_work_dir_history_skips_empty(monkeypatch, tmp_path):
+    """空 work_dir 的会话不入选历史。"""
+    conn = _patch_meta_conn(monkeypatch, tmp_path)
+    _insert_wd_row(conn, "s1", "/real", "2026-01-01T00:00:00")
+    conn.execute(
+        "INSERT INTO session_titles (thread_id, title, work_dir, work_dir_ts) "
+        "VALUES ('s2', '有标题但无项目', '', '')"
+    )
+    conn.commit()
+    import crawagent.storage.meta_store as ms
+    assert ms.list_work_dir_history() == ["/real"]
+
+
+def test_work_dir_history_rebind_bubbles_to_top(monkeypatch, tmp_path):
+    """同会话换项目：新 path 时间戳最大 → 排第一（rowid 方案做不到，故用 work_dir_ts）。"""
+    s = _FakeSettings(tmp_path)
+    import crawagent.storage.meta_store as ms
+    ms.reset_meta_conn()
+    try:
+        conn = ms.get_meta_conn(s)
+        # 先插一条老绑定（时间戳在过去）
+        conn.execute(
+            "INSERT INTO session_titles (thread_id, title, work_dir, work_dir_ts) "
+            "VALUES ('s1', '', '/old', '2020-01-01T00:00:00')"
+        )
+        conn.commit()
+        # set_work_dir 换项目 → 生成 now 时间戳（必然 > 2020）
+        ms.set_work_dir("s1", str(tmp_path / "newproj"), s)
+        history = ms.list_work_dir_history(s)
+        # newproj 时间戳 = now → 排第一；/old 已被覆盖（s1 现在绑 newproj）
+        assert history[0].endswith("newproj")
+        assert "/old" not in history
+    finally:
+        ms.reset_meta_conn()
+
+
+def test_work_dir_history_endpoint(monkeypatch, tmp_path):
+    """GET /api/sessions/work-dirs/history → {work_dirs: [...]} 按最近使用排序。"""
+    conn = _patch_meta_conn(monkeypatch, tmp_path)
+    _insert_wd_row(conn, "s1", "/projA", "2026-01-01T00:00:00")
+    _insert_wd_row(conn, "s2", "/projB", "2026-01-02T00:00:00")
+    client = _work_dir_client()
+    r = client.get("/api/sessions/work-dirs/history")
+    assert r.status_code == 200
+    assert r.json() == {"work_dirs": ["/projB", "/projA"]}

@@ -187,6 +187,104 @@ def test_download_to_file_passes_stream(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# _fmt_progress / _fmt_progress_done（变更 037 下载进度格式化）
+# ---------------------------------------------------------------------------
+
+def test_fmt_progress_with_content_length():
+    """有 Content-Length → 显示百分比/总大小/速度。"""
+    # done=13631488(13MB) total=28440960(27.1MB) → 47%（整除向下取整）；dt=0.5, prev=10485760(10MB) → speed=6.0
+    msg = social_utils._fmt_progress("clip.mp4", 13631488, 28440960, 0.5, 10485760)
+    assert "clip.mp4" in msg
+    assert "47%" in msg
+    assert "13.0/27.1MB" in msg
+    assert "6.0MB/s" in msg
+
+
+def test_fmt_progress_without_content_length():
+    """无 Content-Length → 只显示已下载字节，无百分比。"""
+    msg = social_utils._fmt_progress("clip.mp4", 5242880, 0, 1.0, 0)
+    assert "clip.mp4" in msg
+    assert "%" not in msg
+    assert "已下载" in msg
+    assert "5.0MB" in msg
+
+
+def test_fmt_progress_zero_dt_no_division_error():
+    """dt=0（同时间戳）不除零，速度降为 0。"""
+    msg = social_utils._fmt_progress("f.bin", 100, 200, 0, 0)
+    assert "0.0MB/s" in msg
+
+
+def test_fmt_progress_done_with_total():
+    msg = social_utils._fmt_progress_done("clip.mp4", 28440960, 28440960, 10.0)
+    assert "完成" in msg and "100%" in msg and "27.1MB" in msg
+
+
+def test_fmt_progress_done_without_total():
+    msg = social_utils._fmt_progress_done("clip.mp4", 5242880, 0, 5.0)
+    assert "完成" in msg and "%" not in msg and "5.0MB" in msg
+
+
+# ---------------------------------------------------------------------------
+# _download_to_file 进度上报（变更 037）
+# ---------------------------------------------------------------------------
+
+def test_download_to_file_reports_progress_with_content_length(monkeypatch, tmp_path):
+    """有 Content-Length → report_progress 推含百分比/总大小/速度的进度行。"""
+    monkeypatch.setattr(social_utils, "get_settings", lambda: MagicMock(request_timeout=10))
+    monkeypatch.setattr(social_utils, "_PROGRESS_REPORT_INTERVAL", 0.0)  # 每 chunk 都报
+    calls = []
+    monkeypatch.setattr(social_utils, "report_progress", lambda msg: calls.append(msg))
+    mock_resp = MagicMock()
+    mock_resp.headers = {"Content-Length": "200"}
+    mock_resp.iter_content.return_value = [b"x" * 100, b"y" * 100]
+    out = tmp_path / "clip.mp4"
+    with patch.object(social_utils.requests, "get", return_value=mock_resp):
+        social_utils._download_to_file("https://example.com/v", out, headers={})
+    assert out.read_bytes() == b"x" * 100 + b"y" * 100
+    # 2 chunk（interval=0 每 chunk 报）+ 1 完成行 = 3 条
+    assert len(calls) == 3
+    assert all("clip.mp4" in c for c in calls)
+    assert "50%" in calls[0]  # 100/200
+    assert "MB/s" in calls[0]
+    assert "完成" in calls[-1] and "100%" in calls[-1]
+
+
+def test_download_to_file_progress_no_content_length(monkeypatch, tmp_path):
+    """无 Content-Length → 进度行无百分比，只显示已下载字节。"""
+    monkeypatch.setattr(social_utils, "get_settings", lambda: MagicMock(request_timeout=10))
+    monkeypatch.setattr(social_utils, "_PROGRESS_REPORT_INTERVAL", 0.0)
+    calls = []
+    monkeypatch.setattr(social_utils, "report_progress", lambda msg: calls.append(msg))
+    mock_resp = MagicMock()
+    mock_resp.headers = {}
+    mock_resp.iter_content.return_value = [b"x" * 100]
+    out = tmp_path / "no_cl.bin"
+    with patch.object(social_utils.requests, "get", return_value=mock_resp):
+        social_utils._download_to_file("https://example.com/v", out, headers={})
+    assert len(calls) == 2  # 1 chunk + 1 完成
+    assert "已下载" in calls[0]
+    assert "%" not in calls[0]
+    assert "完成" in calls[1]
+
+
+def test_download_to_file_progress_interval_throttles(monkeypatch, tmp_path):
+    """0.5s 间隔下，快循环（< 0.5s）只报完成行，不在中途刷屏。"""
+    monkeypatch.setattr(social_utils, "get_settings", lambda: MagicMock(request_timeout=10))
+    calls = []
+    monkeypatch.setattr(social_utils, "report_progress", lambda msg: calls.append(msg))
+    mock_resp = MagicMock()
+    mock_resp.headers = {"Content-Length": "200"}
+    mock_resp.iter_content.return_value = [b"x" * 200]
+    out = tmp_path / "throttle.bin"
+    with patch.object(social_utils.requests, "get", return_value=mock_resp):
+        social_utils._download_to_file("https://example.com/v", out, headers={})
+    # 单 chunk + 快循环 → 中途不报（间隔未满），只有完成行
+    assert len(calls) == 1
+    assert "完成" in calls[0]
+
+
+# ---------------------------------------------------------------------------
 # _find_item（递归找 Douyin item dict）
 # ---------------------------------------------------------------------------
 

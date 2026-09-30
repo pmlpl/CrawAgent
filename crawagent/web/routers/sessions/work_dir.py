@@ -12,6 +12,9 @@ POST /api/sessions/{session_id}/work-dir，body {path: str}：
 返回：
     {ok: true, work_dir: "<规范化后的绝对路径>"}   绑定/更换/清除成功
     {ok: false, error: "<人话错误>"}                mkdir 失败等异常
+
+GET /api/sessions/work-dirs/history：最近用过的 work_dir（去重 + 按最近使用
+排序，最多 10 个），供提示条「切换项目」菜单一键重选（变更 037）。
 """
 from __future__ import annotations
 
@@ -19,9 +22,20 @@ from typing import Any
 
 from fastapi import APIRouter, Body
 
-from crawagent.storage.meta_store import get_work_dir, set_work_dir
+from crawagent.storage.meta_store import get_work_dir, list_work_dir_history, set_work_dir
 
 router = APIRouter()
+
+
+@router.get("/api/sessions/work-dirs/history")
+async def get_work_dir_history() -> dict:
+    """最近用过的 work_dir（去重 + 按最近使用排序，最多 10 个，变更 037）。
+
+    供聊天页提示条「切换项目」菜单展示历史项。实现委托 meta_store.list_work_dir_history
+    （按 work_dir_ts 时间戳排序——rowid 在 conflict-update 时不变，无法反映
+    「同会话换项目」后的真实时序）。
+    """
+    return {"work_dirs": list_work_dir_history()}
 
 
 @router.post("/api/sessions/{session_id}/work-dir")

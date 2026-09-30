@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import datetime
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -62,7 +63,12 @@ def get_meta_conn(settings: Settings | None = None) -> sqlite3.Connection:
 
 
 def _migrate_meta_columns(conn: sqlite3.Connection) -> None:
-    """兼容迁移：给老库 session_titles 补 work_dir 列（变更 034 会话工作文件夹）。
+    """兼容迁移：给老库 session_titles 补 work_dir / work_dir_ts 列。
+
+    - work_dir（034 会话工作文件夹）：TEXT DEFAULT ''
+    - work_dir_ts（037 历史项目排序）：每次 set_work_dir 刷 ISO 时间戳，
+      供「切换项目」菜单按最近使用排序（rowid 在 conflict-update 时不变，
+      无法反映「同会话换项目」后的真实时序）。
 
     SQLite ADD COLUMN 无损；并发首启另一线程可能已完成迁移，duplicate column 直接忽略。
     """
@@ -71,6 +77,11 @@ def _migrate_meta_columns(conn: sqlite3.Connection) -> None:
     if "work_dir" not in existing_cols:
         try:
             conn.execute("ALTER TABLE session_titles ADD COLUMN work_dir TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+    if "work_dir_ts" not in existing_cols:
+        try:
+            conn.execute("ALTER TABLE session_titles ADD COLUMN work_dir_ts TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
 
@@ -106,7 +117,8 @@ def set_work_dir(thread_id: str, work_dir: str, settings: Settings | None = None
     """设置会话工作文件夹：abspath 规范化 + 不存在自动创建后入库。
 
     返回规范化后的绝对路径；目录创建失败抛 OSError（调用方决定是否兜底）。
-    空 work_dir 视为清除（落回空串）。
+    空 work_dir 视为清除（落回空串）。每次调用刷 work_dir_ts（变更 037），
+    供历史项目查询按最近使用排序。
     """
     cleaned = (work_dir or "").strip()
     conn = get_meta_conn(settings)
@@ -114,13 +126,35 @@ def set_work_dir(thread_id: str, work_dir: str, settings: Settings | None = None
         import os
         cleaned = os.path.abspath(cleaned)
         os.makedirs(cleaned, exist_ok=True)
+    ts = datetime.datetime.now().isoformat()
     conn.execute(
-        "INSERT INTO session_titles (thread_id, title, work_dir) VALUES (?, '', ?) "
-        "ON CONFLICT(thread_id) DO UPDATE SET work_dir = excluded.work_dir",
-        (thread_id, cleaned),
+        "INSERT INTO session_titles (thread_id, title, work_dir, work_dir_ts) "
+        "VALUES (?, '', ?, ?) "
+        "ON CONFLICT(thread_id) DO UPDATE SET work_dir = excluded.work_dir, "
+        "work_dir_ts = excluded.work_dir_ts",
+        (thread_id, cleaned, ts),
     )
     conn.commit()
     return cleaned
+
+
+def list_work_dir_history(settings: Settings | None = None) -> list[str]:
+    """最近用过的 work_dir（去重 + 按最近绑定时间排序，最多 10 个，变更 037）。
+
+    供聊天页提示条「切换项目」菜单展示历史项。按 work_dir_ts（每次 set_work_dir
+    刷新的 ISO 时间戳）倒序取最近一次绑定；空 work_dir 不入选。查询异常静默
+    返回空列表（菜单降级为「打开新项目 / 清除项目」两项）。
+    """
+    try:
+        conn = get_meta_conn(settings)
+        rows = conn.execute(
+            "SELECT work_dir, MAX(work_dir_ts) AS last_used "
+            "FROM session_titles WHERE work_dir != '' "
+            "GROUP BY work_dir ORDER BY last_used DESC LIMIT 10"
+        ).fetchall()
+        return [r[0] for r in rows if r[0]]
+    except Exception:
+        return []
 
 
 def reset_meta_conn() -> None:

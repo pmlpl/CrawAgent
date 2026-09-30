@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import EmptyState from '../components/EmptyState.vue'
@@ -134,6 +134,38 @@ function onSuggest(text) {
   composer.value?.fill(text)
 }
 
+// ---------- 工作文件夹提示条「切换项目」菜单（变更 037）----------
+// 右侧向上箭头点击 → 弹历史项目列表 + 打开新项目 / 清除项目。
+// 点击菜单外部自动关闭：document click 监听检查目标是否落在提示条容器内。
+const wdMenuOpen = ref(false)
+const wdBarRef = ref(null)
+
+function toggleWdMenu() {
+  if (wdMenuOpen.value) {
+    wdMenuOpen.value = false
+    return
+  }
+  chat.fetchWorkDirHistory()
+  wdMenuOpen.value = true
+}
+function onPickHistory(wd) {
+  wdMenuOpen.value = false
+  chat.bindWorkDir(wd)
+}
+function onOpenNewProject() {
+  wdMenuOpen.value = false
+  chat.chooseProject()
+}
+function onClearProject() {
+  wdMenuOpen.value = false
+  chat.clearWorkDir()
+}
+function onDocClick(e) {
+  if (wdMenuOpen.value && wdBarRef.value && !wdBarRef.value.contains(e.target)) {
+    wdMenuOpen.value = false
+  }
+}
+
 // useChat 为单例：路由切走再回来时 items 仍在，避免重复 loadHistory 导致消息翻倍
 onMounted(() => {
   if (!chat.connected) chat.connect()
@@ -141,6 +173,10 @@ onMounted(() => {
     chat.loadHistory()
     // fetchSessions 已在 main.js 启动时调用
   }
+  document.addEventListener('click', onDocClick)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
 })
 </script>
 
@@ -151,13 +187,29 @@ onMounted(() => {
       连接已断开 · <b>点击重新连线</b>
     </div>
 
-    <!-- 工作文件夹提示条（034）：本会话产物去哪，始终可感知 -->
-    <div v-if="chat.workDir" class="workdir-bar" :title="chat.workDir">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <!-- 工作文件夹提示条（034/037）：本会话产物去哪 + 右侧切换项目菜单 -->
+    <div v-if="chat.workDir" ref="wdBarRef" class="workdir-bar">
+      <svg class="wd-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
       </svg>
       <span class="wd-label">工作文件夹</span>
-      <span class="wd-value">{{ chat.workDir }}</span>
+      <span class="wd-value" :title="chat.workDir">{{ chat.workDir }}</span>
+      <button type="button" class="wd-switch" :class="{ active: wdMenuOpen }" :title="wdMenuOpen ? '收起菜单' : '切换项目'" aria-label="切换项目" @click.stop="toggleWdMenu">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 15l-6-6-6 6" />
+        </svg>
+      </button>
+      <!-- 切换项目菜单：历史项 + 打开新项目 + 清除项目 -->
+      <div v-if="wdMenuOpen" class="wd-menu" role="menu">
+        <div class="wd-menu-title">历史项目</div>
+        <button v-for="wd in chat.workDirHistory" :key="wd" type="button" class="wd-menu-item" role="menuitem" :title="wd" @click="onPickHistory(wd)">
+          <span class="wd-menu-path">{{ wd }}</span>
+        </button>
+        <div v-if="!chat.workDirHistory.length" class="wd-menu-empty">暂无历史项目</div>
+        <div class="wd-menu-sep"></div>
+        <button type="button" class="wd-menu-item wd-menu-action" role="menuitem" @click="onOpenNewProject">打开新项目</button>
+        <button type="button" class="wd-menu-item wd-menu-action wd-menu-danger" role="menuitem" @click="onClearProject">清除项目</button>
+      </div>
     </div>
 
     <!-- 消息流（含轮次导航 + 回到底部） -->
@@ -449,19 +501,24 @@ onMounted(() => {
 
 /* 工作文件夹提示条：与 banner 同层的窄条，路径超长省略、hover 全文 */
 .workdir-bar {
+  position: relative; /* 切换菜单 dropdown 的定位锚 */
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 10px;
   max-width: var(--maxw);
   margin: 8px auto 0;
-  padding: 6px 16px;
+  padding: 6px 14px 6px 16px;
   border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
   background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
   border-radius: 999px;
   font-size: 12.5px;
   color: var(--dim);
+}
+.workdir-bar .wd-ico {
+  flex: none;
+  display: block; /* 消除 inline SVG 的 baseline 错位 */
 }
 .workdir-bar .wd-label {
   flex: none;
@@ -471,9 +528,97 @@ onMounted(() => {
 .workdir-bar .wd-value {
   font-family: var(--font-mono);
   font-size: 12px;
+  min-width: 0; /* 允许在 flex 行里收缩省略 */
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 切换项目按钮（向上箭头） */
+.workdir-bar .wd-switch {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: .65;
+  transition: opacity .15s, background .15s;
+}
+.workdir-bar .wd-switch:hover,
+.workdir-bar .wd-switch.active {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+/* 切换菜单 dropdown（绝对定位到提示条右下） */
+.workdir-bar .wd-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 220px;
+  max-width: 360px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  animation: rise .15s var(--ease) both;
+}
+.workdir-bar .wd-menu-title {
+  padding: 4px 10px 2px;
+  font-size: 11px;
+  color: var(--dim);
+  letter-spacing: .04em;
+}
+.workdir-bar .wd-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .12s;
+}
+.workdir-bar .wd-menu-item:hover {
+  background: var(--accent-soft);
+}
+.workdir-bar .wd-menu-path {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workdir-bar .wd-menu-empty {
+  padding: 6px 10px 8px;
+  font-size: 12px;
+  color: var(--dim);
+  opacity: .7;
+}
+.workdir-bar .wd-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+.workdir-bar .wd-menu-action {
+  font-weight: 500;
+}
+.workdir-bar .wd-menu-danger {
+  color: var(--danger);
+}
+.workdir-bar .wd-menu-danger:hover {
+  background: var(--danger-soft);
 }
 
 .typing {
