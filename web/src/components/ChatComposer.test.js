@@ -73,13 +73,16 @@ describe('ChatComposer 输入区按钮（035 + 036）', () => {
     expect(st().chooseProject).toHaveBeenCalledTimes(1)
   })
 
-  it('已绑定项目 → 按钮高亮并显示路径（点击=更换）', () => {
+  it('已绑定项目 → 按钮高亮并显示路径（038 锁定：点击不更换）', async () => {
     freshState({ workDir: 'D:/我的项目' })
     const w = mountComposer()
     const btn = w.findAll('.tool-group.left .tool-btn')[1]
     expect(btn.classes()).toContain('active')
     expect(btn.find('.project-path').text()).toBe('D:/我的项目')
-    expect(btn.attributes('title')).toContain('点击更换')
+    expect(btn.attributes('title')).toContain('已锁定')
+    // 点击是 no-op：不再调 chooseProject（前端不提供换绑入口）
+    await btn.trigger('click')
+    expect(st().chooseProject).not.toHaveBeenCalled()
   })
 
   it('busy 时两个按钮都禁用（防中途改清单）', () => {

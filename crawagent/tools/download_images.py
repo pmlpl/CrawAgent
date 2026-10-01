@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -154,6 +155,12 @@ def download_images(urls: str, subdir: str = "wallpapers", referer: str = "") ->
     返回：
         格式化字符串：下载成功数 + 失败 URL 清单 + 已保存本地绝对路径。
     """
+    # 变更 038 路径失效防护：work_dir 已绑定但目录被删 → 人话报错，不重建不写入
+    from crawagent.tools.session_dir import work_dir_unavailable
+    unavailable = work_dir_unavailable()
+    if unavailable:
+        return json.dumps({"error": unavailable}, ensure_ascii=False)
+
     url_list = _split_urls(urls)
     if not url_list:
         return "download_images failed: no valid urls provided"

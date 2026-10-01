@@ -90,6 +90,12 @@ def download_social_media(url: str, include: str = "video,cover,comments", subdi
     返回：
         JSON 汇总，每项下载附带本地绝对路径。
     """
+    # 变更 038 路径失效防护：work_dir 已绑定但目录被删 → 人话报错，不重建不写入
+    from crawagent.tools.session_dir import work_dir_unavailable
+    unavailable = work_dir_unavailable()
+    if unavailable:
+        return json.dumps({"error": unavailable}, ensure_ascii=False, indent=2)
+
     data = _extract_data(url, {"metadata", "media", "comments"})
     if data.get("error"):
         return json.dumps(data, ensure_ascii=False, indent=2)

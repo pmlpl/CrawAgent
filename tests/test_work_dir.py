@@ -34,17 +34,110 @@ def test_work_dir_roundtrip_and_mkdir(tmp_path):
         assert target.is_dir()  # 不存在自动创建
         assert ms.get_work_dir("sess_wd1", s) == str(target.resolve())
 
-        # 相对路径规范化为绝对路径
+        # 相对路径规范化为绝对路径（新会话首次绑定，不受锁定影响）
         import os
-        got2 = ms.set_work_dir("sess_wd1", ".", s)
+        got2 = ms.set_work_dir("sess_wd2", ".", s)
         assert Path(got2).is_absolute()
         assert Path(got2) == Path(os.path.abspath(".")).resolve()
 
-        # 清除：空串落回 ""
-        ms.set_work_dir("sess_wd1", "", s)
-        assert ms.get_work_dir("sess_wd1", s) == ""
         # 未配置的会话 → ""
         assert ms.get_work_dir("sess_missing", s) == ""
+    finally:
+        ms.reset_meta_conn()
+
+
+# ---------- 038：会话↔项目 1:1 锁定守卫 ----------
+
+def test_work_dir_rebind_rejected(tmp_path):
+    """已绑定会话换绑 → WorkDirLockedError，绑定不变、不写历史表。"""
+    import crawagent.storage.meta_store as ms
+
+    s = _FakeSettings(tmp_path)
+    ms.reset_meta_conn()
+    try:
+        first = ms.set_work_dir("s1", str(tmp_path / "projA"), s)
+        try:
+            ms.set_work_dir("s1", str(tmp_path / "projB"), s)
+            raise AssertionError("换绑应被拒绝")
+        except ms.WorkDirLockedError as e:
+            msg = str(e)
+            assert str(first) in msg  # 人话含旧路径
+            assert "新建会话" in msg  # 含新建会话指引
+        # 绑定未被覆盖
+        assert ms.get_work_dir("s1", s) == str(first)
+        # 历史表只有第一条，被拒的 projB 没进去
+        assert ms.list_work_dir_history(s) == [str(first)]
+    finally:
+        ms.reset_meta_conn()
+
+
+def test_work_dir_clear_rejected(tmp_path):
+    """已绑定会话清除（path 空）→ WorkDirLockedError，防「清除再绑别的」绕过。"""
+    import crawagent.storage.meta_store as ms
+
+    s = _FakeSettings(tmp_path)
+    ms.reset_meta_conn()
+    try:
+        bound = ms.set_work_dir("s1", str(tmp_path / "projA"), s)
+        try:
+            ms.set_work_dir("s1", "", s)
+            raise AssertionError("清除应被拒绝")
+        except ms.WorkDirLockedError as e:
+            assert str(bound) in str(e)
+            assert "新建会话" in str(e)
+        assert ms.get_work_dir("s1", s) == str(bound)  # 绑定原封不动
+    finally:
+        ms.reset_meta_conn()
+
+
+def test_work_dir_clear_unbound_noop(tmp_path):
+    """未绑定会话传空串 → 合法 no-op（仍返回空串，不抛锁定异常）。"""
+    import crawagent.storage.meta_store as ms
+
+    s = _FakeSettings(tmp_path)
+    ms.reset_meta_conn()
+    try:
+        assert ms.set_work_dir("fresh", "", s) == ""
+        assert ms.get_work_dir("fresh", s) == ""
+    finally:
+        ms.reset_meta_conn()
+
+
+def test_work_dir_same_path_idempotent(tmp_path):
+    """同路径重绑幂等放行，且刷新 work_dir_history 的 last_used（常用置顶）。"""
+    import os
+
+    import crawagent.storage.meta_store as ms
+
+    s = _FakeSettings(tmp_path)
+    ms.reset_meta_conn()
+    try:
+        target = tmp_path / "projA"
+        first = ms.set_work_dir("s1", str(target), s)
+        # 换写法重绑同一目录：末尾补路径分隔符（normpath 消差异；Windows
+        # 大小写差异同理由 normcase 消掉，判定入口只认规范化后的形态）
+        again = ms.set_work_dir("s1", str(target) + os.sep, s)
+        assert Path(again) == Path(first)
+        assert ms.get_work_dir("s1", s) == str(first)
+        # 历史表仍只有一条（append-only 去重），last_used 被刷新
+        assert ms.list_work_dir_history(s) == [str(first)]
+    finally:
+        ms.reset_meta_conn()
+
+
+def test_work_dir_reject_does_not_mkdir(tmp_path):
+    """换绑被拒时不建新目录（连 mkdir 副作用都没有）。"""
+    import crawagent.storage.meta_store as ms
+
+    s = _FakeSettings(tmp_path)
+    ms.reset_meta_conn()
+    try:
+        ms.set_work_dir("s1", str(tmp_path / "projA"), s)
+        try:
+            ms.set_work_dir("s1", str(tmp_path / "projB"), s)
+        except ms.WorkDirLockedError:
+            pass
+        assert not (tmp_path / "projB").exists()
     finally:
         ms.reset_meta_conn()
 
@@ -125,6 +218,44 @@ def test_current_work_dir_reads_meta(monkeypatch):
         assert current_work_dir() == ""
     finally:
         ctx_session_id.reset(tok)
+
+
+# ---------- 038：work_dir_unavailable 失效检查 helper ----------
+
+def test_work_dir_unavailable_when_dir_deleted(monkeypatch, tmp_path):
+    """已绑定但目录被删 → 人话错误串（含路径 + 恢复/新建会话指引 + 未写入声明）。"""
+    import crawagent.tools.session_dir as sd
+
+    gone = tmp_path / "gone"  # 从不创建
+    monkeypatch.setattr(sd, "current_work_dir", lambda: str(gone))
+    msg = sd.work_dir_unavailable()
+    assert str(gone) in msg
+    assert "已不存在" in msg
+    assert "新建会话" in msg
+    assert "未写入" in msg
+
+
+def test_work_dir_unavailable_empty_when_ok_or_unbound(monkeypatch, tmp_path):
+    """目录存在 / 未绑定 work_dir → 恒空串（放行）。"""
+    import crawagent.tools.session_dir as sd
+
+    alive = tmp_path / "alive"
+    alive.mkdir()
+    monkeypatch.setattr(sd, "current_work_dir", lambda: str(alive))
+    assert sd.work_dir_unavailable() == ""
+    monkeypatch.setattr(sd, "current_work_dir", lambda: "")
+    assert sd.work_dir_unavailable() == ""
+
+
+def test_work_dir_unavailable_recovers_without_restart(monkeypatch, tmp_path):
+    """文件夹删了报失效、建回来自动恢复（现查 exists 不缓存）。"""
+    import crawagent.tools.session_dir as sd
+
+    wd = tmp_path / "wd"
+    monkeypatch.setattr(sd, "current_work_dir", lambda: str(wd))
+    assert "已不存在" in sd.work_dir_unavailable()
+    wd.mkdir()
+    assert sd.work_dir_unavailable() == ""
 
 
 # ---------- pick-folder 端点 ----------
@@ -412,6 +543,84 @@ def test_download_social_media_default_regression(monkeypatch, tmp_path):
     assert "error" in r2 and "escapes" in r2["error"]
 
 
+# ---------- 038：四工具路径失效防护 ----------
+
+def test_save_to_file_unavailable_dir_no_write(monkeypatch, tmp_path):
+    """save_to_file：work_dir 被删 → 人话报错，目录不被重建、文件不落盘。"""
+    import crawagent.tools.session_dir as sd
+    from crawagent.graph.agent import ctx_session_id
+    from crawagent.tools.file_tool import save_to_file
+
+    _patch_file_tool(monkeypatch, tmp_path)
+    gone = tmp_path / "gone_wd"
+    monkeypatch.setattr(sd, "current_work_dir", lambda: str(gone))
+    tok = ctx_session_id.set("sess_gone")
+    try:
+        r = save_to_file.func("测试.md", "内容")
+        assert "Save failed" in r
+        assert "已不存在" in r
+        assert not gone.exists()          # 目录未被静默重建
+        assert not (gone / "测试.md").exists()
+    finally:
+        ctx_session_id.reset(tok)
+
+
+def test_download_social_media_unavailable_dir(monkeypatch, tmp_path):
+    """download_social_media：work_dir 被删 → error dict 人话，不做网络解析。"""
+    import crawagent.tools.session_dir as sd
+    import crawagent.tools.social_tool as st
+
+    gone = tmp_path / "gone_social"
+    monkeypatch.setattr(sd, "current_work_dir", lambda: str(gone))
+    called = []
+    monkeypatch.setattr(st, "_extract_data", lambda url, wanted: called.append(url))
+    r = json.loads(st.download_social_media.func("https://v.douyin.com/x/"))
+    assert "已不存在" in r["error"]
+    assert not called  # 落盘前拦截，连解析都没发起
+    assert not gone.exists()
+
+
+def test_download_images_unavailable_dir(monkeypatch, tmp_path):
+    """download_images：work_dir 被删 → error dict 人话，目录不被重建。"""
+    import crawagent.tools.session_dir as sd
+    import crawagent.tools.download_images as di
+
+    gone = tmp_path / "gone_images"
+    monkeypatch.setattr(sd, "current_work_dir", lambda: str(gone))
+    r = json.loads(di.download_images.func("http://a.example.com/x.jpg", subdir="walls"))
+    assert "已不存在" in r["error"]
+    assert not gone.exists()
+
+
+def test_run_custom_script_unavailable_dir(monkeypatch, tmp_path):
+    """run_custom_script：work_dir 被删 → [ERROR] 人话，不跑子进程。"""
+    import crawagent.tools.script_tool.runner as runner
+    import crawagent.tools.session_dir as sd
+
+    gone = tmp_path / "gone_script"
+    monkeypatch.setattr(sd, "current_work_dir", lambda: str(gone))
+    r = runner.run_custom_script.func("print('hi')")
+    assert r.startswith("[ERROR]")
+    assert "已不存在" in r
+    assert "脚本无法运行" in r
+
+
+def test_tools_unavailable_check_not_triggered_when_unbound(monkeypatch, tmp_path):
+    """未绑定 work_dir → 失效检查恒放行，默认落点行为完全不变（回归）。"""
+    import crawagent.tools.session_dir as sd
+    from crawagent.graph.agent import ctx_session_id
+    from crawagent.tools.file_tool import save_to_file
+
+    _patch_file_tool(monkeypatch, tmp_path)
+    monkeypatch.setattr(sd, "current_work_dir", lambda: "")
+    tok = ctx_session_id.set("sess_unbound")
+    try:
+        r = save_to_file.func("回归.md", "x")
+        assert r.startswith("Saved to")
+    finally:
+        ctx_session_id.reset(tok)
+
+
 # ---------- work-dir 绑定端点（变更 035：选择即落库） ----------
 
 def _patch_meta_conn(monkeypatch, tmp_path):
@@ -463,21 +672,53 @@ def test_work_dir_endpoint_bind_new_session(monkeypatch, tmp_path):
     assert ms.get_work_dir("brand_new") == str(target.resolve())
 
 
-def test_work_dir_endpoint_change_and_clear(monkeypatch, tmp_path):
-    """同会话换项目 → 覆盖旧绑定；path 空 = 清除（退回默认落点）。"""
+def test_work_dir_endpoint_rebind_and_clear_rejected(monkeypatch, tmp_path):
+    """038 1:1 锁定（路由层）：同会话换项目/清除 → ok:False 人话错误，绑定不变。"""
     _patch_meta_conn(monkeypatch, tmp_path)
     client = _work_dir_client()
 
     wd1 = tmp_path / "项目一"
     wd2 = tmp_path / "项目二"
     assert client.post("/api/sessions/s1/work-dir", json={"path": str(wd1)}).json()["ok"]
-    assert client.post("/api/sessions/s1/work-dir", json={"path": str(wd2)}).json()["work_dir"] == str(wd2.resolve())
 
-    r = client.post("/api/sessions/s1/work-dir", json={"path": ""})
-    assert r.json() == {"ok": True, "work_dir": ""}
+    # 换绑被拒：错误含旧路径 + 新建会话指引
+    r = client.post("/api/sessions/s1/work-dir", json={"path": str(wd2)})
+    data = r.json()
+    assert data["ok"] is False
+    assert str(wd1.resolve()) in data["error"]
+    assert "新建会话" in data["error"]
+
+    # 清除被拒：同款人话（防「清除再绑别的」绕过）
+    r2 = client.post("/api/sessions/s1/work-dir", json={"path": ""})
+    data2 = r2.json()
+    assert data2["ok"] is False
+    assert "新建会话" in data2["error"]
 
     import crawagent.storage.meta_store as ms
-    assert ms.get_work_dir("s1") == ""
+    assert ms.get_work_dir("s1") == str(wd1.resolve())
+    # 被拒的路径不进历史表
+    assert ms.list_work_dir_history() == [str(wd1.resolve())]
+
+
+def test_work_dir_endpoint_lock_error_distinct_from_mkdir_error(monkeypatch, tmp_path):
+    """错误分流：WorkDirLockedError（锁定文案）≠ mkdir OSError（创建失败文案）。"""
+    _patch_meta_conn(monkeypatch, tmp_path)
+    client = _work_dir_client()
+
+    # 锁定文案：不含「创建失败」
+    wd1 = tmp_path / "锁定项目"
+    client.post("/api/sessions/s1/work-dir", json={"path": str(wd1)})
+    r = client.post("/api/sessions/s1/work-dir", json={"path": str(tmp_path / "别的")})
+    assert r.json()["ok"] is False
+    assert "一个会话只支持一个项目" in r.json()["error"]
+    assert "创建失败" not in r.json()["error"]
+
+    # mkdir 文案：新会话绑到被文件占用的路径 → 「文件夹创建失败」
+    blocker = tmp_path / "blocker"
+    blocker.write_text("我是文件不是目录")
+    r2 = client.post("/api/sessions/s_new/work-dir", json={"path": str(blocker / "sub")})
+    assert r2.json()["ok"] is False
+    assert "创建失败" in r2.json()["error"]
 
 
 def test_work_dir_endpoint_mkdir_failure(monkeypatch, tmp_path):
@@ -494,15 +735,25 @@ def test_work_dir_endpoint_mkdir_failure(monkeypatch, tmp_path):
 
 
 def test_work_dir_endpoint_get_roundtrip(monkeypatch, tmp_path):
+    """GET 回读绑定 + exists 磁盘存在性（038）。"""
     _patch_meta_conn(monkeypatch, tmp_path)
     client = _work_dir_client()
 
     wd = tmp_path / "回读项目"
     client.post("/api/sessions/s3/work-dir", json={"path": str(wd)})
     r = client.get("/api/sessions/s3/work-dir")
-    assert r.json() == {"ok": True, "work_dir": str(wd.resolve())}
-    # 未绑定的会话 → 空串
-    assert client.get("/api/sessions/s_none/work-dir").json() == {"ok": True, "work_dir": ""}
+    assert r.json() == {"ok": True, "work_dir": str(wd.resolve()), "exists": True}
+
+    # 手动删掉文件夹 → exists 翻 false（前端失效标注数据源）
+    import shutil
+    shutil.rmtree(wd)
+    r2 = client.get("/api/sessions/s3/work-dir")
+    assert r2.json()["exists"] is False
+
+    # 未绑定的会话 → 空串 + exists 恒 true（无意义，前端不消费）
+    assert client.get("/api/sessions/s_none/work-dir").json() == {
+        "ok": True, "work_dir": "", "exists": True,
+    }
 
 
 def test_chat_ws_no_longer_accepts_work_dir_payload():
@@ -640,35 +891,19 @@ def test_work_dir_history_limit_10(monkeypatch, tmp_path):
     assert "/p0" not in history  # 最老被截掉
 
 
-def test_work_dir_history_survives_clear(monkeypatch, tmp_path):
-    """清除绑定 ≠ 没打开过：set_work_dir('') 只清当前绑定，历史列表保留路径。"""
-    s = _FakeSettings(tmp_path)
-    import crawagent.storage.meta_store as ms
-    ms.reset_meta_conn()
-    try:
-        bound = ms.set_work_dir("s1", str(tmp_path / "proj"), s)
-        ms.set_work_dir("s1", "", s)  # 清除
-        assert ms.get_work_dir("s1", s) == ""
-        assert ms.list_work_dir_history(s) == [bound]
-    finally:
-        ms.reset_meta_conn()
+def test_work_dir_history_accumulates_across_sessions(monkeypatch, tmp_path):
+    """038 后换绑不可能，append-only 历史的累积来源 = 多会话各绑各的。
 
-
-def test_work_dir_history_survives_rebind(monkeypatch, tmp_path):
-    """核心回归（指挥官报的 bug）：会话换绑后旧路径仍在历史列表。
-
-    缺陷行为：历史查 session_titles 当前绑定快照，s1 从 oldproj 换绑
-    newproj 时旧路径被覆盖 → 从列表蒸发，只能重新「打开新项目」找回。
-    修复后：work_dir_history append-only，换绑两条都在，新绑置顶。
+    （037 原回归「换绑后旧路径仍在历史」随 1:1 锁定语义退役：换绑在
+    set_work_dir 入口即被拒，append-only 逻辑原样保留，此处锁多会话累积。）
     """
     s = _FakeSettings(tmp_path)
     import crawagent.storage.meta_store as ms
     ms.reset_meta_conn()
     try:
-        old = ms.set_work_dir("s1", str(tmp_path / "oldproj"), s)
-        new = ms.set_work_dir("s1", str(tmp_path / "newproj"), s)
-        assert new != old
-        assert ms.list_work_dir_history(s) == [new, old]
+        a = ms.set_work_dir("s1", str(tmp_path / "projA"), s)
+        b = ms.set_work_dir("s2", str(tmp_path / "projB"), s)
+        assert ms.list_work_dir_history(s) == [b, a]  # 按最近使用倒序
     finally:
         ms.reset_meta_conn()
 
@@ -707,11 +942,24 @@ def test_work_dir_history_backfill_from_legacy(monkeypatch, tmp_path):
 
 
 def test_work_dir_history_endpoint(monkeypatch, tmp_path):
-    """GET /api/sessions/work-dirs/history → {work_dirs: [...]} 按最近使用排序。"""
+    """GET history → {work_dirs: [{path, exists}]}（038 新结构，按最近使用排序）。"""
     conn = _patch_meta_conn(monkeypatch, tmp_path)
     _insert_wd_history_row(conn, "/projA", "2026-01-01T00:00:00")
     _insert_wd_history_row(conn, "/projB", "2026-01-02T00:00:00")
     client = _work_dir_client()
     r = client.get("/api/sessions/work-dirs/history")
     assert r.status_code == 200
-    assert r.json() == {"work_dirs": ["/projB", "/projA"]}
+    data = r.json()
+    paths = [w["path"] for w in data["work_dirs"]]
+    assert paths == ["/projB", "/projA"]
+    # 磁盘上都不存在 → exists 全 false（失效项标灰数据源）
+    assert all(w["exists"] is False for w in data["work_dirs"])
+
+    # 真实存在的目录 → exists true
+    alive = tmp_path / "alive_proj"
+    alive.mkdir()
+    _insert_wd_history_row(conn, str(alive), "2026-01-03T00:00:00")
+    data2 = client.get("/api/sessions/work-dirs/history").json()
+    by_path = {w["path"]: w["exists"] for w in data2["work_dirs"]}
+    assert by_path[str(alive)] is True
+    assert by_path["/projB"] is False

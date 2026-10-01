@@ -8,6 +8,7 @@ output/<会话名>/，会话间隔离。会话名取 meta.db 里的会话标题�
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 # Windows 目录名非法字符（含控制符）；<> 等由调用方数据触发，需清洗为 _
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -60,5 +61,32 @@ def current_work_dir() -> str:
     try:
         from crawagent.storage.meta_store import get_work_dir
         return get_work_dir(sid) or ""
+    except Exception:
+        return ""
+
+
+def work_dir_unavailable() -> str:
+    """当前会话 work_dir 已绑定但目录在磁盘上不存在 → 返回人话错误串；否则空串。
+
+    变更 038 路径失效防护：save_to_file / download_social_media /
+    download_images / run_custom_script 四个写产物工具落盘前统一调用，
+    非空即原样返回错误（不 mkdir、不写入——用户删文件夹表达的是
+    「不想要该路径」，工具静默重建等于违背意图）。检查时机 = 工具调用时
+    现查 Path.exists() 不缓存，文件夹建回来无需重启自动恢复。
+
+    未绑定 work_dir 时恒空串——output/downloads 默认落点由项目自身保证
+    存在，不属本变更防护范围。防御策略同 session_subdir()：解析失败
+    不杀死工具调用，退空串即放行。
+    """
+    try:
+        work_dir = current_work_dir()
+        if not work_dir:
+            return ""
+        if Path(work_dir).exists():
+            return ""
+        return (
+            f"项目文件夹 {work_dir} 已不存在（可能被删除或移动）。"
+            "请恢复该文件夹，或新建会话重新选择项目。本次未写入任何文件。"
+        )
     except Exception:
         return ""

@@ -161,6 +161,14 @@ def run_custom_script(code: str, timeout: int = 60) -> str:
         标准输出 + 错误输出（前 5000 字）+ 异常时带 EXIT CODE / TIMEOUT 前缀。
     """
     timeout = min(max(timeout, 5), 600)
+    # 变更 038 路径失效防护：work_dir 已绑定但目录被删 → 脚本 CWD 无效，
+    # subprocess 会抛不人话的 FileNotFoundError，这里前置拦下报人话错误
+    from crawagent.tools.session_dir import current_work_dir, work_dir_unavailable
+    if work_dir_unavailable():
+        return (
+            f"[ERROR] 项目文件夹 {current_work_dir()} 已不存在，脚本无法运行。"
+            "请恢复文件夹或新建会话。"
+        )
     from crawagent.tools.script_tool import get_settings as _get_settings
     settings = _get_settings()
     venv_python = str(Path(sys.executable))

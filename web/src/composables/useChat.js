@@ -46,12 +46,16 @@ const useChatStore = defineStore('chat', () => {
   const lastStatus = computed(() => statusBySession[session.value] || null)
   const sessions = ref([]) // 侧栏会话列表 [{id, preview}]
 
-  // ---------- 工作文件夹（变更 035 交互：选择即落库）----------
+  // ---------- 工作文件夹（变更 035 交互：选择即落库；038 1:1 锁定）----------
   // workDir：当前会话已生效的工作文件夹（空 = 未配置，走 output/downloads 默认落点）。
   // 「选择项目」永远作用于当前会话：pick 原生选框 → REST 端点落库 → 更新本状态。
-  // 034 的 pendingWorkDir 悬空机制已删——归属含糊是 035 重构的直接动因。
+  // 038 起：绑定即 1:1 锁定，换绑/清除被后端拒绝（选错 = 新建会话），前端
+  // 不再提供任何换绑/清除入口——历史菜单只服务未绑定新会话的快速初始化。
   const workDir = ref('')
-  // 历史项目（变更 037）：最近用过的 work_dir 去重列表，供提示条菜单一键切换。
+  // 当前绑定路径是否在磁盘上存在（038 失效标注）；未绑定时恒 true（无意义）
+  const workDirExists = ref(true)
+  // 历史项目（变更 037/038）：[{path, exists}]，供未绑定新会话的菜单一键绑定；
+  // exists=false 的项标灰展示（点击仍可绑定 = 主动重建文件夹）。
   const workDirHistory = ref([])
 
   // 弹系统原生文件夹选择框（后端 tkinter）。返回后端原始响应：
@@ -65,9 +69,10 @@ const useChatStore = defineStore('chat', () => {
     }
   }
 
-  // 绑定/更换/清除当前会话工作文件夹（POST work-dir 端点）。
-  // 菜单的「历史项 / 清除项目」与「选择项目」的落库步骤共用本函数（单一真源）。
-  // 成功更新 workDir；失败 → 聊天区错误提示条。path 空串 = 清除。
+  // 绑定当前会话工作文件夹（POST work-dir 端点）。
+  // 菜单的「历史项 / 打开新项目」与「选择项目」的落库步骤共用本函数（单一真源）。
+  // 成功更新 workDir（038：绑定成功 = mkdir 已通过，目录必然存在）；失败 →
+  // 聊天区错误提示条（已绑定会话换绑会收到 1:1 锁定的人话错误）。
   async function bindWorkDir(path) {
     try {
       const r = await fetch(`/api/sessions/${encodeURIComponent(session.value)}/work-dir`, {
@@ -78,6 +83,7 @@ const useChatStore = defineStore('chat', () => {
       const data = await r.json()
       if (data?.ok) {
         workDir.value = data.work_dir || path
+        workDirExists.value = true
         return data
       }
       notifyError(`项目文件夹绑定失败：${data?.error || '未知错误'}`)
@@ -100,7 +106,8 @@ const useChatStore = defineStore('chat', () => {
     return bindWorkDir(picked.path)
   }
 
-  // 拉历史项目列表（变更 037）：提示条菜单打开前调一次。
+  // 拉历史项目列表（变更 037/038）：未绑定会话的菜单打开前调一次。
+  // 结构 [{path, exists}]——exists=false 的项由 UI 标灰。
   async function fetchWorkDirHistory() {
     try {
       const r = await fetch('/api/sessions/work-dirs/history')
@@ -110,9 +117,15 @@ const useChatStore = defineStore('chat', () => {
     } catch (e) { /* ignore */ }
   }
 
-  // 清除当前会话工作文件夹（菜单「清除项目」）。
-  function clearWorkDir() {
-    return bindWorkDir('')
+  // 回读当前绑定的磁盘存在性（变更 038）：loadHistory / 切会话后刷新失效标注。
+  async function refreshWorkDirExists() {
+    if (!workDir.value) { workDirExists.value = true; return }
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(session.value)}/work-dir`)
+      if (!r.ok) return
+      const d = await r.json()
+      workDirExists.value = d.exists !== false
+    } catch (e) { /* ignore */ }
   }
 
   // 聊天区错误提示条（不带发送场景的后缀文案）
@@ -542,8 +555,10 @@ const useChatStore = defineStore('chat', () => {
       }
       currentTrace = null
       if (data.status) statusBySession[session.value] = data.status
-      // 会话工作文件夹回读（034）：刷新/切会话后头部展示不丢
+      // 会话工作文件夹回读（034）：刷新/切会话后头部展示不丢；
+      // 038：回读后顺带刷新磁盘存在性（失效标注）
       workDir.value = data.work_dir || ''
+      refreshWorkDirExists()
       // 恢复上次未解决的报错（后端持久化，下一轮成功才清除），刷新后红条不丢
       if (data.last_error && data.last_error.message) {
         pushError(data.last_error.message, { restored: true, ts: data.last_error.ts })
@@ -600,6 +615,7 @@ const useChatStore = defineStore('chat', () => {
     traceRoundId = 0
     aiStreams.clear()
     workDir.value = '' // loadHistory 回读目标会话的值，先清避免残留上一会话的
+    workDirExists.value = true
     clearAttachments() // 附件清单是输入区待发状态，换会话不带过去
     connect()
     loadHistory()
@@ -656,7 +672,8 @@ const useChatStore = defineStore('chat', () => {
     currentTrace = null
     traceRoundId = 0
     aiStreams.clear()
-    workDir.value = '' // 新会话未绑定；要绑定就在输入区点「选择项目」（035）
+    workDir.value = '' // 新会话未绑定；要绑定就点「选择项目」或提示条箭头菜单（035/038）
+    workDirExists.value = true
     clearAttachments()
     if (doConnect) connect()
   }
@@ -720,11 +737,11 @@ const useChatStore = defineStore('chat', () => {
   return {
     // state
     items, busy, connected, typing, session, lastDraft, lastStatus, sessions, draft, currentProgress, runningElapsed,
-    workDir, workDirHistory, attachments,
+    workDir, workDirExists, workDirHistory, attachments,
     // actions
     connect, loadHistory, send, stop, newSession, switchSession, fetchSessions, reconnect, deleteSession,
     archiveSession, batchDeleteSessions, renameSession, answerAsk,
-    chooseProject, bindWorkDir, clearWorkDir, fetchWorkDirHistory, notifyError, addAttachment, removeAttachment, clearAttachments,
+    chooseProject, bindWorkDir, refreshWorkDirExists, fetchWorkDirHistory, notifyError, addAttachment, removeAttachment, clearAttachments,
   }
 })
 

@@ -22,6 +22,14 @@ if TYPE_CHECKING:
 _meta_conn: sqlite3.Connection | None = None
 
 
+class WorkDirLockedError(Exception):
+    """会话 1:1 锁定后尝试换绑/清除（变更 038）。
+
+    message 即人话错误文案（含旧路径 + 新建会话指引），路由层原样透传，
+    与 mkdir OSError 分流成不同提示。
+    """
+
+
 def _resolve_db_path(settings: Settings) -> Path:
     """meta.db 路径：与 sessions.db 同目录，命名独立避免混淆。"""
     return settings.sessions_db_path.parent / "meta.db"
@@ -139,12 +147,34 @@ def get_work_dir(thread_id: str, settings: Settings | None = None) -> str:
 def set_work_dir(thread_id: str, work_dir: str, settings: Settings | None = None) -> str:
     """设置会话工作文件夹：abspath 规范化 + 不存在自动创建后入库。
 
+    变更 038 会话↔项目 1:1 锁定：已有非空绑定的会话拒绝换绑与清除（防
+    「清除再绑别的」绕过），抛 WorkDirLockedError（人话含旧路径 + 新建会话
+    指引）；绑定同一路径（normcase+normpath 规范化后相同，消 Windows 大小写/
+    斜杠差异）幂等放行且仍刷 work_dir_history 的 last_used（常用项目置顶）。
+    被拒时不写任何表、不建目录。
+
     返回规范化后的绝对路径；目录创建失败抛 OSError（调用方决定是否兜底）。
-    空 work_dir 视为清除（落回空串，不动绑定历史）。非空绑定时同步把路径
-    记入 work_dir_history（append-only，供「切换项目」菜单历史列表）。
+    空 work_dir 仅在会话本就未绑定时是合法 no-op。
     """
     cleaned = (work_dir or "").strip()
     conn = get_meta_conn(settings)
+    old = get_work_dir(thread_id, settings)
+    if old:
+        if not cleaned:
+            raise WorkDirLockedError(
+                f"该会话已绑定项目 {old}，一个会话只支持一个项目，不支持清除绑定。"
+                "如需更换请新建会话。"
+            )
+        import os
+        new_abs = os.path.abspath(cleaned)
+        if os.path.normcase(os.path.normpath(new_abs)) != os.path.normcase(
+            os.path.normpath(old)
+        ):
+            raise WorkDirLockedError(
+                f"该会话已绑定项目 {old}，一个会话只支持一个项目。"
+                "如需使用其他文件夹请新建会话。"
+            )
+        cleaned = new_abs
     if cleaned:
         import os
         cleaned = os.path.abspath(cleaned)
@@ -171,10 +201,10 @@ def set_work_dir(thread_id: str, work_dir: str, settings: Settings | None = None
 def list_work_dir_history(settings: Settings | None = None) -> list[str]:
     """最近打开过的 work_dir（按最近打开倒序，最多 10 个，变更 037）。
 
-    供聊天页提示条「切换项目」菜单展示历史项。数据源 work_dir_history
-    （append-only 绑定历史）——会话换绑只覆盖 session_titles 当前绑定列，
-    历史表不删旧路径，换绑后旧项目仍在列表里。查询异常静默返回空列表
-    （菜单降级为「打开新项目 / 清除项目」两项）。
+    供聊天页提示条「历史项目」菜单展示。变更 038 用途反转：会话绑定即
+    1:1 锁定不可换绑，历史列表只服务「未绑定新会话快速初始化」场景。
+    数据源 work_dir_history（append-only 绑定历史）——本函数只读库不碰
+    磁盘，存在性标注（exists）由路由层现查。查询异常静默返回空列表。
     """
     try:
         conn = get_meta_conn(settings)

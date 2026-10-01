@@ -112,6 +112,12 @@ def save_to_file(filename: str, content: str, subdir: str = "", mode: str = "ove
         失败："Save failed: <错误详情>"
     """
     try:
+        # 变更 038 路径失效防护：work_dir 已绑定但目录被删 → 人话报错不重建不写入
+        from crawagent.tools.session_dir import work_dir_unavailable
+        unavailable = work_dir_unavailable()
+        if unavailable:
+            return f"Save failed: {unavailable}"
+
         file_path = _resolve_file_path(filename, subdir)
 
         # 自动补后缀

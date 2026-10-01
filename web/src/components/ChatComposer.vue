@@ -158,6 +158,7 @@ const picking = ref(false) // 原生选框打开中（防重复点击）
 
 async function onChooseProject() {
   if (picking.value || props.busy) return
+  if (chat.workDir) return // 038 锁定：一个会话只支持一个项目，不再提供换绑入口
   picking.value = true
   try {
     // chooseProject 内部：取消静默、失败自己发聊天区错误条
@@ -259,13 +260,13 @@ defineExpose({ fill })
           </button>
           <input ref="fileInput" type="file" multiple hidden aria-hidden="true" @change="onFilesChosen" />
 
-          <!-- 选择项目（035）：绑定/更换当前会话的工作文件夹，选完即落库 -->
+          <!-- 选择项目（035）：新会话绑定工作文件夹，选完即落库；038 锁定后仅展示 -->
           <button
             class="tool-btn project-btn"
             :class="{ active: chat.workDir, 'is-busy': picking }"
             type="button"
             :disabled="picking || busy"
-            :title="chat.workDir ? `当前项目：${chat.workDir}（点击更换）` : '选择本会话的工作文件夹（全部产物直接落这里）'"
+            :title="chat.workDir ? `当前项目：${chat.workDir}（已锁定 · 一个会话只支持一个项目，如需更换请新建会话）` : '选择本会话的工作文件夹（全部产物直接落这里）'"
             @click="onChooseProject"
           >
             <span class="btn-label">

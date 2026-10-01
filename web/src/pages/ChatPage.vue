@@ -134,11 +134,16 @@ function onSuggest(text) {
   composer.value?.fill(text)
 }
 
-// ---------- 工作文件夹提示条「切换项目」菜单（变更 037）----------
-// 右侧向上箭头点击 → 弹历史项目列表 + 打开新项目 / 清除项目。
+// ---------- 工作文件夹提示条（034/037/038：1:1 锁定）----------
+// 未绑定：弱化提示 + 向上箭头弹「历史项目」菜单（一键绑 + 打开新项目，无清除——
+//   038 用途反转：历史列表只服务新会话快速初始化）。
+// 已绑定：显示路径，箭头弹只读卡片（路径 + 存在状态，无任何操作项——锁定后
+//   前端不再提供换绑/清除入口，选错 = 新建会话）。
 // 点击菜单外部自动关闭：document click 监听检查目标是否落在提示条容器内。
 const wdMenuOpen = ref(false)
 const wdBarRef = ref(null)
+// 当前绑定路径已在磁盘上消失（038 失效标注）：wd-value 变 danger 色 + 追加说明
+const wdMissing = computed(() => !!chat.workDir && !chat.workDirExists)
 
 function toggleWdMenu() {
   if (wdMenuOpen.value) {
@@ -150,15 +155,11 @@ function toggleWdMenu() {
 }
 function onPickHistory(wd) {
   wdMenuOpen.value = false
-  chat.bindWorkDir(wd)
+  chat.bindWorkDir(wd.path)
 }
 function onOpenNewProject() {
   wdMenuOpen.value = false
   chat.chooseProject()
-}
-function onClearProject() {
-  wdMenuOpen.value = false
-  chat.clearWorkDir()
 }
 function onDocClick(e) {
   if (wdMenuOpen.value && wdBarRef.value && !wdBarRef.value.contains(e.target)) {
@@ -187,28 +188,36 @@ onUnmounted(() => {
       连接已断开 · <b>点击重新连线</b>
     </div>
 
-    <!-- 工作文件夹提示条（034/037）：本会话产物去哪 + 右侧切换项目菜单 -->
-    <div v-if="chat.workDir" ref="wdBarRef" class="workdir-bar">
+    <!-- 工作文件夹提示条（034/037/038）：未绑定弱化提示 / 已绑定路径展示，失效态 danger 标注 -->
+    <div ref="wdBarRef" class="workdir-bar" :class="{ 'wd-unbound': !chat.workDir, 'wd-missing': wdMissing }">
       <svg class="wd-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
       </svg>
       <span class="wd-label">工作文件夹</span>
-      <span class="wd-value" :title="chat.workDir">{{ chat.workDir }}</span>
-      <button type="button" class="wd-switch" :class="{ active: wdMenuOpen }" :title="wdMenuOpen ? '收起菜单' : '切换项目'" aria-label="切换项目" @click.stop="toggleWdMenu">
+      <span v-if="chat.workDir" class="wd-value" :title="chat.workDir">{{ chat.workDir }}<template v-if="wdMissing">（文件夹已不存在）</template></span>
+      <span v-else class="wd-value wd-value-empty">未选择项目 · 点箭头选择</span>
+      <button type="button" class="wd-switch" :class="{ active: wdMenuOpen }" :title="wdMenuOpen ? '收起' : (chat.workDir ? '项目详情' : '选择项目')" :aria-label="chat.workDir ? '项目详情' : '选择项目'" @click.stop="toggleWdMenu">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M18 15l-6-6-6 6" />
         </svg>
       </button>
-      <!-- 切换项目菜单：历史项 + 打开新项目 + 清除项目 -->
-      <div v-if="wdMenuOpen" class="wd-menu" role="menu">
+      <!-- 未绑定：历史项目菜单（038 用途反转 = 新会话快速初始化；无「清除项目」） -->
+      <div v-if="wdMenuOpen && !chat.workDir" class="wd-menu" role="menu">
         <div class="wd-menu-title">历史项目</div>
-        <button v-for="wd in chat.workDirHistory" :key="wd" type="button" class="wd-menu-item" role="menuitem" :title="wd" @click="onPickHistory(wd)">
-          <span class="wd-menu-path">{{ wd }}</span>
+        <button v-for="wd in chat.workDirHistory" :key="wd.path" type="button" class="wd-menu-item" :class="{ 'wd-menu-stale': !wd.exists }" role="menuitem" :title="wd.path" @click="onPickHistory(wd)">
+          <span class="wd-menu-path">{{ wd.path }}<template v-if="!wd.exists">（已不存在）</template></span>
         </button>
         <div v-if="!chat.workDirHistory.length" class="wd-menu-empty">暂无历史项目</div>
         <div class="wd-menu-sep"></div>
         <button type="button" class="wd-menu-item wd-menu-action" role="menuitem" @click="onOpenNewProject">打开新项目</button>
-        <button type="button" class="wd-menu-item wd-menu-action wd-menu-danger" role="menuitem" @click="onClearProject">清除项目</button>
+      </div>
+      <!-- 已绑定：只读卡片（锁定，无换绑/清除入口） -->
+      <div v-else-if="wdMenuOpen" class="wd-menu wd-menu-readonly" role="status">
+        <div class="wd-menu-title">当前项目（已锁定）</div>
+        <div class="wd-menu-path" :title="chat.workDir">{{ chat.workDir }}</div>
+        <div class="wd-menu-status" :class="{ stale: wdMissing }">{{ wdMissing ? '文件夹已不存在 · 恢复文件夹或新建会话' : '文件夹存在' }}</div>
+        <div class="wd-menu-sep"></div>
+        <div class="wd-menu-empty">一个会话只支持一个项目 · 如需更换请新建会话</div>
       </div>
     </div>
 
@@ -534,7 +543,31 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 切换项目按钮（向上箭头） */
+/* 038 未绑定弱化态：中性描边 + 暗字，视觉上明确「还没选」 */
+.workdir-bar.wd-unbound {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+}
+.workdir-bar.wd-unbound .wd-label {
+  color: var(--dim);
+}
+.workdir-bar.wd-unbound .wd-switch {
+  color: var(--dim);
+}
+.workdir-bar .wd-value-empty {
+  color: var(--dim);
+  opacity: .85;
+  font-family: inherit; /* 提示文案不是路径，退回正文字体 */
+}
+/* 038 失效态：绑定路径在磁盘上消失 → danger 警示 */
+.workdir-bar.wd-missing {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 55%, transparent);
+}
+.workdir-bar.wd-missing .wd-value {
+  color: var(--danger);
+}
+/* 选择项目 / 项目详情按钮（向上箭头） */
 .workdir-bar .wd-switch {
   flex: none;
   display: inline-flex;
@@ -614,11 +647,27 @@ onUnmounted(() => {
 .workdir-bar .wd-menu-action {
   font-weight: 500;
 }
-.workdir-bar .wd-menu-danger {
-  color: var(--danger);
+/* 038：历史菜单失效项标灰（点击仍可绑定 = 主动重建） */
+.workdir-bar .wd-menu-item.wd-menu-stale {
+  color: var(--dim);
+  opacity: .62;
 }
-.workdir-bar .wd-menu-danger:hover {
-  background: var(--danger-soft);
+.workdir-bar .wd-menu-item.wd-menu-stale:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+/* 038：已绑定会话的只读卡片 */
+.workdir-bar .wd-menu-readonly .wd-menu-path {
+  padding: 4px 10px 0;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.workdir-bar .wd-menu-status {
+  padding: 2px 10px 4px;
+  font-size: 11.5px;
+  color: var(--accent);
+}
+.workdir-bar .wd-menu-status.stale {
+  color: var(--danger);
 }
 
 .typing {
