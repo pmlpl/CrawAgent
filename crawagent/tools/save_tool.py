@@ -122,6 +122,78 @@ def _ensure_fts5_index(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _insert_record(
+    conn: sqlite3.Connection,
+    url: str,
+    title: str,
+    content: str,
+    extra_data: str = "",
+    platform: str = "",
+    save_path: str = "",
+    session_id: str = "",
+    content_md5: str = "",
+) -> int:
+    """向 crawl_records 插入一条记录并返回 rowid（不 commit，调用方管事务）。
+
+    save_record（过五关后）与 insert_longterm_record（039 提炼链路，免关）
+    共用的唯一插入路径；FTS 触发器在 INSERT 时自动同步索引。
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO crawl_records (url, title, content, extra_data, created_at, platform, save_path, session_id, content_md5) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (url, title, content, extra_data, datetime.now().isoformat(), platform, save_path,
+         session_id, content_md5),
+    )
+    return cursor.lastrowid
+
+
+def insert_longterm_record(
+    url: str, title: str, content: str, session_id: str = "", extra_data: str = ""
+) -> int:
+    """长期记忆条目直插（变更 039 会话提炼链路专用，不走五关质量过滤）。
+
+    蒸馏条目是 LLM 生成的知识摘要而非爬取正文，五关（长度/信噪比等）会
+    误杀短条目；与 save_record 共用同一张表 + FTS 触发器（INSERT 即自动
+    入索引），search_knowledge 检索链路完全一致。单连接事务一次 commit，
+    供提炼流程做全有全无写入。
+
+    Args:
+        url: 来源标记（提炼固定传 "session://<sid>"）。
+        title: 知识条目主题。
+        content: 要点正文（调用方自行附来源说明）。
+        session_id: 来源会话 id（记入 session_id 列，区别于爬取记录）。
+        extra_data: 可选 JSON 附加信息。
+
+    Returns:
+        新记录 rowid。
+    """
+    _init_db()
+    conn = sqlite3.connect(_get_db_path())
+    try:
+        rowid = _insert_record(
+            conn, url, title, content,
+            extra_data=extra_data, platform="长期记忆", session_id=session_id,
+        )
+        conn.commit()
+        return rowid
+    finally:
+        conn.close()
+
+
+def _current_folder_sid() -> str:
+    """会话文件夹用的会话 id：优先 ctx_session_id（与 014/034 落点同源），
+    兜底本模块 _current_session；都空（CLI/直调工具）返回空串——跳过快照
+    仅入库，行为与改前一致。
+    """
+    try:
+        from crawagent.graph.agent import ctx_session_id
+        sid = ctx_session_id.get("") or ""
+    except Exception:
+        sid = ""
+    return sid or _current_session.get("")
+
+
 @tool
 def save_record(url: str, title: str, content: str, extra_data: str = "", platform: str = "", save_path: str = "", html: str = "") -> str:
     """把抽取到的内容保存进本地 SQLite 数据库（带五关质量过滤）。
@@ -144,7 +216,9 @@ def save_record(url: str, title: str, content: str, extra_data: str = "", platfo
         html: 可选原始 HTML。crawl_webpage 返回的原文传这里，让信噪比(②)与链接比(⑤)生效
 
     返回：
-        成功："Saved successfully! Record ID: <id>..."
+        成功："Saved successfully! Record ID: <id>..."（本会话有会话文件夹时，
+        同时落一份 md 快照到 data/sessions/<sid>/archive/，双写可备份；
+        快照写入失败仅注明，不影响入库）
         淘汰："[REJECTED] <原因>（已记入 rejected_records）"
         重复："[DUPLICATE] 与已有记录 ID X 相同，跳过入库"
         失败：数据库错误信息字串。
@@ -170,16 +244,23 @@ def save_record(url: str, title: str, content: str, extra_data: str = "", platfo
             conn.commit()
             return f"[REJECTED] {reject_reason}（已记入 rejected_records，正文不入库）"
 
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO crawl_records (url, title, content, extra_data, created_at, platform, save_path, session_id, content_md5) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (url, title, content, extra_data, datetime.now().isoformat(), platform, save_path,
-             _current_session.get(""), fingerprint),
+        record_id = _insert_record(
+            conn, url, title, content, extra_data, platform, save_path,
+            session_id=_current_session.get(""), content_md5=fingerprint,
         )
-        record_id = cursor.lastrowid
         conn.commit()
     finally:
         conn.close()
 
-    return f"Saved successfully! Record ID: {record_id}, URL: {url}, Title: {title}, Content length: {len(content)} chars"
+    # 变更 039 档案双写：库成功 → 同步落 md 快照到会话文件夹（人可读可备份）。
+    # 盘失败不回滚库，只在结果里注明；无会话上下文（CLI/直调）跳过快照。
+    snapshot_note = ""
+    sid = _current_folder_sid()
+    if sid:
+        try:
+            from crawagent.tools.session_folder import write_archive_snapshot
+            write_archive_snapshot(sid, title, content, source_url=url)
+        except Exception as e:
+            snapshot_note = f"（已入库但本地快照写入失败：{e}）"
+
+    return f"Saved successfully! Record ID: {record_id}, URL: {url}, Title: {title}, Content length: {len(content)} chars{snapshot_note}"

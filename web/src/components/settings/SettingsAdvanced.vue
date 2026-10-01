@@ -3,7 +3,7 @@
 // 值都存 .env：抓取参数保存即生效；目录保存即解析绝对路径并创建，下一次抓取立即生效（无需重启）；
 // 清理在每次后端启动时执行，本页只编辑策略数值。
 // 每张卡有自己的保存提示（saveTip 本地化，避免跨卡串显）。
-import { ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useSettings } from '../../composables/useSettings'
 
 const { state, load, saveSettingsFields, openEcoFolder } = useSettings()
@@ -90,6 +90,63 @@ async function saveLangsmith() {
     savingLang.value = false
   }
 }
+
+// ---------- 会话记忆管理（变更 039）：超期会话统计 + 提炼归档 ----------
+// 数据源 GET /api/data/sessions/overview（只读统计）；提炼走 POST distill，
+// 前端两步确认（点按钮 → 行内确认条 → 确认才调端点）兜住批量动文件硬规则。
+const overview = ref(null)     // {stale_days, sessions[], archived_count}
+const dataLoading = ref(false)
+const dataTip = ref(null)      // {ok, msg}
+const confirmingSid = ref('')  // 两步确认：待确认的会话 id
+const distilling = ref(false)
+
+const staleSessions = computed(() => (overview.value?.sessions || []).filter(s => s.stale))
+const activeCount = computed(() => (overview.value?.sessions || []).length - staleSessions.value.length)
+
+async function loadOverview() {
+  dataLoading.value = true
+  try {
+    const r = await fetch('/api/data/sessions/overview')
+    if (r.ok) overview.value = await r.json()
+  } catch (e) { /* ignore */ } finally {
+    dataLoading.value = false
+  }
+}
+
+function sessionLabel(s) {
+  return s.title || (s.sid || '').slice(0, 8) || '（未知会话）'
+}
+
+function fmtSize(n) {
+  if (typeof n !== 'number' || Number.isNaN(n)) return ''
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB'
+  if (n >= 1024) return (n / 1024).toFixed(0) + 'KB'
+  return n + 'B'
+}
+
+async function doDistill(sid) {
+  if (distilling.value) return
+  distilling.value = true
+  dataTip.value = null
+  try {
+    const r = await fetch(`/api/data/sessions/${encodeURIComponent(sid)}/distill`, { method: 'POST' })
+    const data = await r.json()
+    if (data?.ok) {
+      dataTip.value = { ok: true, msg: `✓ ${data.message || '提炼并归档完成'}` }
+    } else {
+      // 失败 = 文件夹保持原样（宁留勿丢），只报错
+      dataTip.value = { ok: false, msg: '提炼失败：' + (data?.error || '未知错误') }
+    }
+  } catch (e) {
+    dataTip.value = { ok: false, msg: '提炼失败：' + e }
+  } finally {
+    distilling.value = false
+    confirmingSid.value = ''
+    loadOverview() // 成功后该会话从清单消失，失败后刷新确认原样还在
+  }
+}
+
+onMounted(loadOverview) // 页签挂载即统计（启动统计之外的「设置页打开时统计」）
 </script>
 
 <template>
@@ -174,6 +231,41 @@ async function saveLangsmith() {
   </section>
 
   <section class="card">
+    <h2 class="card-title">会话记忆管理</h2>
+    <p class="hint" style="margin-bottom: 12px">
+      每个会话的档案/记忆快照存放在 <code>data/sessions/&lt;会话id&gt;/</code>（人可读、可整个拷走备份）。
+      超过 {{ overview?.stale_days || 180 }} 天未活跃的会话可「提炼并归档」：AI 把内容蒸馏成长期记忆条目入库（可被搜索），文件夹移入
+      <code>_archived/</code>。全程只移动、永不自动删除；启动后端时只统计提示，动手必须在这里点按钮确认。
+    </p>
+    <div v-if="dataLoading" class="hint">统计中…</div>
+    <template v-else-if="overview">
+      <div v-if="staleSessions.length" class="sess-list">
+        <div v-for="s in staleSessions" :key="s.sid" class="sess-row">
+          <template v-if="confirmingSid === s.sid">
+            <span class="sess-confirm">确认提炼？「{{ sessionLabel(s) }}」的文件夹将蒸馏入库并移入 _archived/</span>
+            <button type="button" class="btn-primary btn-sm" :disabled="distilling" @click="doDistill(s.sid)">
+              <span v-if="distilling" class="spin" />确认
+            </button>
+            <button type="button" class="btn-ghost btn-sm" :disabled="distilling" @click="confirmingSid = ''">取消</button>
+          </template>
+          <template v-else>
+            <span class="sess-name" :title="s.sid">{{ sessionLabel(s) }}</span>
+            <span class="sess-meta">{{ fmtSize(s.size_bytes) }} · {{ (s.last_active || '').slice(0, 10) }}</span>
+            <button type="button" class="btn-ghost btn-sm" :disabled="distilling" @click="confirmingSid = s.sid">提炼并归档</button>
+          </template>
+        </div>
+      </div>
+      <div v-else class="hint">没有超过 {{ overview.stale_days }} 天未活跃的会话文件夹。</div>
+      <div class="actions" style="justify-content: flex-start; gap: 10px; align-items: center">
+        <button type="button" class="btn-ghost btn-sm" :disabled="dataLoading" @click="loadOverview">刷新统计</button>
+        <span class="hint">活跃会话文件夹 {{ activeCount }} 个 · 已归档 {{ overview.archived_count }} 个</span>
+      </div>
+      <div v-if="dataTip" class="result" :class="dataTip.ok ? 'ok' : 'err'" style="margin-top: 8px">{{ dataTip.msg }}</div>
+    </template>
+    <div v-else class="result err">会话文件夹统计加载失败（后端未启动？）</div>
+  </section>
+
+  <section class="card">
     <h2 class="card-title">LangSmith 追踪</h2>
     <p class="hint" style="margin-bottom: 12px">LangChain 链路追踪（可选调试）。配置写入 .env，但 langchain 运行时在进程启动时读取 env，因此保存后需重启 <code>crawagent start</code> 才生效。</p>
     <div class="field" style="max-width: 360px">
@@ -208,6 +300,40 @@ async function saveLangsmith() {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
   margin-bottom: 4px;
+}
+
+/* 会话记忆管理（039）：超期会话清单行 */
+.sess-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.sess-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.25));
+  border-radius: 8px;
+}
+.sess-name {
+  font-weight: 600;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess-meta {
+  color: rgba(128, 128, 128, 0.9);
+  font-size: 12.5px;
+  flex: 1;
+}
+.sess-confirm {
+  font-size: 13px;
+  flex: 1;
+  min-width: 200px;
 }
 
 /* 滑动开关（LangSmith 追踪）：checkbox 隐身，轨道+滑块呈现左右切换 */

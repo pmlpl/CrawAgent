@@ -32,6 +32,7 @@ from crawagent.web.routers import sites as sites_router
 from crawagent.web.routers import dist as dist_router
 from crawagent.web.routers import fs as fs_router
 from crawagent.web.routers import uploads as uploads_router
+from crawagent.web.routers import data_manage as data_manage_router
 from crawagent.web.state import _active_turns
 from crawagent.web.turn_engine import _stream_turn
 
@@ -124,6 +125,10 @@ def _startup_prune():
         if total_removed:
             print(f"[prune] 启动清理: 删 {total_removed} 个文件, "
                   f"释放 {total_freed / 1024 / 1024:.1f} MB")
+        # 变更 039：会话文件夹超期统计——只报数提示，不自动清理
+        # （批量动文件必须用户显式触发，提炼归档入口在设置页高级页签）
+        from crawagent.web.routers.data_manage import log_stale_sessions
+        log_stale_sessions()
     except Exception as e:
         print(f"[prune] 启动清理异常（非致命）: {e}")
 
@@ -154,6 +159,7 @@ app.include_router(sites_router.router)
 app.include_router(dist_router.router)
 app.include_router(fs_router.router)
 app.include_router(uploads_router.router)
+app.include_router(data_manage_router.router)
 
 
 def _build_attachment_block(attachments) -> str | None:
