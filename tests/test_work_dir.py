@@ -426,6 +426,10 @@ def _patch_meta_conn(monkeypatch, tmp_path):
         "thread_id TEXT PRIMARY KEY, title TEXT NOT NULL, "
         "work_dir TEXT DEFAULT '', work_dir_ts TEXT DEFAULT '')"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS work_dir_history ("
+        "path TEXT PRIMARY KEY, last_used TEXT NOT NULL)"
+    )
     conn.commit()
     monkeypatch.setattr(ms, "get_meta_conn", lambda settings=None: conn)
     return conn
@@ -595,28 +599,26 @@ def test_script_cwd_defaults_to_tmp_when_no_work_dir(monkeypatch, tmp_path):
 
 # ---------- 历史项目查询端点（变更 037） ----------
 
-def _insert_wd_row(conn, thread_id, work_dir, ts):
-    """直接插一行（带可控时间戳），供历史排序测试。"""
+def _insert_wd_history_row(conn, path, ts):
+    """直插一条绑定历史（可控时间戳），供历史排序测试。"""
     conn.execute(
-        "INSERT INTO session_titles (thread_id, title, work_dir, work_dir_ts) "
-        "VALUES (?, '', ?, ?) "
-        "ON CONFLICT(thread_id) DO UPDATE SET work_dir = excluded.work_dir, "
-        "work_dir_ts = excluded.work_dir_ts",
-        (thread_id, work_dir, ts),
+        "INSERT INTO work_dir_history (path, last_used) VALUES (?, ?) "
+        "ON CONFLICT(path) DO UPDATE SET last_used = excluded.last_used",
+        (path, ts),
     )
     conn.commit()
 
 
 def test_work_dir_history_dedup_and_sort(monkeypatch, tmp_path):
-    """去重 + 按最近绑定时间倒序；同 path 多会话取最大 ts。"""
+    """去重 + 按最近打开时间倒序；同 path 重复打开刷新 ts。"""
     conn = _patch_meta_conn(monkeypatch, tmp_path)
-    _insert_wd_row(conn, "s1", "/projA", "2026-01-01T00:00:00")
-    _insert_wd_row(conn, "s2", "/projB", "2026-01-03T00:00:00")
-    _insert_wd_row(conn, "s3", "/projA", "2026-01-02T00:00:00")  # 同 path 不同会话 → 去重
+    _insert_wd_history_row(conn, "/projA", "2026-01-01T00:00:00")
+    _insert_wd_history_row(conn, "/projB", "2026-01-03T00:00:00")
+    _insert_wd_history_row(conn, "/projA", "2026-01-02T00:00:00")  # 同 path 重开 → 刷 ts
 
     import crawagent.storage.meta_store as ms
     history = ms.list_work_dir_history()
-    # projB(01-03) → projA(取 s3 的 01-02 而非 s1 的 01-01)；去重后 2 项
+    # projB(01-03) → projA(01-02)；去重后 2 项
     assert history == ["/projB", "/projA"]
 
 
@@ -630,7 +632,7 @@ def test_work_dir_history_limit_10(monkeypatch, tmp_path):
     """超过 10 个去重 work_dir → 只返回最近 10 个。"""
     conn = _patch_meta_conn(monkeypatch, tmp_path)
     for i in range(12):
-        _insert_wd_row(conn, f"s{i}", f"/p{i}", f"2026-01-{i + 1:02d}T00:00:00")
+        _insert_wd_history_row(conn, f"/p{i}", f"2026-01-{i + 1:02d}T00:00:00")
     import crawagent.storage.meta_store as ms
     history = ms.list_work_dir_history()
     assert len(history) == 10
@@ -638,38 +640,68 @@ def test_work_dir_history_limit_10(monkeypatch, tmp_path):
     assert "/p0" not in history  # 最老被截掉
 
 
-def test_work_dir_history_skips_empty(monkeypatch, tmp_path):
-    """空 work_dir 的会话不入选历史。"""
-    conn = _patch_meta_conn(monkeypatch, tmp_path)
-    _insert_wd_row(conn, "s1", "/real", "2026-01-01T00:00:00")
-    conn.execute(
-        "INSERT INTO session_titles (thread_id, title, work_dir, work_dir_ts) "
-        "VALUES ('s2', '有标题但无项目', '', '')"
-    )
-    conn.commit()
-    import crawagent.storage.meta_store as ms
-    assert ms.list_work_dir_history() == ["/real"]
-
-
-def test_work_dir_history_rebind_bubbles_to_top(monkeypatch, tmp_path):
-    """同会话换项目：新 path 时间戳最大 → 排第一（rowid 方案做不到，故用 work_dir_ts）。"""
+def test_work_dir_history_survives_clear(monkeypatch, tmp_path):
+    """清除绑定 ≠ 没打开过：set_work_dir('') 只清当前绑定，历史列表保留路径。"""
     s = _FakeSettings(tmp_path)
     import crawagent.storage.meta_store as ms
     ms.reset_meta_conn()
     try:
-        conn = ms.get_meta_conn(s)
-        # 先插一条老绑定（时间戳在过去）
-        conn.execute(
-            "INSERT INTO session_titles (thread_id, title, work_dir, work_dir_ts) "
-            "VALUES ('s1', '', '/old', '2020-01-01T00:00:00')"
-        )
-        conn.commit()
-        # set_work_dir 换项目 → 生成 now 时间戳（必然 > 2020）
-        ms.set_work_dir("s1", str(tmp_path / "newproj"), s)
-        history = ms.list_work_dir_history(s)
-        # newproj 时间戳 = now → 排第一；/old 已被覆盖（s1 现在绑 newproj）
-        assert history[0].endswith("newproj")
-        assert "/old" not in history
+        bound = ms.set_work_dir("s1", str(tmp_path / "proj"), s)
+        ms.set_work_dir("s1", "", s)  # 清除
+        assert ms.get_work_dir("s1", s) == ""
+        assert ms.list_work_dir_history(s) == [bound]
+    finally:
+        ms.reset_meta_conn()
+
+
+def test_work_dir_history_survives_rebind(monkeypatch, tmp_path):
+    """核心回归（指挥官报的 bug）：会话换绑后旧路径仍在历史列表。
+
+    缺陷行为：历史查 session_titles 当前绑定快照，s1 从 oldproj 换绑
+    newproj 时旧路径被覆盖 → 从列表蒸发，只能重新「打开新项目」找回。
+    修复后：work_dir_history append-only，换绑两条都在，新绑置顶。
+    """
+    s = _FakeSettings(tmp_path)
+    import crawagent.storage.meta_store as ms
+    ms.reset_meta_conn()
+    try:
+        old = ms.set_work_dir("s1", str(tmp_path / "oldproj"), s)
+        new = ms.set_work_dir("s1", str(tmp_path / "newproj"), s)
+        assert new != old
+        assert ms.list_work_dir_history(s) == [new, old]
+    finally:
+        ms.reset_meta_conn()
+
+
+def test_work_dir_history_backfill_from_legacy(monkeypatch, tmp_path):
+    """老库回填：连接初始化时把 session_titles 现存绑定快照灌进历史表。"""
+    import sqlite3
+
+    import crawagent.storage.meta_store as ms
+    # 手工造一个"老库"：session_titles 已有绑定，无 work_dir_history 表
+    conn = sqlite3.connect(str(tmp_path / "meta.db"))
+    conn.execute(
+        "CREATE TABLE session_titles ("
+        "thread_id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+        "work_dir TEXT DEFAULT '', work_dir_ts TEXT DEFAULT '')"
+    )
+    conn.execute(
+        "INSERT INTO session_titles VALUES ('s1', '', '/legacyA', '2026-01-01T00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO session_titles VALUES ('s2', '', '/legacyB', '2026-01-02T00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    s = _FakeSettings(tmp_path)
+    ms.reset_meta_conn()
+    try:
+        # 首次连接触发迁移：建历史表 + 回填快照（按 work_dir_ts 倒序）
+        assert ms.list_work_dir_history(s) == ["/legacyB", "/legacyA"]
+        # 迁移后正常追加新绑定
+        fresh = ms.set_work_dir("s3", str(tmp_path / "fresh"), s)
+        assert ms.list_work_dir_history(s) == [fresh, "/legacyB", "/legacyA"]
     finally:
         ms.reset_meta_conn()
 
@@ -677,8 +709,8 @@ def test_work_dir_history_rebind_bubbles_to_top(monkeypatch, tmp_path):
 def test_work_dir_history_endpoint(monkeypatch, tmp_path):
     """GET /api/sessions/work-dirs/history → {work_dirs: [...]} 按最近使用排序。"""
     conn = _patch_meta_conn(monkeypatch, tmp_path)
-    _insert_wd_row(conn, "s1", "/projA", "2026-01-01T00:00:00")
-    _insert_wd_row(conn, "s2", "/projB", "2026-01-02T00:00:00")
+    _insert_wd_history_row(conn, "/projA", "2026-01-01T00:00:00")
+    _insert_wd_history_row(conn, "/projB", "2026-01-02T00:00:00")
     client = _work_dir_client()
     r = client.get("/api/sessions/work-dirs/history")
     assert r.status_code == 200

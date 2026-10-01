@@ -84,6 +84,29 @@ def _migrate_meta_columns(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE session_titles ADD COLUMN work_dir_ts TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+    _migrate_work_dir_history(conn)
+
+
+def _migrate_work_dir_history(conn: sqlite3.Connection) -> None:
+    """建 work_dir_history 绑定历史表 + 老库回填（037 缺陷修复）。
+
+    缺陷：历史列表原先查 session_titles 的 work_dir 列——那是「各会话当前
+    绑定」的快照，会话换绑会覆盖旧值，旧路径若无人再持有就从历史里蒸发。
+    修复：append-only 历史表，set_work_dir 每次非空绑定都记录；回填把
+    老库现存快照灌入（已被覆盖掉的路径无法追溯，属既成事实）。
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS work_dir_history ("
+        "path TEXT PRIMARY KEY, last_used TEXT NOT NULL)"
+    )
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO work_dir_history (path, last_used) "
+            "SELECT work_dir, MAX(work_dir_ts) FROM session_titles "
+            "WHERE work_dir != '' GROUP BY work_dir"
+        )
+    except sqlite3.OperationalError:
+        pass  # 老库缺 work_dir_ts 列时上面两个 ALTER 已补，理论不到这里
 
 
 def get_session_title(thread_id: str, settings: Settings | None = None) -> str:
@@ -117,8 +140,8 @@ def set_work_dir(thread_id: str, work_dir: str, settings: Settings | None = None
     """设置会话工作文件夹：abspath 规范化 + 不存在自动创建后入库。
 
     返回规范化后的绝对路径；目录创建失败抛 OSError（调用方决定是否兜底）。
-    空 work_dir 视为清除（落回空串）。每次调用刷 work_dir_ts（变更 037），
-    供历史项目查询按最近使用排序。
+    空 work_dir 视为清除（落回空串，不动绑定历史）。非空绑定时同步把路径
+    记入 work_dir_history（append-only，供「切换项目」菜单历史列表）。
     """
     cleaned = (work_dir or "").strip()
     conn = get_meta_conn(settings)
@@ -134,23 +157,29 @@ def set_work_dir(thread_id: str, work_dir: str, settings: Settings | None = None
         "work_dir_ts = excluded.work_dir_ts",
         (thread_id, cleaned, ts),
     )
+    if cleaned:
+        # 绑定历史 append-only：换绑不丢旧路径（清除绑定 ≠ 没打开过，不清历史）
+        conn.execute(
+            "INSERT INTO work_dir_history (path, last_used) VALUES (?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET last_used = excluded.last_used",
+            (cleaned, ts),
+        )
     conn.commit()
     return cleaned
 
 
 def list_work_dir_history(settings: Settings | None = None) -> list[str]:
-    """最近用过的 work_dir（去重 + 按最近绑定时间排序，最多 10 个，变更 037）。
+    """最近打开过的 work_dir（按最近打开倒序，最多 10 个，变更 037）。
 
-    供聊天页提示条「切换项目」菜单展示历史项。按 work_dir_ts（每次 set_work_dir
-    刷新的 ISO 时间戳）倒序取最近一次绑定；空 work_dir 不入选。查询异常静默
-    返回空列表（菜单降级为「打开新项目 / 清除项目」两项）。
+    供聊天页提示条「切换项目」菜单展示历史项。数据源 work_dir_history
+    （append-only 绑定历史）——会话换绑只覆盖 session_titles 当前绑定列，
+    历史表不删旧路径，换绑后旧项目仍在列表里。查询异常静默返回空列表
+    （菜单降级为「打开新项目 / 清除项目」两项）。
     """
     try:
         conn = get_meta_conn(settings)
         rows = conn.execute(
-            "SELECT work_dir, MAX(work_dir_ts) AS last_used "
-            "FROM session_titles WHERE work_dir != '' "
-            "GROUP BY work_dir ORDER BY last_used DESC LIMIT 10"
+            "SELECT path FROM work_dir_history ORDER BY last_used DESC LIMIT 10"
         ).fetchall()
         return [r[0] for r in rows if r[0]]
     except Exception:
