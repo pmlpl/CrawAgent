@@ -466,6 +466,12 @@ textarea::placeholder {
   color: var(--accent);
   background: var(--accent-soft);
 }
+/* 图标与文字/路径拉开一档呼吸感（行内自然排布会贴死） */
+.project-btn .btn-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .project-path {
   max-width: 150px;
   overflow: hidden;
