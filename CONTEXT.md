@@ -53,3 +53,17 @@ _Avoid_: 与 checkpointer 的轮次历史（不迁移不提炼）、与爬取记
 **归档 (_archived)**:
 `data/sessions/_archived/`，提炼入库成功后整个会话文件夹的移动终点。仅移动、永不自动物理删除——删除永远由用户手动执行；蒸馏失败不动文件夹（宁留勿丢）。
 _Avoid_: 把它当回收站（里面是已提炼完的精华备份，不是垃圾）。
+
+### 工程防护
+
+**行为评测集 (Behavior Eval Set)**:
+Agent 行为回归尺（变更 040）：`scripts/eval_behavior.py` 进程内直驱真 Agent（真 system.md + 真工具 schema + 真中间件），工具执行换桩，黄金集逐例判定输出通过率。改 system.md / 换模型前后各跑一遍当回归门；顺序执行、不进 pytest（要真 LLM）。基线 glm-5.2 约 10/15（波动带 60-80%）。
+_Avoid_: 拿它当 CI 常驻（花钱且有 LLM 抖动，门槛按「同例连续两次 FAIL 才算真回归」人工把握）；给判定器上 LLM-as-judge（判定必须确定性可复现）。
+
+**黄金集 (Golden Set)**:
+15 条「用户输入 + 桩剧本 + 期望」用例（`scripts/eval_cases.py`），每例锚定 system.md 一条硬规则（检索优先 / 失败换路 / ARCHIVE-ASK / MCP 授权 / 语言契约 / 零工具 / 批量优先等）。桩输出全部 canned，无真实网络、不写真实 data/。
+_Avoid_: 一例测多条规则（判定失败时说不清是哪条坏了）；剧本里编排真实域名期待真数据（全部走 stub）。
+
+**契约测试 (Prompt Contract Test)**:
+system.md 与代码的静态一致性检查（`tests/test_prompt_contract.py`，离线零成本随 pytest 常驻）：工具清单与 registry 双向相等 + 计数句一致、HARD 规则标记存在、工具描述禁依赖提示（013 教训 lint 化）。
+_Avoid_: 与行为评测混——契约测试防「文档与代码漂移」，行为评测防「LLM 不按文档行事」；往 system.md 加规则时忘了同步 HARD_RULE_MARKERS 清单。
