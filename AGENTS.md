@@ -17,7 +17,7 @@ CrawAgent — LLM 驱动的智能爬虫 Agent 框架。Python（FastAPI + LangGr
 ## 工作方式（指挥官规矩，违反会被打回）
 
 - 步进式指挥：单一指令只做被指示那步并汇报；批量/编号需求整批做完（实现+测试+build+提交）再逐项汇报；**报 bug = 授权修复**；"我自己动手改" = 只给文件行号+改法不动手。
-- 改动流程：非琐碎改动先在 `升级改动文档/` 写编号规格（005 起递增）待批准，完成后补「实施记录（人话版）」随代码入库；难逆决策落 `docs/adr/`，新术语进 `CONTEXT.md`。
+- 改动流程：非琐碎改动先在 `升级改动文档/` 写编号规格（005 起递增）待批准，完成后补「实施记录（人话版）」随代码入库；**建档/完工同步登记总索引 `升级改动文档/000-目录.md`**（九分类 + 状态 + commit）；难逆决策落 `docs/adr/`，新术语进 `CONTEXT.md`。
 - 提交：中文一行式主题 + 要点正文；先 `uv run pytest tests/ -q` 与 `cd web && npm test` 全绿；**git add 只列明确路径**（多会话并行写同一仓库，禁 add -A）；`HANDOFF-*.md` 不提交。
 
 ## 常用命令
@@ -43,7 +43,7 @@ uv run python -m crawagent.web.server  # 临时冒烟用这个（静态托管在
 - **冒烟先清端口**：webapp-testing 的 with_server 杀不干净 uvicorn 孤儿进程，后续冒烟会打在旧代码上；结果与代码预期不符时第一反应查残留进程（`netstat -ano | grep :<port>`）。
 - **编辑工具吞尖括号**：含 `<>` 的代码用 Python 脚本落盘，别直接写进 Edit/Write。
 - 背景图/壁纸存服务端 `data/`（ADR-0001），localStorage 已弃用；产物目录在高级页可编辑、保存即生效（工具层每次现读 get_settings()）。
-- 改动后基线：603 pytest + 43 vitest 全绿（023 工具测试 +239 / 028 前端测试 +33 / 024 vitest 升级后基线）；工具/设置再扩展时同步更新计数测试与 `crawagent/prompts/system.md` 工具清单 + `wiki/03-工具与技能总览.md` 的工具数）。
+- 改动后基线：776 pytest + 80 vitest 全绿（024 后基线 603；038-040 后 770；000-目录 契约测试 +6 后为 776）；工具/设置再扩展时同步更新计数测试与 `crawagent/prompts/system.md` 工具清单 + `wiki/03-工具与技能总览.md` 的工具数）。
 
 ## Agent skills
 

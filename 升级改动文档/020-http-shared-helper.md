@@ -4,7 +4,7 @@
 |------|------|
 | 变更编号 | 020 |
 | 提出日期 | 2026-09-20 |
-| 状态 | 待批准 |
+| 状态 | 已实施（2026-09-23 随 4abb8e1 批次入库，状态行补记） |
 | 类型 | 重构 / 去重 |
 | 关联模块 | `crawagent/tools/pagination.py` 已有 `http_get`；其余 9+ 工具直接调 `requests.get` / `requests.post` |
 | 来源 | `docs/tech-debt/2026-09-20.md` P2 #8 |
