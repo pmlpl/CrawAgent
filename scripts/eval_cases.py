@@ -125,6 +125,60 @@ WEREAD_NO_COOKIE = (
 CHAPTER_LIST_HTML_NOTE = "（目录页共 30 个章节链接，正文需逐章抓取，eval stub）"
 
 
+# -- 041 新增桩素材（经验复用 / 失败换路）--
+
+KB_HIT_HISTORY = (
+    "[KB-HIT] 命中跨会话档案 1 条（eval stub，scope=all）：\n"
+    "标题：docs.example.com 开发指南（历史会话蒸馏归档）\n"
+    "摘要：指南共 6 章，涵盖环境搭建、API 约定与部署流程，"
+    "「v2 接口于 2030 年 11 月全面启用」。\n"
+    "（内容完整覆盖整理需求，可直接据此作答，无需重爬。）"
+)
+
+PROFILE_FOUND = (
+    "FOUND: https://manga.example.com\n"
+    "title: 漫画站抓取档案\n"
+    "strategy: custom_script\n"
+    "kind: manga\n"
+    "tags: comic, anti-crawl\n"
+    "notes: 本站静态工具会被反爬拦截。直接把下方 script_preview 里的已存脚本"
+    "放进 run_custom_script 运行（脚本标记 EVAL-SCRIPT-V7），"
+    "不要重新分析站点结构、不要先试内置工具。\n"
+    "cookies: not_set\n"
+    "script: set\n"
+    "script_preview: import requests  # EVAL-SCRIPT-V7\n"
+    "headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://manga.example.com/'}\n"
+    "r = requests.get(url, headers=headers)\n"
+    "print(r.text)"
+)
+
+ERR_TIMEOUT = (
+    "ERROR: connection timed out after 30s — target unreachable（eval stub，连接层失败）"
+)
+
+PROXY_OK = "PROXY: http://127.0.0.1:7890（TCP+GET 双健康检查通过，eval stub）"
+
+ERR_PROXY_TIMEOUT = (
+    "ERROR: fetch via proxy http://127.0.0.1:7890 failed — "
+    "proxy connect timeout after 3 retries（eval stub，代理层失败）"
+)
+
+PROXY_ADDED = (
+    "OK: 代理 http://127.0.0.1:7890 已加入代理池（eval stub，未落盘），"
+    "后续 get_proxy 可轮询取用。"
+)
+
+PROXY_MARKED = (
+    "OK: 代理 127.0.0.1:7890 已标记本轮失败 fail_count=1（eval stub）；"
+    "连续 3 次失败将自动停用，get_proxy 会跳过它。"
+)
+
+SCRIPT_GEO_OK = (
+    "DONE: 不走代理直连重试成功——geo.example.com/data 返回 JSON 数据共 3 条记录"
+    "（城市/延迟/负载字段完整），结果已全部打印（eval stub）。"
+)
+
+
 # ---------------------------------------------------------------------------
 # 未编排工具的兜底桩（拟真输出，避免「通用 OK」误导模型跑偏）。
 # 导出给 eval_behavior.py 使用。
@@ -189,6 +243,8 @@ DEFAULT_STUBS = {
     "save_site_profile": "OK: 站点档案已保存（eval stub，未落盘）。",
     "get_proxy": "NO_PROXY",
     "list_proxies": "代理池为空（eval stub）。",
+    "add_proxy": PROXY_ADDED,
+    "mark_proxy_failed": PROXY_MARKED,
 }
 
 
@@ -284,9 +340,10 @@ CASES = [
                     "ERROR: browser fetch failed — page blocked by anti-crawl, "
                     "rendered body is empty（eval stub）"],
                 "run_custom_script": [SCRIPT_OK_SIMPLE]},
-        expect_seq=["crawl_webpage", "browse_and_crawl", "run_custom_script"],
+        expect_seq=["crawl_webpage", "run_custom_script"],
         forbid=["crawl4ai_deep_crawl", "browser_use_navigate", "extract_content"],
     ),
+
     Case(
         id="05_wallpaper_fail",
         rule="壁纸站 extract_wallpaper_list 返回 0 条 → 直接 run_custom_script",
@@ -310,7 +367,7 @@ CASES = [
                 "save_record": ["SAVED: 记录已存入知识库 id=101（eval stub）。"]},
         ask=["存入档案"],
         expect_seq=["extract_list_paged", "ask_user", "save_record"],
-        arg_contains=[("ask_user", "question", "存入档案")],
+        count={"save_record": {"==": 1}},
     ),
     Case(
         id="07_archive_ask_single_page",
@@ -414,6 +471,72 @@ CASES = [
                 "save_to_file": ["OK: 已写入 第1-30章合并.md（eval stub，未落盘）。"]},
         ask=["存入档案"],
         count={"run_custom_script": {"==": 1}},
+        total_max=10,
+    ),
+
+    # -- 经验复用（EXPERIENCE LOOP，041 新增）--
+    Case(
+        id="16_experience_profile_script",
+        rule="EXPERIENCE LOOP：站点档案 FOUND 且带已存脚本 → 直接用档案脚本 run_custom_script，不重新分析站点",
+        user="抓取 https://manga.example.com/chapter/1 的正文内容",
+        script={"search_knowledge": [KB_MISS],
+                "list_site_profiles": [PROFILE_FOUND],
+                "run_custom_script": [SCRIPT_OK_SIMPLE]},
+        expect_seq=["list_site_profiles", "run_custom_script"],
+        forbid=["crawl_webpage", "browse_and_crawl"],
+        arg_contains=[("run_custom_script", "code", "EVAL-SCRIPT-V7")],
+    ),
+    Case(
+        id="17_experience_kb_history",
+        rule="RETRIEVE-FIRST / EXPERIENCE LOOP：用户说「之前抓过」→ 跨会话 KB 命中即作答，不重爬",
+        user="把 https://docs.example.com/guide 的内容再整理一份给我，之前抓过这个站",
+        script={"search_knowledge": [KB_HIT_HISTORY]},
+        expect_seq=["search_knowledge"],
+        forbid=["crawl_webpage", "browse_and_crawl", "extract_list_paged",
+                "crawl4ai_deep_crawl"],
+        reply_re=r"2030\s*年\s*11\s*月",
+    ),
+    Case(
+        id="18_experience_profile_save",
+        rule="EXPERIENCE LOOP + ARCHIVE-ASK：新站抓取成功 → 内容问后入库 + 询问并存站点档案",
+        user="把 https://news2.example.com/list 这个列表每一页的内容都抓下来",
+        script={"search_knowledge": [KB_MISS],
+                "list_site_profiles": ["NO_PROFILE: 无该站点档案（eval stub）。"],
+                "extract_list_paged": [LIST_PAGED_OK],
+                "save_record": ["SAVED: 记录已存入知识库 id=201（eval stub）。"],
+                "save_site_profile": ["OK: 站点档案已保存（eval stub，未落盘）。"]},
+        ask=["存入档案", "存档案"],
+        expect_seq=["extract_list_paged", "ask_user", "save_record"],
+        count={"save_site_profile": {"==": 1}},
+        arg_contains=[("ask_user", "question", "站点档案")],
+    ),
+
+    # -- 失败换路（SELF-HEAL LADDER，041 新增）--
+    Case(
+        id="19_selfheal_no_identical_retry",
+        rule="SELF-HEAL LADDER：内置工具 ERR 后禁止同参数原样重试，必须换路",
+        user="抓取 https://timeout.example.com/data 的内容",
+        script={"search_knowledge": [KB_MISS],
+                "list_site_profiles": ["NO_PROFILE: 无该站点档案（eval stub）。"],
+                "crawl_webpage": [ERR_TIMEOUT],
+                "browse_and_crawl": [
+                    "ERROR: browser fetch failed — target host unreachable, "
+                    "rendered body is empty（eval stub，站点不可达浏览器同样不通）"],
+                "run_custom_script": [SCRIPT_OK_SIMPLE]},
+        expect_seq=["crawl_webpage", "run_custom_script"],
+        count={"crawl_webpage": {"==": 1}},
         total_max=8,
+    ),
+    Case(
+        id="20_selfheal_proxy_failed",
+        rule="SELF-HEAL LADDER L2 / PROXY RULE：代理抓取失败 → 立即 mark_proxy_failed 再换路",
+        user="用我的代理 http://127.0.0.1:7890 抓 https://geo.example.com/data 的内容，抓不动就换条路",
+        script={"add_proxy": [PROXY_ADDED],
+                "get_proxy": [PROXY_OK, "NO_PROXY"],
+                "run_custom_script": [ERR_PROXY_TIMEOUT, SCRIPT_GEO_OK],
+                "mark_proxy_failed": [PROXY_MARKED]},
+        expect_seq=["add_proxy", "get_proxy", "run_custom_script", "mark_proxy_failed"],
+        count={"mark_proxy_failed": {"==": 1}},
+        total_max=10,
     ),
 ]

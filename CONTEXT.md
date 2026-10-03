@@ -61,9 +61,17 @@ Agent 行为回归尺（变更 040）：`scripts/eval_behavior.py` 进程内直�
 _Avoid_: 拿它当 CI 常驻（花钱且有 LLM 抖动，门槛按「同例连续两次 FAIL 才算真回归」人工把握）；给判定器上 LLM-as-judge（判定必须确定性可复现）。
 
 **黄金集 (Golden Set)**:
-15 条「用户输入 + 桩剧本 + 期望」用例（`scripts/eval_cases.py`），每例锚定 system.md 一条硬规则（检索优先 / 失败换路 / ARCHIVE-ASK / MCP 授权 / 语言契约 / 零工具 / 批量优先等）。桩输出全部 canned，无真实网络、不写真实 data/。
+20 条「用户输入 + 桩剧本 + 期望」用例（`scripts/eval_cases.py`，040 建 15 例、041 扩至 20 例），每例锚定 system.md 一条硬规则（检索优先 / 经验复用 / 失败换路 / ARCHIVE-ASK / MCP 授权 / 语言契约 / 零工具 / 批量优先等）。桩输出全部 canned，无真实网络、不写真实 data/。
 _Avoid_: 一例测多条规则（判定失败时说不清是哪条坏了）；剧本里编排真实域名期待真数据（全部走 stub）。
 
 **契约测试 (Prompt Contract Test)**:
 system.md 与代码的静态一致性检查（`tests/test_prompt_contract.py`，离线零成本随 pytest 常驻）：工具清单与 registry 双向相等 + 计数句一致、HARD 规则标记存在、工具描述禁依赖提示（013 教训 lint 化）。
 _Avoid_: 与行为评测混——契约测试防「文档与代码漂移」，行为评测防「LLM 不按文档行事」；往 system.md 加规则时忘了同步 HARD_RULE_MARKERS 清单。
+
+**经验闭环 (EXPERIENCE LOOP)**:
+抓前抓后的经验硬规则（变更 041，system.md）：抓任何域前先 list_site_profiles 查站点档案（FOUND 带脚本就直接跑档案脚本，不重新分析）、内容型请求再 search_knowledge 查跨会话档案；新站抓成功后问一次才 save_site_profile（速览/失败/已拒绝不问），跑通的脚本必存档案。
+_Avoid_: 把爬完之后补查 list_site_profiles 当作已履约（时序不算数）；把站点档案询问与 ARCHIVE-ASK 混为一谈（前者存策略与脚本，后者存内容，两问允许合并但语义独立）。
+
+**失败自愈阶梯 (SELF-HEAL LADDER)**:
+内置抓取工具 ERR 后的换路硬规则（变更 041，system.md）：禁止同工具同 URL 同参数原样重试，按 L1 换 UA（脚本 S1）→ L2 换代理（get_proxy，失败立即 mark_proxy_failed）→ L3 静态/浏览器互换 或 P 路由 的顺序换路，单目标总尝试至多 6。SPA 壳 / LOW CONFIDENCE / paywall 三类例外走各自既有规则。
+_Avoid_: 把 ERR 后的 browse_and_crawl 一次当成万能兜底（阶梯第一格是脚本换 UA）；与 PIONEER MINDSET 的 10 条备选路由重复处理（阶梯只负责换变量，路由枚举归 PIONEER）。
