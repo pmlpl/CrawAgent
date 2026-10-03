@@ -5,6 +5,7 @@ server.py 与各 router 都需要访问这些全局单例，独立成模块以�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
@@ -85,6 +86,8 @@ class _LRUDict(OrderedDict):
 # 上限从 settings 读（.env 可覆盖）；_active_turns 不做 LRU——存的是运行中任务，淘汰会炸
 _settings = get_settings()
 _agents: dict[str, Any] = _LRUDict(_settings.max_cached_agents, "agents")
+_mcp_fps: dict[str, str] = {}   # 模型键 -> 构建 Agent 时的 MCP 配置指纹（043 热感知门）
+_last_mcp_fp = ""               # 最近一次成功算出的指纹（计算异常时按「未变化」兜底）
 _checkpointer: BaseCheckpointSaver | None = None
 _metrics: dict[str, SessionMetrics] = _LRUDict(_settings.max_tracked_sessions, "metrics")
 _session_locks: dict[str, asyncio.Lock] = _LRUDict(_settings.max_tracked_sessions, "session_locks")
@@ -145,15 +148,53 @@ def get_session_error(session_id: str) -> dict[str, str] | None:
     return {"message": row[0], "ts": row[1]}
 
 
+def _mcp_fingerprint() -> str:
+    """MCP 配置指纹（043 热感知）：覆盖 build_mcp_tools 消费的全部输入。
+
+    get_settings().mcp_servers（.env / 聊天管理工具 / 设置页写入，os.environ
+    同步快照因 pydantic env 优先也汇入此处）+ Electron anything-analyzer 配置
+    文件内容（token/开关，auto_sync 与 build_mcp_tools 的直接输入）。任一变化
+    → 指纹变化 → get_agent 丢弃旧 Agent 就地重建工具箱。
+
+    指纹计算异常按「未变化」处理：返回上次成功算出的指纹并打警告，
+    绝不阻断对话轮次。
+    """
+    global _last_mcp_fp
+    try:
+        # 函数内惰性 import：state 位于依赖底座位置，模块级引入 tools 层有成环风险
+        from crawagent.tools.mcp_capture_tool import _load_electron_mcp_config
+
+        electron_cfg = _load_electron_mcp_config() or {}
+        payload = json.dumps(
+            [get_settings().mcp_servers, electron_cfg],
+            ensure_ascii=False, sort_keys=True,
+        )
+        fp = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    except Exception as e:
+        print(f"[MCP_FP] 指纹计算失败，按未变化处理（不阻断对话）: {e}")
+        return _last_mcp_fp
+    _last_mcp_fp = fp
+    return fp
+
+
 def get_agent(model: str | None = None):
     """惰性创建 Agent（首次对话时才初始化，避免无 API Key 时服务起不来）。
 
     按模型 ID 分别缓存：对话页切换模型时用对应模型的 Key/URL 重建，
     同一模型的 Agent 跨会话复用。
+
+    043 热感知：每次取用前比对 MCP 配置指纹，配置变化（聊天管理工具 /
+    设置页保存 / 外部改 Electron 配置 / token 漂移）就丢弃该模型键的旧
+    Agent 就地重建工具箱。checkpointer 单例不受影响，会话状态与记忆连续。
     """
     key = model or "__default__"
+    fp = _mcp_fingerprint()
+    if key in _agents and _mcp_fps.get(key) != fp:
+        del _agents[key]
+        print(f"[MCP_FP] MCP 配置变化，重建 Agent 工具箱（model={key}）")
     if key not in _agents:
         _agents[key] = _build_agent(checkpointer=get_checkpointer(), model=model)
+        _mcp_fps[key] = fp
     return _agents[key]
 
 
@@ -161,6 +202,7 @@ def reset_agent_cache() -> None:
     """失效全部 Agent + checkpointer 单例，下次访问时按新配置重建（设置保存后调用）"""
     global _checkpointer
     _agents.clear()
+    _mcp_fps.clear()  # MCP 配置指纹账本同步清空（全清语义保持）
     _checkpointer = None
     # meta.db 连接也要重置：checkpoint_backend 切换时避免旧连接残留
     reset_meta_conn()

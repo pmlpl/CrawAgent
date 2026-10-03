@@ -2,7 +2,9 @@
 
 4 个 @tool：list_mcp_servers（只读）、add_mcp_server、remove_mcp_server、
 disable_mcp_server。写操作复用设置路由抽出的 save_mcp_servers 共用函数
-（校验/掩码/落盘/清缓存单一真源），生效走 reset_agent_cache 下轮装入工具箱。
+（校验/掩码/落盘/清缓存单一真源）。生效双保险（043）：保存即 reset_agent_cache
+清缓存 + get_agent 每轮比对 MCP 配置指纹，外部改 Electron 配置等任何路径的
+配置漂移下轮也会自动重建工具箱。
 
 授权闭环：三个写操作必须先 ask_user 确认（add/disable 一次，remove 二次），
 ask_user 题面展示完整 server 配置——见 system.md 硬规则。本模块只负责执行，
@@ -148,14 +150,15 @@ def add_mcp_server(
     status = _status_snapshot()
     st = next((s for s in status if isinstance(s, dict) and s.get("name") == name), {})
     reachable = st.get("reachable")
-    base = f"[MCP_ADDED] 已添加 '{name}'。下条消息生效（reset_agent_cache 已触发，原生 MCP 工具下轮装入工具箱）。"
+    base = f"[MCP_ADDED] 已添加 '{name}'。配置已落盘并清空 Agent 缓存，下条消息自动重建工具箱装入其原生 MCP 工具。"
     if reachable is True:
         tools_n = st.get("tools", 0) or 0
         return f"{base} 在线，装入 {tools_n} 个工具。"
     if reachable is False:
         return (
-            f"{base} 但握手失败（服务未启动/端口未监听/token 错）。"
-            f"启动后用 check_mcp_status 诊断，或下轮自动重试装入。"
+            f"{base} 但本次握手失败（服务未启动/端口未监听/token 错）。"
+            f"下条消息重建工具箱时若服务已就绪会自动装入；若届时仍未启动，"
+            f"启动后用 check_mcp_status 诊断（拉起成功后下条消息装入）。"
         )
     return base
 
@@ -180,7 +183,7 @@ def remove_mcp_server(name: str) -> str:
     res = save_mcp_servers(filtered)
     if not res.get("ok"):
         return f"[MCP_ERROR] 删除失败: {res.get('error', '未知错误')}"
-    return f"[MCP_REMOVED] 已删除 '{name}'。下条消息生效，对应原生 MCP 工具下轮不再装入。"
+    return f"[MCP_REMOVED] 已删除 '{name}'。配置已落盘并清空 Agent 缓存，下条消息生效，其原生 MCP 工具下轮不再装入。"
 
 
 @tool
@@ -209,4 +212,4 @@ def disable_mcp_server(name: str) -> str:
     res = save_mcp_servers(current)
     if not res.get("ok"):
         return f"[MCP_ERROR] 停用失败: {res.get('error', '未知错误')}"
-    return f"[MCP_DISABLED] 已停用 '{name}'。下条消息生效，其原生 MCP 工具下轮不再装入（配置保留，可恢复）。"
+    return f"[MCP_DISABLED] 已停用 '{name}'。配置已落盘并清空 Agent 缓存，下条消息生效，其原生 MCP 工具下轮不再装入（配置保留，可恢复）。"

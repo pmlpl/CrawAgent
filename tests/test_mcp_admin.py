@@ -68,7 +68,7 @@ def test_add_http_success(store):
         name="firecrawl", transport="streamable_http", url="http://127.0.0.1:23816/mcp"
     )
     assert "[MCP_ADDED]" in res
-    assert "下条消息生效" in res
+    assert "下条消息自动重建工具箱" in res
     assert len(store["servers"]) == 1
     assert store["servers"][0]["name"] == "firecrawl"
     assert store["servers"][0]["url"] == "http://127.0.0.1:23816/mcp"
