@@ -77,7 +77,7 @@ def test_add_http_success(store):
 
 def test_add_stdio_args_string_split_into_list(store):
     res = mcp_admin_tool.add_mcp_server.func(
-        name="srv", transport="stdio", command="/x/python", args="-m mcp_server_fetch --port 8000"
+        name="srv", transport="stdio", command="/x/python", exec_args="-m mcp_server_fetch --port 8000"
     )
     assert "[MCP_ADDED]" in res
     entry = store["servers"][0]

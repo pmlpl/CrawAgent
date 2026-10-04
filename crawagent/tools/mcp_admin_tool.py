@@ -91,7 +91,7 @@ def add_mcp_server(
     transport: str,
     url: str = "",
     command: str = "",
-    args: str = "",
+    exec_args: str = "",
     headers: str = "",
 ) -> str:
     """添加一个 MCP server 到配置（.env MCP_SERVERS），下轮生效。
@@ -104,7 +104,7 @@ def add_mcp_server(
         transport: "streamable_http" 或 "stdio"。
         url: http 型必填，http(s):// 开头。
         command: stdio 型必填，可执行文件的绝对路径。
-        args: stdio 可选，空格分隔的参数字符串（内部 split 成 list）。
+        exec_args: stdio 可选，空格分隔的参数字符串（内部 split 成 list）。
         headers: 可选，JSON 字符串，如 '{"Authorization":"Bearer xxx"}'。
     """
     from crawagent.web.routers.settings import save_mcp_servers
@@ -120,8 +120,8 @@ def add_mcp_server(
         if not cmd:
             return f"[MCP_ERROR] stdio server '{name}' 缺 command（可执行文件绝对路径）"
         entry["command"] = cmd
-        if args and args.strip():
-            entry["args"] = args.split()
+        if exec_args and exec_args.strip():
+            entry["args"] = exec_args.split()
     else:
         u = (url or "").strip()
         if not u.startswith(("http://", "https://")):
