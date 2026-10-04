@@ -98,10 +98,10 @@ def _maybe_auto_title(session_id: str, agent: Any, config: dict, fallback_text: 
     conn = get_meta_conn()
     try:
         existing = conn.execute(
-            "SELECT 1 FROM session_titles WHERE thread_id = ?", (session_id,)
+            "SELECT title FROM session_titles WHERE thread_id = ?", (session_id,)
         ).fetchone()
-        if existing:
-            return  # 已有标题，不覆盖
+        if existing and (existing[0] or "").strip():
+            return  # 已有真标题，不覆盖（空标题行 = 仅绑定了 work_dir，仍需命名）
     except Exception:
         return  # 表不存在等异常 → 不阻断
 
@@ -160,7 +160,8 @@ def _generate_title(session_id: str, user_text: str, ai_text: str) -> None:
         conn = get_meta_conn()
         conn.execute(
             "INSERT INTO session_titles (thread_id, title) VALUES (?, ?) "
-            "ON CONFLICT(thread_id) DO NOTHING",  # DO NOTHING：不覆盖在此期间可能的手动改名
+            "ON CONFLICT(thread_id) DO UPDATE SET title = excluded.title "
+            "WHERE session_titles.title = ''",  # 只补空标题行（work_dir 绑定先建出的空行）；真标题含期间手动改名不覆盖
             (session_id, title),
         )
         conn.commit()
