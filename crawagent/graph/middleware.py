@@ -558,3 +558,91 @@ def _try_llm_summarize(messages: list[BaseMessage], max_chars: int = 600) -> str
             f"[TRIM] 智能压缩失败（静默 fallback）: {e.__class__.__name__}: {str(e)[:80]}"
         )
         return None
+
+
+# ── 空最终回复兜底（变更 044）────────────────────────────────────────────
+# 现象：THINKING_DEPTH=high + 长上下文轮次，思考 token 吃光中转侧输出配额，
+# 正文零字符即被 finish_reason=length 截断——用户看到 AI 干完活却一言不发
+# （043 真机实测 2/2 的 10+ 工具长轮次命中，checkpoint 实锤）。
+
+
+def _is_empty_final_reply(msg) -> bool:
+    """「空最终回复」判定：AIMessage、无 tool_calls、正文空白。
+
+    reasoning_content 有内容也不算回复——用户看到的正文是空的。content 为
+    list（多模态）时取文本块拼接后判空。带 tool_calls 的是中间步，永不触发
+    （该形态也是 LangGraph 图循环的终结条件，二者天然一致，不会误伤中间步）。
+    """
+    if not isinstance(msg, AIMessage):
+        return False
+    if getattr(msg, "tool_calls", None):
+        return False
+    content = msg.content
+    if isinstance(content, list):
+        content = "".join(
+            b.get("text", "") if isinstance(b, dict) else str(b) for b in content
+        )
+    return not str(content or "").strip()
+
+
+class EmptyReplyRetryMiddleware(AgentMiddleware):
+    """模型哑火自动换路：空最终回复 → 原样重试一次 → 换 thinking-off 模型再试。
+
+    注册为 middleware 列表首位（langchain 约定 first in list = outermost），
+    handler 重跑会完整经过 trim/script_forcer 内层链。messages 不变 → 前缀
+    缓存无损。两级都空则原样返回空结果，由 turn_engine 轮末兜底提示（044 §3.3）。
+    换模型的安全性：factory 每轮 `request.model.bind(**request.model_settings)`
+    重新绑工具（langchain/agents/factory.py），override(model=) 行为等价。
+    """
+
+    def __init__(self):
+        self._retry_model = None  # thinking-off 实例惰性缓存（get_llm 每次新建）
+
+    def _thinking_off_model(self):
+        if self._retry_model is None:
+            from crawagent.llm.model import get_llm
+
+            self._retry_model = get_llm(thinking=False)
+        return self._retry_model
+
+    @staticmethod
+    def _empty(result) -> bool:
+        """从 handler 结果取最后一条消息判空；结构异常一律按非空处理（不干预）。"""
+        try:
+            msgs = result.result if hasattr(result, "result") else [result]
+            return _is_empty_final_reply(msgs[-1]) if msgs else False
+        except Exception:
+            return False
+
+    def wrap_model_call(self, request: ModelRequest, handler: Callable):
+        result = handler(request)  # 正常路径异常照常上抛（保持现状语义）
+        if not self._empty(result):
+            return result
+
+        # 一级：原样重试（瞬时抖动假设；messages 不变，前缀缓存无损）
+        print("[EMPTY_REPLY_RETRY] step=1 原样重试（空最终回复）", flush=True)
+        try:
+            retried = handler(request)
+        except Exception as e:
+            print(f"[EMPTY_REPLY_RETRY] step=1 重试失败回退原结果: {e!r}", flush=True)
+            return result
+        result = retried
+        if not self._empty(result):
+            return result
+
+        # 二级：换 thinking-off 模型（思考吃配额假设）
+        fr = ""
+        try:
+            meta = getattr(result.result[-1], "response_metadata", None) or {}
+            fr = str(meta.get("finish_reason", ""))
+        except Exception:
+            pass
+        print(
+            f"[EMPTY_REPLY_RETRY] step=2 换 thinking-off 模型重试 (finish_reason={fr})",
+            flush=True,
+        )
+        try:
+            return handler(request.override(model=self._thinking_off_model()))
+        except Exception as e:
+            print(f"[EMPTY_REPLY_RETRY] step=2 重试失败回退原结果: {e!r}", flush=True)
+            return result

@@ -108,9 +108,11 @@ _FAIL_PREFIXES = (
     "抓取失败",
 )
 
-# 认证墙开头特征：内容提取被登录拦截 = 无可用内容（AUTH/PAYWALL 阶梯的管辖，
-# 不算「抓取完成」）。只看开头 120 字符，避免误伤正文里顺带提到登录的页面。
-_AUTH_WALL_MARKERS = ("需要登录", "请先登录", "login required", "please sign in")
+# 认证/风控墙开头特征：内容提取被登录或验证码拦截 = 无可用内容（AUTH/PAYWALL
+# 阶梯的管辖，不算「抓取完成」）。只看开头 120 字符，避免误伤正文里顺带提到
+# 登录的页面。「验证码中间页」来自 browse_and_crawl 撞抖音风控页的真实输出
+# （2026-10-04 真机 R2 误报复核：被当抓取成功收尾）。
+_AUTH_WALL_MARKERS = ("需要登录", "请先登录", "login required", "please sign in", "验证码中间页")
 
 
 def is_failure(result: str) -> bool:

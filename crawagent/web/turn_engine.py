@@ -40,6 +40,32 @@ from crawagent.web.state import (
 from crawagent.storage.meta_store import get_meta_conn
 
 
+def _warn_if_empty_final(agent, config, emit) -> bool:
+    """graph 结束后检测空最终回复；命中则发人话提示并返回 True（变更 044）。
+
+    中间件 EmptyReplyRetryMiddleware 两级换路（原样重试 → thinking-off 模型）
+    都救不回来时，用户至少该知道发生了什么、成果没丢、怎么继续。只发 status
+    行：不改 done 语义、不写 session_error 红条、不合成假 AI 消息（伪造模型
+    输出会让下轮 agent 不知道自己"说过"什么）。
+    """
+    try:
+        from crawagent.graph.middleware import _is_empty_final_reply
+
+        fs = agent.get_state(config)
+        msgs = (fs.values or {}).get("messages", []) if fs else []
+        last_ai = next(
+            (m for m in reversed(msgs) if isinstance(m, AIMessage)), None
+        )
+        if _is_empty_final_reply(last_ai):
+            emit({"type": "status", "line": (
+                "⚠️ 模型本轮没有产出最终回复（思考占满输出预算被截断）。"
+                "本轮成果都在，回复「继续」我会重新总结。")})
+            return True
+    except Exception:
+        pass
+    return False
+
+
 _AUTO_TITLE_PROMPT = (
     "请根据以下爬虫任务的用户指令和 AI 回复，生成一个 4-8 个字的中文标题，"
     "概括任务的核心目标（如爬什么网站、爬什么数据）。\n"
@@ -461,6 +487,12 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                         break
             except Exception:
                 pass
+
+        # 044 兜底：中间件两级换路仍空时给人话提示，消灭「干完活却一言不发」的静默 done
+        try:
+            _warn_if_empty_final(agent, config, lambda ev: _emit(session_id, q, loop, ev))
+        except Exception:
+            pass
 
         _emit(session_id, q, loop, {"type": "status", "line": metrics.status_line()})
         clear_session_error(session_id)  # 本轮成功：清掉失败记录，刷新后不再恢复红条

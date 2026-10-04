@@ -27,7 +27,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from crawagent.config.settings import get_settings
 from crawagent.llm.model import get_llm
-from crawagent.graph.middleware import TrimHistoryMiddleware
+from crawagent.graph.middleware import EmptyReplyRetryMiddleware, TrimHistoryMiddleware
 from crawagent.tools.registry import build_all_tools, specs_to_prompt
 from crawagent.tools.progress import with_progress, LONG_RUNNING_TOOLS
 from crawagent.graph.script_forcer import ScriptForcerMiddleware
@@ -138,12 +138,16 @@ def get_agent(checkpointer: BaseCheckpointSaver | None = None, model: str | None
         max_total_calls=30, max_consecutive_same=5,
     )
 
+    # 空最终回复兜底（044）：列表首位 = outermost，重试时 handler 完整重跑
+    # trim/script_forcer 内层链；messages 不变 → 前缀缓存无损
+    empty_reply_retry = EmptyReplyRetryMiddleware()
+
     agent = create_agent(
         model=llm,
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
         checkpointer=checkpointer,
-        middleware=[trim_middleware, script_forcer],
+        middleware=[empty_reply_retry, trim_middleware, script_forcer],
     )
 
     # 暴露 script_forcer 供 server.py 在每轮开始时重置状态
