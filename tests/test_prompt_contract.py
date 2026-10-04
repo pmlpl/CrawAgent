@@ -64,6 +64,15 @@ def test_hard_rules_present():
     assert not gone, f"system.md 缺硬规则标记: {gone}"
 
 
+def test_no_stale_spa_contradiction():
+    """045 回归锁：两处远古 SPA 残留（L56/L222）禁止回潮，既定「脚本优先」学说必须仍在。"""
+    text = _system_md()
+    assert "switch to browse_and_crawl" not in text            # L222 残留
+    assert "single JS/SPA page → browse_and_crawl" not in text  # L56 残留
+    # 既定学说必须仍在（防反向回潮）
+    assert "must NOT be browse_and_crawl" in text              # L67 硬规则原文
+
+
 def test_tool_doc_no_prereq_hint():
     """工具描述禁写依赖提示（013：写了 Agent 就预判拒绝不调工具）。"""
     bad = re.compile(

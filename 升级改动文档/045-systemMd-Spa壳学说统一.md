@@ -4,7 +4,7 @@
 |------|------|
 | 变更编号 | 045 |
 | 提出日期 | 2026-10-04 |
-| 状态 | 待实施 |
+| 状态 | 已完成（2026-10-04） |
 | 类型 | bug修复 / 评测治理 |
 | 关联模块 | `crawagent/prompts/system.md`（2 行矛盾文本清理）、`tests/test_prompt_contract.py`（回归锁） |
 
@@ -98,3 +98,34 @@ def test_no_stale_spa_contradiction():
 system.md 两行 → 契约回归锁 → 全量 pytest → 评测两跑 → **交实施会话执行（主会话按新分工不亲自实施）** → 独立验收。
 
 ---
+
+## 八、实施记录（2026-10-04）
+
+### 怎么做到的（人话版）
+
+system.md 里关于「抓到 SPA 空壳怎么办」其实一直有两套说法打架：一套是硬规则（说空壳算失败、禁止换浏览器、直接上脚本），另一套散落在别处说「单页 SPA / JS 页 / 拿到壳就换浏览器」。模型读到矛盾契约时按哪套走全看当轮采样——03 号评测用例（SPA 壳任务）就这样连续两场 FAIL。这次把三处远古残留统一到既定的「脚本优先」学说：工具选择导引改成「单页一律先 crawl_webpage，拿到壳就走脚本、别碰浏览器」；详情页流程把「JS 渲染页」从浏览器降级的触发条件里摘出来、明确指回脚本规则（普通的抓取失败换浏览器兜底保留）；反 API 瞎猜规则里顺带的误导改成「直奔脚本」。再加一条契约测试：三处残留短语不得回潮、既定硬规则不得被删。
+
+### 实际改动
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 修改 | `crawagent/prompts/system.md` | 三处 SPA 残留统一到「脚本优先」学说（规格 §3.1/§3.2 两处 + 实施期实锤的第三处 L179，见说明 #1） |
+| 修改 | `tests/test_prompt_contract.py` | 新增 `test_no_stale_spa_contradiction` 回归锁（§3.3 断言原文照抄；helper 名适配现有 `_system_md()`） |
+
+### 验证结果（对照 §五）
+
+1. **契约测试**：`uv run pytest tests/test_prompt_contract.py -q` **4/4 全绿**。新回归锁经历「先红后绿」——锚定 L179 残留时红、清后转绿，锁真的在咬。全量 pytest **834 全绿**（833→834，+1 为新回归锁）。
+2. **评测两跑**（glm-5.2，JSON 留存 `eval_045_run1.json` / `eval_045_run2.json` / `eval_045_04_retry.json`）：
+   - run1 **17/20 (85.0%)**：03 PASS、04 PASS、05 PASS；FAIL = 15/18/20。
+   - run2 **17/20 (85.0%)**：03 PASS、05 PASS；FAIL = 04（超时）/15/18。
+   - **03 号两连 PASS**——规格核心目标达成（044 期连续两场 FAIL → 改后两场全 PASS，流水均为脚本先行：run2 为 `crawl_webpage → run_custom_script → extract_content` 教科书式）；总分两跑均 ≥16 达标。
+   - 04 号 run2 超时 FAIL：流水 `crawl_webpage → browse_and_crawl → run_custom_script → 脚本×4`——2 败后走脚本方向正确，但连打 4 次脚本烧光 180s（与 041 挂账「桩输出不满意模型连打脚本」同族方差；045 未动 04 号相关文本）。**补跑单例 PASS**（22.4s，干净流水）——三跑两 PASS，判定非学说回归、采样方差。
+   - 15/18 两跑 FAIL：041 已挂账间歇家族（判据是 run_custom_script/save_site_profile 调用次数，与 SPA 学说无涉）；20 号 run1 FAIL / run2 PASS 间歇。随本批观察不承诺修（与 §六 一致）。
+3. **真机观察（可选）**：未做，留指挥官。
+
+### 说明
+
+1. **与规格的偏差——L179 第三处同族残留一并统一**：规格 §四 只列 L56/L222 两处，但 §3.3 回归锁的锚 `"switch to browse_and_crawl" not in text` 实施时红了第三处——**L179（DETAIL-page workflow 第 2 步「Incomplete result / JS-rendered page / failure → switch to browse_and_crawl」）经 git blame 实锤与 L56/L222 同为 57f919f（2026-09-05 插件化重构）引入的远古残留**，且正是 03 号实测失败路径（单页内容任务拿壳→换浏览器）的直接行为引导。按「§3.3 原文照抄」的交接要求与 §〇「契约只剩一套学说」的价值声明一并统一：JS 渲染/SPA 壳场景显式指回脚本规则；普通 failure 降级保留为「re-fetch with browse_and_crawl」（与 L172 句式一致，不伤 041 SELF-HEAL LADDER / SUPERVISOR 的浏览器兜底条款）。
+2. 回归锁 helper 名：规格伪代码写 `_read_system_md()`，落地适配该文件现有 helper `_system_md()`，断言三行原文照抄。
+3. **评测实施事故**：第一次启动的评测跑因启动命令挂了 `| tail -40` 导致 stdout 明细截断（仅存总分 14/20 与 19/20 号 PASS，FAIL 集合不可归因），作废后带 `--out` 重跑为正式 run1——多花一轮 LLM 费用。教训：评测启动命令禁止 tail 截断，明细以 `--out` JSON 为准。
+4. system.md 是构建期读盘：评测为进程内直驱新起进程、现读改动即时生效；跑着的 8006 主服务须重启后才吃到新契约（未重启，留指挥官）。
