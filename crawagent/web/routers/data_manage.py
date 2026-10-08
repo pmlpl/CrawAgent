@@ -39,6 +39,10 @@ _CHUNK_CHARS = 30000
 _MAX_TOTAL_CHARS = 180000
 _MAX_CHUNKS = 6
 
+# 046 蒸馏活跃态守卫：最近有对话的会话拒绝蒸馏——防 archive_session_folder
+# 移走活文件夹破坏后续轮末写 conversation.md。
+_DISTILL_ACTIVE_SECS = 24 * 3600
+
 _DISTILL_SYSTEM = (
     "你是知识归档员。把一个爬虫会话留下的档案/记忆笔记蒸馏成可长期检索的"
     "知识条目。只输出 JSON，不要任何解释文字。"
@@ -157,7 +161,18 @@ def _distill_and_archive(sid: str) -> dict:
     if not folder.is_dir():
         return {"ok": False, "error": "会话文件夹不存在（可能已归档或从未写入）"}
 
-    md_files = sf.folder_md_texts(folder)
+    # 046 蒸馏活跃态守卫：最近有对话的会话拒绝蒸馏——防 archive_session_folder
+    # 移走活文件夹破坏后续轮末写 conversation.md。判据用 conversation.md mtime
+    # （每轮写，最准）；无 conversation.md 时退回 folder mtime 兜底。
+    last = sf.conversation_md_last_active(sid) or sf.folder_last_active(folder)
+    if last and (time.time() - last) < _DISTILL_ACTIVE_SECS:
+        return {"ok": False, "error": "会话仍活跃（24 小时内有对话），归档请先等其冷却。"}
+
+    # 046 蒸馏输入集排除 conversation.md（原始轮次日志非 curated 快照，不进蒸馏）
+    md_files = [
+        (rel, text) for rel, text in sf.folder_md_texts(folder)
+        if rel != sf.CONVERSATION_MD_NAME
+    ]
     if not md_files:
         return {"ok": False, "error": "文件夹内没有可提炼的 md 文件，已保持原样。"}
 

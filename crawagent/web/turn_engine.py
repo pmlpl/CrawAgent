@@ -206,6 +206,62 @@ def _fallback_title(user_text: str) -> str:
     return lines[0].lstrip("#>-*· ").strip()[:16]
 
 
+def _write_turn_snapshot(
+    session_id: str, agent: Any, config: dict, user_text: str,
+    prev_msg_ids: set[str], turn_no: int,
+) -> None:
+    """046 轮末把本轮新增 messages 追加到 conversation.md（人可读主盘）。
+
+    从 final_state.messages 里按 prev_msg_ids 过滤出本轮新增，提取工具调用
+    （name/args/result 按 tool_call_id 配对）与最终 AI 回复，交 session_folder
+    .write_turn_snapshot 落盘。失败由调用方独立 try/except 兜底；文件夹不
+    存在 write_turn_snapshot 静默 skip 不抛。
+    """
+    from crawagent.tools.session_folder import write_turn_snapshot
+
+    try:
+        fs = agent.get_state(config)
+        new_msgs = [
+            m for m in (fs.values or {}).get("messages", [])
+            if m.id and m.id not in prev_msg_ids
+        ] if fs else []
+    except Exception:
+        new_msgs = []
+
+    # 工具调用：AIMessage.tool_calls 提 name/args，ToolMessage 按 id 配对 result
+    tc_name: dict[str, str] = {}
+    tc_args: dict[str, str] = {}
+    for m in new_msgs:
+        if isinstance(m, AIMessage):
+            for tc in m.tool_calls or []:
+                tc_name[tc["id"]] = tc["name"]
+                tc_args[tc["id"]] = json.dumps(tc.get("args", {}), ensure_ascii=False)
+    tool_results: dict[str, str] = {}
+    for m in new_msgs:
+        if isinstance(m, ToolMessage):
+            c = m.content if isinstance(m.content, str) else str(m.content)
+            tool_results[m.tool_call_id] = c
+    tool_calls = [
+        {"name": tc_name.get(tid, "?"), "args": tc_args.get(tid, ""), "result": tool_results.get(tid, "")}
+        for tid in tc_name
+    ]
+
+    # 最终 AI 回复：最后一条无 tool_calls 的 AIMessage
+    ai_text = ""
+    for m in reversed(new_msgs):
+        if isinstance(m, AIMessage) and not m.tool_calls:
+            c = m.content if isinstance(m.content, str) else str(m.content)
+            ai_text = c
+            break
+
+    write_turn_snapshot(session_id, {
+        "turn_no": turn_no,
+        "user_text": user_text,
+        "tool_calls": tool_calls,
+        "ai_text": ai_text,
+    })
+
+
 def _emit(session_id: str, q: asyncio.Queue, loop: asyncio.AbstractEventLoop, event: dict[str, Any]) -> None:
     """worker（线程）记录一条轮次事件并唤醒订阅者（线程安全）。
 
@@ -292,6 +348,8 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
                 shown_ids.add(m.id)
     except Exception:
         pass
+    # 046 轮末写盘基线：本轮新增 = 轮末 final_state.messages 减去此基线
+    prev_msg_ids: set[str] = set(shown_ids)
 
     seen_llm_ids: set[str] = set()
     ended_llm_ids: set[str] = set()  # 已通过 token_usage 结算过的 AIMessage.id
@@ -497,6 +555,12 @@ def _run_turn(session_id: str, text: str, q: asyncio.Queue, loop: asyncio.Abstra
         _emit(session_id, q, loop, {"type": "status", "line": metrics.status_line()})
         clear_session_error(session_id)  # 本轮成功：清掉失败记录，刷新后不再恢复红条
         _emit(session_id, q, loop, {"type": "done"})
+        # 046 落盘 conversation.md（独立 try/except，不进外层 except——
+        # 写盘失败不阻断主流程、不再发 error 事件，文件夹不存在静默 skip）
+        try:
+            _write_turn_snapshot(session_id, agent, config, text, prev_msg_ids, metrics.turn_count)
+        except Exception:
+            pass
         # 落盘 metrics：server 重启后状态栏能恢复上次数据
         save_metrics(session_id, metrics)
 

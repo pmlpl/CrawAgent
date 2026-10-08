@@ -211,6 +211,13 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
     await ws.accept()
     stream_task: asyncio.Task | None = None
 
+    # 046 会话创建即建文件夹（idempotent，重连/重复调安全；失败不阻断连接）
+    try:
+        from crawagent.tools.session_folder import init_conversation_md
+        await asyncio.to_thread(init_conversation_md, session_id)
+    except Exception:
+        pass
+
     # 重连：如果有正在运行的任务且未被取消，恢复订阅
     if session_id in _active_turns:
         active = _active_turns[session_id]

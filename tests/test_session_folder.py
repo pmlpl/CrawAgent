@@ -258,8 +258,12 @@ class _FakeLLM:
 
 
 @pytest.fixture()
-def dm():
+def dm(monkeypatch):
     import crawagent.web.routers.data_manage as dm
+    # 046 蒸馏活跃态守卫：039 测试只测蒸馏逻辑（入库/失败/空夹），
+    # 守卫有专门测试（test_session_folder_primary.py）。阈值设 0 让守卫放行，
+    # 避免「刚写的测试文件夹 mtime=now 被守卫拒绝」的交叉影响。
+    monkeypatch.setattr(dm, "_DISTILL_ACTIVE_SECS", 0)
     return dm
 
 
