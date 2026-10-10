@@ -184,6 +184,11 @@ _TOOL_META: dict[str, dict[str, Any]] = {
     "frida_hook_function":     {"category": "android", "deps": ["subprocess"]},
     "frida_dump_so":           {"category": "android", "deps": ["subprocess"]},
     "frida_bypass_ssl_pinning":{"category": "android", "deps": ["subprocess"]},
+    # ---- PC 逆向（Windows 桌面应用 frida hook，047）----
+    "list_windows_processes":  {"category": "pc_reverse", "deps": ["subprocess"]},
+    "frida_hook_pc_function": {"category": "pc_reverse", "deps": ["subprocess"]},
+    "frida_dump_dll":          {"category": "pc_reverse", "deps": ["subprocess"]},
+    "frida_bypass_pc_ssl":     {"category": "pc_reverse", "deps": ["subprocess"]},
 }
 
 # 内部模块黑名单：这些模块里的 BaseTool 不应该被 discover_tools 收集
@@ -547,6 +552,7 @@ def specs_to_prompt(specs: list[ToolSpec] | None = None, group_by_category: bool
             "eco": "🔌 Ecosystem",
             "advanced": "🚀 Advanced",
             "android": "📱 Android",
+            "pc_reverse": "🖥️ PC Reverse",
             "general": "General",
         }
         for cat, items in by_cat.items():

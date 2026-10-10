@@ -424,3 +424,29 @@ def frida_bypass_ssl_pinning(device_id: str, package_name: str, timeout: int = 3
     if has_error and bypass_count == 0:
         return header + "[PINNING_FAIL] 绕过失败，检查 frida-server 是否运行 / App 是否用自定义校验\n" + _truncate(out)
     return header + f"[PINNING_OK] 已注入 bypass 脚本（{bypass_count} 处绕过点命中）\n" + _truncate(out)
+
+
+# ---------------------------------------------------------------------------
+# 辅助函数公开导出契约（047）：pc_reverse_tool 从这里 import 复用，
+# 不复制粘贴。__all__ 是显式契约，避免意外暴露内部细节。
+# ---------------------------------------------------------------------------
+__all__ = [
+    # 辅助函数
+    "_check_binary",
+    "_run_frida",
+    "_run_adb",
+    "_ssl_pinning_js_path",
+    "_truncate",
+    "_rel_path",
+    "_settings_binary_override",
+    "_common_location_binary",
+    # 工具实例
+    "list_adb_devices",
+    "install_apk",
+    "push_file",
+    "frida_hook_function",
+    "frida_dump_so",
+    "frida_bypass_ssl_pinning",
+    # 模板常量（pc_reverse_tool 复用 _DUMP_SO_JS_TEMPLATE）
+    "_DUMP_SO_JS_TEMPLATE",
+]
