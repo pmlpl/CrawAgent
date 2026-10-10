@@ -8,7 +8,7 @@
 
 </div>
 
-基于 LangChain + LangGraph，内置 **43 个爬虫工具**、6 个攻略技能、浏览器渲染、MCP 协议扩展（fetch / playwright / 抓包分析）、第三方插件规范（plugins/）、分布式任务队列与 Android 逆向能力，支持会话持久化。
+基于 LangChain + LangGraph，内置 **48 个爬虫工具**、6 个攻略技能、浏览器渲染、MCP 协议扩展（fetch / playwright / 抓包分析）、第三方插件规范（plugins/）、分布式任务队列，以及 Android / PC 逆向能力，支持会话持久化。
 
 ## 快速开始
 
@@ -60,7 +60,7 @@ uv run crawagent start
 # → http://127.0.0.1:8006
 ```
 
-启动时自动检测 / 下载 / 拉起嵌入 Redis（分布式模式启用时）。**不会自动弹浏览器**——在 WebUI 内手动打开，或直接访问 `http://127.0.0.1:8006`。
+启动时自动检测 / 下载 / 拉起嵌入 Redis（分布式模式启用时）。默认会尝试打开浏览器（`CRAWAGENT_NO_OPEN=1` 可禁止；绑定 `CRAWAGENT_HOST=0.0.0.0` 时视为服务端部署，不弹）——也可直接在浏览器访问 `http://127.0.0.1:8006`。
 
 环境变量可调：`CRAWAGENT_PORT`（端口，默认 8006）、`CRAWAGENT_HOST=0.0.0.0`（局域网监听，不弹浏览器）、`CRAWAGENT_NO_OPEN=1`（禁止弹浏览器）。
 
@@ -78,7 +78,7 @@ cd web && npm run dev
 
 | 能力域 | 说明 |
 |------|------|
-| 自主工具循环 | 43 个内置工具，LLM 自主决策调用；多数对话零工具调用 |
+| 自主工具循环 | 48 个内置工具，LLM 自主决策调用；多数对话零工具调用 |
 | 置信度自动升级 | 提取结果 <60 分自动切 Playwright 浏览器重抓（零 LLM 成本） |
 | 兜底武器 | `run_custom_script`：Agent 现场写 Python 脚本，专治内置工具搞不定的站 |
 | 站点档案 | 首次成功后保存策略/脚本/Cookie，同站复用跳过分析 |
@@ -93,7 +93,7 @@ cd web && npm run dev
 
 ## 工具列表
 
-Agent 默认装配 **43 个内置工具**（+ 1 个示例插件工具 `fetch_rss_feed`）。完整清单与用法见 [wiki/03-工具与技能总览.md](wiki/03-工具与技能总览.md)。
+Agent 默认装配 **48 个内置工具**（+ 1 个示例插件工具 `fetch_rss_feed`，合计 49）。完整清单与用法见 [wiki/03-工具与技能总览.md](wiki/03-工具与技能总览.md)。
 
 ### 基础爬取与提取
 
@@ -126,6 +126,18 @@ Agent 默认装配 **43 个内置工具**（+ 1 个示例插件工具 `fetch_rss
 ### Android 逆向（6）
 
 `list_adb_devices` · `install_apk` · `push_file` · `frida_hook_function` · `frida_dump_so` · `frida_bypass_ssl_pinning`
+
+### PC 逆向（Windows 桌面应用，4）
+
+`list_windows_processes` · `frida_hook_pc_function` · `frida_dump_dll` · `frida_bypass_pc_ssl`
+
+### 代理池（5）
+
+`add_proxy` · `remove_proxy` · `mark_proxy_failed` · `get_proxy` · `list_proxies`
+
+### 模拟登录（2）
+
+`login_site` · `check_login_status`
 
 ### 辅助
 
@@ -168,9 +180,9 @@ crawagent/
 ├── config/settings.py          # pydantic-settings，.env 加载
 ├── dist/                        # 分布式：redis_client/redis_server/queue/pubsub/worker/runner/cli
 ├── graph/
-│   ├── agent.py                 # LangGraph StateGraph + SYSTEM_PROMPT 构建
-│   ├── skills.py                # Skill 插件加载 + MCP 自动启动
-│   ├── middleware.py            # 历史消息裁剪（半水位淘汰，不污染持久态）
+│   ├── agent.py                 # LangChain create_agent + SYSTEM_PROMPT 构建
+│   ├── skills.py                # Skill（SKILL.md）加载 + 索引注入
+│   ├── middleware.py            # TrimHistory + EmptyReplyRetry 中间件
 │   ├── script_forcer.py         # 工具失败 → 自动切换脚本兜底
 │   └── subagents/
 │       └── video_finder.py      # 视频站点子 Agent
@@ -178,7 +190,7 @@ crawagent/
 ├── observability/metrics.py     # Token 统计、缓存命中追踪
 ├── prompts/                     # system.md + infinite-gen-2.md（导入时拼接）
 ├── storage/                     # checkpointer 工厂 + meta_store + checkpoint_view
-├── tools/                       # 43 个 @tool 工具 + _template/ 插件脚手架
+├── tools/                       # 48 个 @tool 工具 + _template/ 插件脚手架
 │   ├── crawl/browse/extract/list_extract/save/query/file
 │   ├── social/wallpaper/weread/site_profile
 │   ├── proxy/login/android_reverse/advanced
@@ -197,7 +209,7 @@ crawagent/
 ```
 User Input → FastAPI (/api/sessions)
            → get_agent() (LangGraph compiled)
-           → SYSTEM_PROMPT + LLM + 43 工具
+           → SYSTEM_PROMPT + LLM + 48 工具
            → checkpointer (SqliteSaver / RedisSaver) 持久化会话
            → Response → 前端
 ```

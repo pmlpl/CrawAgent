@@ -32,6 +32,12 @@ _Avoid_: 与 **ZCode 工作流技能**（grill/implement/tdd，在 `~/.agents/`�
 `plugins/` 下带 `plugin.json` manifest 的目录，可同时携带 `tools/*.py`（自动扫描的 @tool）和 `skills/`（CrawAgent skill）。靠文件系统发现，启动期扫描。
 _Avoid_: 与 MCP server 混——插件是本地代码包，MCP server 是协议端点。
 
+### 逆向与抓包
+
+**Android 逆向 / PC 逆向**:
+用 Frida hook 定位 App / Windows 桌面应用的加密点（变更 047 补齐 PC 侧）。Android 侧 6 工具：`list_adb_devices` / `install_apk` / `push_file` / `frida_hook_function` / `frida_dump_so` / `frida_bypass_ssl_pinning`；PC 侧 4 工具：`list_windows_processes` / `frida_hook_pc_function` / `frida_dump_dll` / `frida_bypass_pc_ssl`。绕过 SSL pinning 后接 MCP 抓包链路还原明文通信。
+_Avoid_: 与 **MCP 抓包分析**混——逆向负责定位/绕过加密，抓包链路负责还原明文；也勿与浏览器的"渲染抓取"（browse_and_crawl）混。
+
 ### 会话与产物
 
 **工作文件夹 (work_dir)**:

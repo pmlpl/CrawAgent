@@ -60,4 +60,4 @@
 
 ## 版本
 
-当前 Wiki 版本：**v2026.09**（对应 CrawAgent 分布式 + Android 逆向补齐版本）
+当前 Wiki 版本：**v2026.10**（对应 CrawAgent 分布式 + Android/PC 逆向 + 会话存储主盘化版本）
