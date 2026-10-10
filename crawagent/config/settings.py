@@ -54,12 +54,11 @@ class Settings(BaseSettings):
 
     # ---- 模型层（变量名与 .env 一致） ----
     openai_api_key: str = ""
-    openai_base_url: str = "https://api.deepseek.com/v1"
-    default_model: str = "deepseek-v4-flash"
+    openai_base_url: str = ""
+    default_model: str = ""
     # 可选的多模型列表，逗号分隔；为空时前端会回退到 default_model
     models: str = ""
-    # 思考深度：off / low / medium / high / max（max→API 传 xhigh；off 不传 reasoning_effort）
-    # 映射为 reasoning_effort 参数传给 LLM（DeepSeek 官方合法值：none / low / medium / high / xhigh）
+    # 思考深度：off / low / medium / high / max（各 adapter 值域映射见 llm/model.py）
     # off 时不传 reasoning_effort，模型按默认行为执行
     thinking_depth: str = "off"
     # crawagent start 自动弹窗用的浏览器："" = 系统默认；chrome / msedge / firefox
@@ -69,11 +68,11 @@ class Settings(BaseSettings):
     # {"name": 服务商名, "base_url": 接口地址, "api_key": 密钥, "models": [模型 ID...]}
     # 为空时回退到上面的旧全局 openai_* 配置
     llm_providers: str = ""
-    # 视频子 Agent 专用模型：与主 Agent 分开 → DeepSeek 缓存按"账号+模型"隔离，
+    # 视频子 Agent 专用模型：与主 Agent 分开 → 服务端缓存按"账号+模型"隔离，
     # 子代理大量调用不会把主 agent 的历史前缀从服务端 LRU 缓存中挤掉。
     # 红线：不要与主 Agent 当前模型相同（同模型 = 同缓存池，命中率会被挤到 50%）。
     # 子代理未来若需识图，改成视觉模型即可（只要仍与主 Agent 模型不同就保持隔离）。
-    video_finder_model: str = "deepseek-v4-flash"
+    video_finder_model: str = ""
 
     # ---- 爬虫工具层 ----
     request_timeout: int = 30

@@ -131,14 +131,6 @@ Agent 默认装配 **48 个内置工具**（+ 1 个示例插件工具 `fetch_rss
 
 `list_windows_processes` · `frida_hook_pc_function` · `frida_dump_dll` · `frida_bypass_pc_ssl`
 
-### 代理池（5）
-
-`add_proxy` · `remove_proxy` · `mark_proxy_failed` · `get_proxy` · `list_proxies`
-
-### 模拟登录（2）
-
-`login_site` · `check_login_status`
-
 ### 辅助
 
 `run_custom_script` · `video_site_expert` · `ask_user` · `recommend_scripts` · `read_skill`

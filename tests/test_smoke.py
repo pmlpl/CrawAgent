@@ -11,8 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def test_settings_load():
     from crawagent.config.settings import get_settings
     s = get_settings()
-    assert s.openai_base_url.startswith("http")
-    assert s.default_model
+    # 模型配置默认空（不预设任何服务商）；用户通过 .env 或 Web 设置页自行配置
+    assert isinstance(s.openai_base_url, str)
+    assert isinstance(s.default_model, str)
 
 
 def test_agent_builds():
