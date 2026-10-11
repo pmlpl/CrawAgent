@@ -7,7 +7,7 @@
   4. SSL bypass 脚本存在性 + 段标记
   5. 错误提示串（frida 未安装 / 进程不存在）
   6. 输出截断
-  7. system.md 一致性（工具条目数 = 49；PC Workflow 段含 Step 0-3）
+  7. system.md 一致性（工具条目数 = 51；PC Workflow 段含 Step 0-3）
 """
 import sys
 from pathlib import Path
@@ -322,13 +322,13 @@ def test_bypass_pc_ssl_script_missing(monkeypatch):
 # ---- system.md 一致性 ----
 
 def test_system_md_tool_count_49():
-    """system.md 工具清单应有 49 条（1-49）。"""
+    """system.md 工具清单应有 51 条（1-51，049 VIP 解析 +2）。"""
     p = Path(__file__).resolve().parents[1] / "crawagent" / "prompts" / "system.md"
     content = p.read_text(encoding="utf-8")
-    # 统计 "数字. 工具名(" 模式（工具清单条目）
+    # 统计 "数字. 工具名(" 模式（工具清单条目；工具名可含数字如 crawl4ai）
     import re
-    entries = re.findall(r"^\d+\.\s+\w+\(", content, re.MULTILINE)
-    assert len(entries) == 49, f"工具条目数应为 49，实际 {len(entries)}"
+    entries = re.findall(r"^\d+\.\s+[a-z0-9_]+\(", content, re.MULTILINE)
+    assert len(entries) == 51, f"工具条目数应为 51，实际 {len(entries)}"
 
 
 def test_system_md_pc_workflow_steps():
@@ -340,5 +340,5 @@ def test_system_md_pc_workflow_steps():
     assert "Step 1 — 定位加密函数" in content
     assert "Step 2 — 绕过证书锁定" in content
     assert "Step 3 — dump DLL" in content
-    # 工具总数行应更新为 49
-    assert "49 powerful tools" in content
+    # 工具总数行应更新为 51
+    assert "51 powerful tools" in content

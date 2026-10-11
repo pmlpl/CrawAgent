@@ -189,6 +189,9 @@ _TOOL_META: dict[str, dict[str, Any]] = {
     "frida_hook_pc_function": {"category": "pc_reverse", "deps": ["subprocess"]},
     "frida_dump_dll":          {"category": "pc_reverse", "deps": ["subprocess"]},
     "frida_bypass_pc_ssl":     {"category": "pc_reverse", "deps": ["subprocess"]},
+    # ---- VIP 视频解析（第三方解析接口调度，049）----
+    "parse_vip_video":     {"category": "vip", "deps": ["requests"]},
+    "list_vip_platforms":  {"category": "vip", "deps": ["requests"]},
 }
 
 # 内部模块黑名单：这些模块里的 BaseTool 不应该被 discover_tools 收集
@@ -553,6 +556,7 @@ def specs_to_prompt(specs: list[ToolSpec] | None = None, group_by_category: bool
             "advanced": "🚀 Advanced",
             "android": "📱 Android",
             "pc_reverse": "🖥️ PC Reverse",
+            "vip": "🎬 VIP 解析",
             "general": "General",
         }
         for cat, items in by_cat.items():
