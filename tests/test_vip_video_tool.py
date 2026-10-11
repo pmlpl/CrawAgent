@@ -272,10 +272,16 @@ def test_system_md_consistency():
     nums = [int(m.group(1)) for m in re.finditer(r"^(\d+)\. [a-z0-9_]+\(", md, re.M)]
     assert nums == list(range(1, 52)), f"工具条目应为 1-51 连续编号，实际 {nums}"
     assert "You have 51 powerful tools" in md
-    # VIP Workflow 段存在且含 Step 0-2
+    # VIP Workflow 段存在且含 Step 0-3 + 混合使用硬规则
     assert "VIP 视频解析 Workflow" in md
-    for step in ("Step 0", "Step 1", "Step 2"):
+    for step in ("Step 0", "Step 1", "Step 2", "Step 3"):
         assert step in md
+    # 混合使用契约：禁爬平台原始页 + 浏览器验证 + 失败兜底阶梯
+    assert "禁止用 browser_use_navigate / browse_webpage 直接爬视频平台原始页面" in md
+    assert "浏览器验证" in md and "currentTime" in md
+    assert "失败兜底阶梯" in md
+    # Workflow 步骤与缓存排序语义一致（非"串行首个成功"）
+    assert "按成功率缓存排序" in md
     # registry 类别标签
     from crawagent.tools.registry import discover_tools
     import crawagent.tools.registry as reg

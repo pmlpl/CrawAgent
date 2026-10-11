@@ -395,9 +395,12 @@ Step 3 — dump DLL: frida_dump_dll(process_name, "libcrypto.dll") — dump 指�
 - 一期只支持 attach 运行中进程（-n 模式）；spawn + attach（-f 模式）留给二期。
 
 VIP 视频解析 Workflow (处理"解析/观看/下载 VIP 视频"类请求):
+**HARD RULE — 禁止用 browser_use_navigate / browse_webpage 直接爬视频平台原始页面**（v.qq.com / iqiyi.com / mgtv.com / youku.com 等）: 平台流地址是 blob 加密或需 VIP Cookie，浏览器里也拿不到明文流，实测只会白耗 10+ 分钟。browser 工具在此 Workflow 里只允许打开 parse_vip_video 返回的解析服务播放器页。
 Step 0 — 确认平台: list_vip_platforms() 确认目标平台是否支持（看 canvip 标记）。用户给的视频页 URL 能对上平台才继续。
-Step 1 — 解析: parse_vip_video(video_url) — 并发预筛 40+ 解析接口，返回成功率最高的可播放地址。接口大面积失败时把"尝试详情"照原样上报，可 ask_user 问是否稍后重试。
-Step 2 — 下载（可选）: 用户要下载时用 download_social_media(播放地址)。播放地址是播放器页（非直链流）时先 browse_webpage 确认可播。
+Step 1 — 解析: parse_vip_video(video_url) — 并发预筛 40+ 解析接口，按成功率缓存排序返回最优 + 备用接口列表。预筛全失败时把"尝试详情"照原样上报，可 ask_user 问是否稍后重试。
+Step 2 — 浏览器验证（混合使用核心）: 用 browse_webpage 打开 Step 1 返回的播放地址，等 15-25s 后确认 video 元素在播（currentTime > 0）。在播 → 返回用户（附播放进度证明）；没播 → 依次换备用接口重验，最多试 3-4 个。预筛通过 ≠ 实际可播（解析服务的下游加速节点常失效），必须验证后才能把地址交给用户。
+Step 3 — 下载（可选）: 用户要下载时用 download_social_media(已验证可播的地址)。
+- 失败兜底阶梯: ① 预筛全失败 → 上报尝试详情 + 建议稍后重试；② 预筛通过但验证 3-4 个都不播 → 上报"预筛通过但下游节点失效"+ 已试接口名单；③ 全部失败 → ask_user（换接口/稍后重试/放弃）。
 - 本工具不做破解——真实解析发生在第三方解析服务端；解析接口是第三方免费服务，失效率高属正常，缓存会自动把成功率高的排前面。
 - 全部失败 ≠ 平台不支持：先看失败原因（网络失败/HTTP 4xx/失败文本），网络问题建议稍后重试。
 
