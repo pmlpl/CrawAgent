@@ -27,6 +27,7 @@ uv run pytest tests/ -q              # 后端全量测试
 cd web && npm test && npm run build  # 前端测试与构建（改动必须 build，否则误判"没实现"）
 uv run crawagent start               # 启动（改了 Python 必须重启）
 uv run python -m crawagent.web.server  # 临时冒烟用这个（静态托管在 main() 里，直接起 uvicorn app 会 404 /assets）；配 CRAWAGENT_HOST=0.0.0.0 避免弹浏览器
+powershell -File scripts/start_chrome_cdp.ps1  # 拉起专用自动化 Chrome（CDP 9333 + 独立配置目录，browser-harness 经 BU_CDP_URL 直连，无"允许远程调试"弹窗）；agent 碰到 browser 工具报 BU_CDP_URL unreachable 时先跑这个
 ```
 
 ## 架构边界与层级规则
